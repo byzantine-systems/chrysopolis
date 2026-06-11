@@ -1,0 +1,32 @@
+# CI pipeline: formatting, compilation safety, image packaging
+# and a headless QEMU boot of the synthesized system image.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: wimpysworld/nothing-but-nix@main
+        with:
+          hatchet-protocol: 'rampage'
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Check formatting (treefmt)
+        run: nix build .#checks.x86_64-linux.treefmt --print-build-logs
+
+      - name: Build seL4 system image
+        run: nix build --print-build-logs
+
+      - name: Build Gleam application and romfs
+        run: nix build .#app .#romfs --no-link --print-build-logs
+
+      - name: Boot smoke test (hermetic QEMU check)
+        run: nix build .#checks.x86_64-linux.boot-smoke --print-build-logs

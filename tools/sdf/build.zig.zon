@@ -1,0 +1,28 @@
+.{
+    .name = .chrysopolis_sdf,
+    .version = "0.0.0",
+    .fingerprint = 0x5b1d942a5d31f4ba,
+    .minimum_zig_version = "0.15.1",
+
+    // Only sdfgen is declared here, it transitively pulls in the dtb.zig and
+    // sddf Zig packages via its own build.zig.zon. zig2nix resolves the whole
+    // tree into a Nix-managed cache (build.zig.zon2json-lock) so the
+    // metaprogram builds offline, no hand-vendored Zig deps in flake.nix.
+    // Pinned to the same sdfgen rev as the flake's `sdfgen` input (0.28.1).
+    .dependencies = .{
+        .sdfgen = .{
+            .url = "https://github.com/au-ts/microkit_sdf_gen/archive/13686a373b9189c7b1d778cd749d7d8bbd8a63f6.tar.gz",
+            .hash = "sdfgen-0.0.0-kupG3yryBwDhOJWuex-WQ-VfCr5l_4EdVYYXqItOype_",
+        },
+    },
+
+    // VERSION: sdfgen's build.zig reads a "VERSION" file via std.fs.cwd(),
+    // which resolves to THIS package's root when sdfgen is built as a
+    // dependency. Without it, b.dependency("sdfgen") panics with FileNotFound.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "system.zig",
+        "VERSION",
+    },
+}

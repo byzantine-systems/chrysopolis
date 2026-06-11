@@ -1,0 +1,17 @@
+{
+  "sdfgen-0.0.0-kupG3yryBwDhOJWuex-WQ-VfCr5l_4EdVYYXqItOype_": {
+    "name": "sdfgen",
+    "url": "https://github.com/au-ts/microkit_sdf_gen/archive/13686a373b9189c7b1d778cd749d7d8bbd8a63f6.tar.gz",
+    "hash": "sha256-NKH/ggmxPkrCmmbJ5ZTvCAZ+9p6/PIhY0YeeflfMME8="
+  },
+  "dtb-0.0.0-gULdmT8JAgAO49xxrRGA_0_0v4nPL7D91Ev2x7NnNbmy": {
+    "name": "dtb",
+    "url": "https://github.com/Ivan-Velickovic/dtb.zig/archive/13d4cc60806f4655043d00df50d4225737b268d4.tar.gz",
+    "hash": "sha256-bqbAbOQj3cRWwCRtvsI8iiOw2HvFuRAFChG/2am8AiA="
+  },
+  "sddf-0.0.0-6aJ67hfnZgCIb73S-PWM-oHDp0RadrbTQqB2Cc7wDlln": {
+    "name": "sddf",
+    "url": "https://github.com/au-ts/sddf/archive/e8341acea643c818e59033812accdc531fb82201.tar.gz",
+    "hash": "sha256-mH9jaM1IFxLiTEXaLMj0RdLcPN7301rSTvkQ60r0ZdA="
+  }
+}
