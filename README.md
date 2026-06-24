@@ -1,7 +1,7 @@
 # Chrysopolis
 
 [![Built with Nix](https://builtwithnix.org/badge.svg)](https://builtwithnix.org)
-![License](https://img.shields.io/github/license/byzantine-systems/chrysopolis)
+![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)
 
 > **CHRYSOPOLIS (Χρυσόπολις, lit. "Golden City")**, the name of at least two Byz. cities, one in Macedonia, the other in Bithynia. [^1]
 >
