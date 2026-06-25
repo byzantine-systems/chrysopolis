@@ -17,6 +17,11 @@ jobs:
         with:
           hatchet-protocol: 'cleave'
 
+      # zig2nix uses bwrap which requires unprivileged user namespaces.
+      # Ubuntu's default apparmor_restrict_unprivileged_userns=1 blocks this.
+      - name: Enable unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - uses: DeterminateSystems/nix-installer-action@v16
 
       - name: Check formatting (treefmt)
