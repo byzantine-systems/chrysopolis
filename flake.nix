@@ -71,7 +71,7 @@
     # libmicrokitco: the LionsOS cooperative cothread library. Another empty
     # lionsos submodule; pinned to the gitlink the locked lionsos references.
     # Needed by the fat fs_server and by the ERTS threading layer.
-    # - ERTS helper threads run as cothreads). 
+    # - ERTS helper threads run as cothreads).
     # - lionsosSrc populates dep/libmicrokitco from this input.
     libmicrokitco = {
       url = "git+https://github.com/au-ts/libmicrokitco?ref=refs/heads/main&rev=4bf88ee12c19823ff8c6d3122b6a298a5d8147ea";
