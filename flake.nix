@@ -388,7 +388,10 @@
             name = "beam-server-elf";
             src = ./src/runtime;
 
-            nativeBuildInputs = lionsToolchain;
+            nativeBuildInputs = lionsToolchain ++ [
+              pkgs.bash
+              pkgs.util-linux
+            ];
             hardeningDisable = [ "all" ];
             # The Microkit tool patches setvar_vaddr (beam_heap_start) and
             # objcopy updates the config sections, both via the symbol table.
@@ -397,11 +400,23 @@
 
             buildPhase = ''
               runHook preBuild
+              # Generate boot_data.c with embedded boot files (memfs)
+              bash ${./tools/gen-boot-data.sh} boot_data.c ${pkgs.erlang}/lib/erlang \
+                ${pkgs.erlang}/lib/erlang/releases/28/start_clean.boot
+
+              # Compile boot_data.c
+              clang -target aarch64-none-elf -mcpu=cortex-a53 -mstrict-align \
+                -ffreestanding -g -O2 -Wall \
+                -I${boardDir}/include \
+                -I${lionsStack}/include \
+                -c boot_data.c -o boot_data.o
+
               make CC=clang LD=ld.lld \
                 BOARD_DIR=${boardDir} \
                 LIONS_LIBC=${lionsStack} \
                 SDDF=${lionsosSrc}/dep/sddf \
-                LIONSOS_SRC=${lionsosSrc}
+                LIONSOS_SRC=${lionsosSrc} \
+                BOOT_DATA_OBJ=boot_data.o
               runHook postBuild
             '';
 

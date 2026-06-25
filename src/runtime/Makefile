@@ -54,7 +54,7 @@ all: beam_server.elf
 # dontStrip in Nix keeps the symbol table so the Microkit tool can patch
 # beam_heap_start (setvar_vaddr) and objcopy can update the config sections.
 beam_server.elf: $(OBJS) $(LIBMKCO)
-	$(LD) $(LDFLAGS) -o $@ $(OBJS) $(LIBMKCO) $(LIBS)
+	$(LD) $(LDFLAGS) -o $@ $(OBJS) $(BOOT_DATA_OBJ) $(LIBMKCO) $(LIBS)
 
 # beam_server with the static ERTS archive linked in (Phase 4+). The ERTS
 # archives reference each other circularly, hence --start-group; -u erl_start
