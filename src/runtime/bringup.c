@@ -1,5 +1,6 @@
 /*
- * Bring-up shims for the beam_server PD (TODO: remove this in-memory filesystem).
+ * Bring-up shims for the beam_server PD (TODO: remove this in-memory
+ * filesystem).
  *
  * 1. libc_init_file: a strong override of the libc's file syscall init
  *    (lib/libc/posix/file.c). The real one wires open/read/stat to the
