@@ -15,7 +15,7 @@ jobs:
 
       - uses: wimpysworld/nothing-but-nix@main
         with:
-          hatchet-protocol: 'rampage'
+          hatchet-protocol: 'cleave'
 
       - uses: DeterminateSystems/nix-installer-action@v16
 
