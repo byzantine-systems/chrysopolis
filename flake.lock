@@ -66,11 +66,11 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1780630679,
-        "narHash": "sha256-hhQyVAYmNKziZ0T+T4Gsk0PYmnz4vdzOzpkJAmDASKM=",
+        "lastModified": 1782492839,
+        "narHash": "sha256-j9wrcB4al5QhMelEghJ0Qs+RQPT+wyCcI4070NEgPLQ=",
         "owner": "cachix",
         "repo": "devenv",
-        "rev": "90ed6227ab389dd4e874a69a724f25dba312b754",
+        "rev": "3d39d0817d62069f7b18821c34a617b5141cb278",
         "type": "github"
       },
       "original": {
@@ -263,17 +263,32 @@
         ]
       },
       "locked": {
-        "lastModified": 1781149823,
-        "narHash": "sha256-sLjpimPh5o9kuR9v8jNDXVLQfFfuc1re7HE1W9JkMuo=",
+        "lastModified": 1782456370,
+        "narHash": "sha256-i9tPgc5QshNysMNnuyJ62lSZ95uv3WQseC+UiddX0Bc=",
         "ref": "refs/heads/main",
-        "rev": "2038f396b155afd4ffb3faaa5d5ce2e799e3b875",
-        "revCount": 751,
+        "rev": "748ccb4a8cb3c836ab48161e44f9f1e788028520",
+        "revCount": 752,
         "type": "git",
         "url": "https://github.com/au-ts/lionsos"
       },
       "original": {
         "type": "git",
         "url": "https://github.com/au-ts/lionsos"
+      }
+    },
+    "mk-shell-bin": {
+      "locked": {
+        "lastModified": 1677004959,
+        "narHash": "sha256-/uEkr1UkJrh11vD02aqufCxtbF5YnhRTIKlx5kyvf+I=",
+        "owner": "rrbutani",
+        "repo": "nix-mk-shell-bin",
+        "rev": "ff5d8bd4d68a347be5042e2f16caee391cd75887",
+        "type": "github"
+      },
+      "original": {
+        "owner": "rrbutani",
+        "repo": "nix-mk-shell-bin",
+        "type": "github"
       }
     },
     "musllibc": {
@@ -341,16 +356,36 @@
         ]
       },
       "locked": {
-        "lastModified": 1779770662,
-        "narHash": "sha256-1MUFwoNxuoTTVLccVdDHSTa7Bt4Up1eMHqVvOF5bak4=",
+        "lastModified": 1782483386,
+        "narHash": "sha256-zihWKNVDxH1eNWiKshseP7PRuJUNs+i/qwu/HMHQ2Z0=",
         "owner": "arnarg",
         "repo": "nix-gleam",
-        "rev": "997a12ad8140f2b1117fe749fab5a6a40d0056cf",
+        "rev": "347afd30f4d2701d16913f285f430731343cd96f",
         "type": "github"
       },
       "original": {
         "owner": "arnarg",
         "repo": "nix-gleam",
+        "type": "github"
+      }
+    },
+    "nix2container": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1775487831,
+        "narHash": "sha256-2lguQpLPQaxpQCJjXhmEEAfabwsAhkP29Z7fgLzHARA=",
+        "owner": "nlewo",
+        "repo": "nix2container",
+        "rev": "76be9608a7f4d6c985d28b0e7be903ae2547df3e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nlewo",
+        "repo": "nix2container",
         "type": "github"
       }
     },
@@ -382,11 +417,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1780243769,
-        "narHash": "sha256-x5UQuRsH3MqI0U9afaXSNqzTPSeZlRLvFAav2Ux1pNw=",
+        "lastModified": 1782467914,
+        "narHash": "sha256-pGvFkM8N0xEkIIXDe5YYfbEAvHrk4IxBrjB/x8OomhE=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "331800de5053fcebacf6813adb5db9c9dca22a0c",
+        "rev": "e73de5be04e0eff4190a1432b946d469c794e7b4",
         "type": "github"
       },
       "original": {
@@ -434,8 +469,10 @@
         "flake-parts": "flake-parts_2",
         "libmicrokitco": "libmicrokitco",
         "lionsos": "lionsos",
+        "mk-shell-bin": "mk-shell-bin",
         "musllibc": "musllibc",
         "nix-gleam": "nix-gleam",
+        "nix2container": "nix2container",
         "nixpkgs": "nixpkgs",
         "sddf": "sddf",
         "sdfgen": "sdfgen",
@@ -654,11 +691,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1780967389,
-        "narHash": "sha256-R+e70r1FSAR3keV6Dexk3hJplDHuTBX51lSKpDBQMkU=",
+        "lastModified": 1782522583,
+        "narHash": "sha256-lt0g7rOuWF6FXXrqpT6ON+s6ePt4Q4qIchpzXTzttww=",
         "ref": "refs/heads/main",
-        "rev": "e303caa9a6cc3a3e2b20a9e339961f418d905794",
-        "revCount": 1709,
+        "rev": "c04f1bbc0c1125a17b2c7ceead0e522f15938029",
+        "revCount": 1720,
         "type": "git",
         "url": "https://github.com/mitchellh/zig-overlay"
       },
@@ -675,11 +712,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1781584260,
-        "narHash": "sha256-V5Fp4BXQXXfyURZAfgAxp4cSLRnxLJ7eZzVKwHGfTCw=",
+        "lastModified": 1782531873,
+        "narHash": "sha256-EOr3YG/w0GJ79EFscCbLYcSgdyDGIHiNk9pSk+Hvdfs=",
         "owner": "Cloudef",
         "repo": "zig2nix",
-        "rev": "878b82f255e3b22e05a55eca2b91d67a8d308be1",
+        "rev": "da5abe5df326d2479190846ce8f94345560c05f7",
         "type": "github"
       },
       "original": {

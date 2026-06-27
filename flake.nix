@@ -18,6 +18,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    nix2container = {
+      url = "github:nlewo/nix2container";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    mk-shell-bin.url = "github:rrbutani/nix-mk-shell-bin";
+
     # LionsOS, consumed as a flake input. Its flake exposes only a dev
     # shell (no packages output, no liblionos.a), so the file layer vendors
     # the fs protocol definitions from the input's source tree.
@@ -206,10 +213,11 @@
             chmod -R u+w $out
           '';
 
-          # The LionsOS reference stack: the POSIX libc.a + headers anbd the
-          # sDDF serial/timer driver + virtualiser PDs, built together under
-          # one make (nix/refstack.mk) the way the upstream examples do.
-          # ERTS links against libc.a; the driver ELFs become PDs in the SDF.
+          # The LionsOS reference stack: the POSIX libc.a + headers and the
+          # board DTB, built under one make (nix/refstack.mk). musl's libc is an
+          # autotools build, so it stays in Nix; ERTS links against libc.a.
+          # Everything else (libmicrokitco, the sDDF driver/virtualiser PDs, the
+          # beam_server glue) is built by the root build.zig (beamZig below).
           lionsStack = pkgs.stdenvNoCC.mkDerivation {
             name = "lions-stack";
             src = ./nix;
@@ -234,15 +242,12 @@
             '';
             installPhase = ''
               runHook preInstall
-              mkdir -p $out/lib $out/bin
+              mkdir -p $out/lib
               cp libc/lib/libc.a $out/lib/
-              cp libmicrokitco_beam.a $out/lib/libmicrokitco.a
               cp -r libc/include $out/include
-              cp ${lionsosSrc}/dep/libmicrokitco/libmicrokitco.h $out/include/
-              cp -r ${lionsosSrc}/dep/libmicrokitco/libhostedqueue $out/include/
-              cp timer_driver.elf serial_driver.elf \
-                 serial_virt_tx.elf serial_virt_rx.elf \
-                 blk_driver.elf blk_virt.elf fat.elf $out/bin/
+              # The sDDF drivers and libmicrokitco are built by the root
+              # build.zig now; this derivation provides only the musl libc.a +
+              # headers and the board DTB.
               cp ${microkitBoard}.dtb $out/${microkitBoard}.dtb
               runHook postInstall
             '';
@@ -260,13 +265,13 @@
           # from romfs. The source tarball is inherited from pkgs.erlang so
           # its hash is already pinned in flake.lock.
           #
-          # The preloaded .beam files (init, erlang, erts_internal, …) ship
+          # The preloaded .beam files (init, erlang, erts_internal, ...) ship
           # precompiled in the OTP tarball and are converted to C byte-array
           # tables by Perl scripts during the emulator build; no host erlc
           # is required for this step.
           ertsStaticLib = targetPkgs.stdenv.mkDerivation {
             pname = "liberts";
-            inherit (pkgs.erlang) version src;
+            inherit (pkgs.beamPackages.erlang) version src;
 
             nativeBuildInputs = [ pkgs.perl ];
             # Build-host compiler, exported as $CC_FOR_BUILD. Needed to build
@@ -366,7 +371,7 @@
               $RANLIB $out/lib/liberts.a
 
               # Ship the emulator's bundled dependency archives (pcre, ryu,
-              # zstd, zlib, micro-openssl, ethread, …) so the Phase 4.2 link
+              # zstd, zlib, micro-openssl, ethread, ...) so the Phase 4.2 link
               # against liberts.a can resolve their symbols. Names are unique;
               # -n guards against any incidental basename collision.
               find . -path "*/$target/*" -name '*.a' ! -name 'libbeam.a' \
@@ -379,18 +384,29 @@
             '';
           };
 
-          # 4. The beam_server PD glue (main.c + bring-up shims) linked against
-          # the LionsOS libc.a and libmicrokit with the same clang/lld
-          # toolchain as the drivers. erl_start is weak, so until liberts.a
-          # joins the link the PD boots in bring-up mode (console + clock +
-          # heap over the real sDDF drivers).
-          beamMicrokitElf = pkgs.stdenvNoCC.mkDerivation {
-            name = "beam-server-elf";
-            src = ./src/runtime;
+          # 4. Every aarch64 cross artifact, built by the one root build.zig:
+          # libmicrokitco.a (the cothread runtime), the sDDF driver/virtualiser
+          # PDs, and the beam_server PD glue (main.c + bring-up shims) linked
+          # against the LionsOS libc.a + libmicrokit. -Dwith-erts also produces
+          # beam_test.elf, the same glue with the static ERTS archive linked in:
+          # bin/beam_server.elf boots in bring-up mode (console + clock + heap),
+          # bin/beam_test.elf hands off to erl_start. Replaces what used to be
+          # four derivations (sddf-drivers, libmicrokitco, beam-server, beam-test).
+          beamZig = pkgs.stdenvNoCC.mkDerivation {
+            name = "beam-zig";
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./build.zig
+                ./build.zig.zon
+                ./src/runtime
+              ];
+            };
 
             nativeBuildInputs = lionsToolchain ++ [
               pkgs.bash
               pkgs.util-linux
+              inputs.zig2nix.packages.${system}."zig-0_15_2"
             ];
             hardeningDisable = [ "all" ];
             # The Microkit tool patches setvar_vaddr (beam_heap_start) and
@@ -400,83 +416,61 @@
 
             buildPhase = ''
               runHook preBuild
-              # Generate boot_data.c with embedded boot files (memfs)
-              bash ${./tools/gen-boot-data.sh} boot_data.c ${pkgs.erlang}/lib/erlang \
-                ${pkgs.erlang}/lib/erlang/releases/28/start_clean.boot
+              # Generate boot_data.c with embedded boot files (memfs).
+              bash ${./tools/gen-boot-data.sh} boot_data.c ${pkgs.beamPackages.erlang}/lib/erlang \
+                ${pkgs.beamPackages.erlang}/lib/erlang/releases/28/start_clean.boot
 
-              # Compile boot_data.c
-              clang -target aarch64-none-elf -mcpu=cortex-a53 -mstrict-align \
-                -ffreestanding -g -O2 -Wall \
-                -I${boardDir}/include \
-                -I${lionsStack}/include \
-                -c boot_data.c -o boot_data.o
-
-              make CC=clang LD=ld.lld \
-                BOARD_DIR=${boardDir} \
-                LIONS_LIBC=${lionsStack} \
-                SDDF=${lionsosSrc}/dep/sddf \
-                LIONSOS_SRC=${lionsosSrc} \
-                BOOT_DATA_OBJ=boot_data.o
-              runHook postBuild
-            '';
-
-            installPhase = ''
-              runHook preInstall
-              mkdir -p $out/bin
-              cp beam_server.elf $out/bin/
-              runHook postInstall
-            '';
-          };
-
-          # beam_server with the static ERTS archive linked in. Not part of
-          # the default chain; building it surfaces the libc/runtime symbols
-          # ERTS's boot path needs (trace-driven Phase 4 development).
-          beamTestElf = pkgs.stdenvNoCC.mkDerivation {
-            name = "beam-test-elf";
-            src = ./src/runtime;
-
-            nativeBuildInputs = lionsToolchain ++ [
-              pkgs.bash
-              pkgs.util-linux
-            ];
-            hardeningDisable = [ "all" ];
-            dontStrip = true;
-            dontFixup = true;
-
-            buildPhase = ''
-              runHook preBuild
-              # Generate boot_data.c with embedded boot files
-              bash ${./tools/gen-boot-data.sh} boot_data.c ${pkgs.erlang}/lib/erlang \
-                ${pkgs.erlang}/lib/erlang/releases/28/start_clean.boot
-
-              # Compile boot_data.c
-              clang -target aarch64-none-elf -mcpu=cortex-a53 -mstrict-align \
-                -ffreestanding -g -O2 -Wall \
-                -I${boardDir}/include \
-                -I${lionsStack}/include \
-                -c boot_data.c -o boot_data.o
-
-              # The cross gcc's libgcc.a supplies the runtime helpers liberts.a
-              # references (outline atomics, 128-bit arithmetic, ...).
+              # The ERTS archives reference each other and libgcc circularly.
+              # The Makefile resolved that with `ld --start-group`; the Zig
+              # build graph has no group API, so merge them (plus the cross
+              # gcc's libgcc.a, which supplies the outline-atomic / 128-bit
+              # helpers liberts.a calls) into a single archive whose members
+              # lld resolves against one another within the one archive.
               libgccDir=$(dirname "$(find ${targetPkgs.stdenv.cc.cc}/lib/gcc \
                 -name libgcc.a | head -1)")
-              make beam_test.elf CC=clang LD=ld.lld \
-                BOARD_DIR=${boardDir} \
-                LIONS_LIBC=${lionsStack} \
-                SDDF=${lionsosSrc}/dep/sddf \
-                LIONSOS_SRC=${lionsosSrc} \
-                LIBERTS_DIR=${ertsStaticLib}/lib \
-                LIBGCC_DIR="$libgccDir" \
-                BOOT_DATA_OBJ=boot_data.o
+              {
+                echo "create liberts_all.a"
+                for a in liberts liberts_internal liberts_internal_r libethread \
+                         libz libzstd libepcre libryu micro-openssl; do
+                  echo "addlib ${ertsStaticLib}/lib/$a.a"
+                done
+                echo "addlib $libgccDir/libgcc.a"
+                echo "save"
+                echo "end"
+              } | llvm-ar -M
+              llvm-ranlib liberts_all.a
+
+              # Alias libc.a off Zig's special library name "c" (-Dlibc-dir).
+              mkdir -p libalias
+              ln -sf ${lionsStack}/lib/libc.a libalias/liblionsc.a
+
+              # build.zig owns the cross target/flags (one resolveTargetQuery)
+              # and compiles boot_data.c with them, so the flag string is no
+              # longer duplicated here. -Dwith-erts builds beam_test.elf too;
+              # installArtifact emits $out/{lib,bin}.
+              mkdir -p $out
+              export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+              zig build --prefix $out \
+                -Dboard-dir=${boardDir} \
+                -Dboard=${microkitBoard} \
+                -Dsddf=${lionsosSrc}/dep/sddf \
+                -Dlibmicrokitco-src=${inputs.libmicrokitco} \
+                -Dlions-libc=${lionsStack} \
+                -Dlibc-dir="$PWD/libalias" \
+                -Dlionsos-src=${lionsosSrc} \
+                -Dboot-data="$PWD/boot_data.c" \
+                -Dwith-erts=true \
+                -Derts-archive-dir="$PWD"
+
+              # Headers a downstream consumer of libmicrokitco.a would need; the
+              # beam link above already includes them straight from the source.
+              mkdir -p $out/include
+              cp ${inputs.libmicrokitco}/libmicrokitco.h $out/include/
+              cp -r ${inputs.libmicrokitco}/libhostedqueue $out/include/
               runHook postBuild
             '';
 
-            installPhase = ''
-              runHook preInstall
-              mkdir -p $out/bin
-              cp beam_test.elf $out/bin/
-              runHook postInstall
-            '';
+            dontInstall = true;
           };
 
           # 4. Application bytecode packaged as a flat cpio archive for the
@@ -508,7 +502,7 @@
           # files load directly on the cross-built aarch64 ERTS.
           fatDisk =
             let
-              otp = "${pkgs.erlang}/lib/erlang";
+              otp = "${pkgs.beamPackages.erlang}/lib/erlang";
             in
             pkgs.runCommand "chrysopolis-fat.img"
               {
@@ -613,7 +607,12 @@
                 set -ex  # Exit on error, print commands
                 mkdir -p $out build
                 cp ${beamElf} build/beam_server.elf
-                cp ${lionsStack}/bin/*.elf build/
+                # Driver/virtualiser PDs from the root build.zig (beamZig); the
+                # serial/timer client PDs (beam_server) come from beamElf above.
+                cp ${beamZig}/bin/serial_driver.elf \
+                   ${beamZig}/bin/timer_driver.elf \
+                   ${beamZig}/bin/serial_virt_tx.elf \
+                   ${beamZig}/bin/serial_virt_rx.elf build/
                 chmod -R u+w build
 
                 cfg=${systemSdf}
@@ -645,24 +644,31 @@
             };
 
           # Bring-up image (console + clock + heap, no ERTS).
-          sel4SystemImage = mkSel4Image "sel4-beam-image" "${beamMicrokitElf}/bin/beam_server.elf";
+          sel4SystemImage = mkSel4Image "sel4-beam-image" "${beamZig}/bin/beam_server.elf";
 
           # ERTS-linked image: the same PD topology with liberts.a linked in,
           # so beam_server's init() hands off to erl_start (Phase 4 boot).
-          sel4TestImage = mkSel4Image "sel4-beam-test-image" "${beamTestElf}/bin/beam_test.elf";
+          sel4TestImage = mkSel4Image "sel4-beam-test-image" "${beamZig}/bin/beam_test.elf";
         in
         {
           packages = {
             default = sel4SystemImage;
             test-image = sel4TestImage;
-            elf = beamMicrokitElf;
-            beam-test = beamTestElf;
+            # The one root build.zig output: libmicrokitco.a, the sDDF driver
+            # PDs, and beam_server.elf/beam_test.elf. The elf/beam-test/
+            # sddf-drivers/libmicrokitco attrs are kept as aliases onto it so
+            # existing `nix build .#<attr>` invocations still resolve.
+            beam-zig = beamZig;
+            elf = beamZig;
+            beam-test = beamZig;
+            sddf-drivers = beamZig;
+            libmicrokitco = beamZig;
             app = gleamApp;
             romfs = romfsImage;
             disk = fatDisk;
             liberts = ertsStaticLib;
-            # LionsOS reference stack (Plan B): the POSIX libc.a + sDDF
-            # serial/timer driver PDs, built together by nix/refstack.mk.
+            # LionsOS reference stack: the POSIX libc.a + board DTB, built by
+            # nix/refstack.mk.
             lions-stack = lionsStack;
             lionsos-src = lionsosSrc;
             sdf = systemSdf;
@@ -671,8 +677,7 @@
           # Hermetic QEMU integration tests, run by `nix flake check` and CI.
           # Each check boots an image headless under emulation and asserts on
           # the serial trace, pinning a phase's exit criterion as an automated
-          # gate rather than a manual step. (Linux only: aarch64 system
-          # emulation under TCG; gated off on Darwin builders.)
+          # gate rather than a manual step.
           checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             boot-smoke =
               pkgs.runCommand "boot-smoke"

@@ -1,6 +1,6 @@
 //! Programmatic generator for the Chrysopolis Microkit system description.
 //!
-//! Plan B topology: the BEAM server runs as a Microkit PD linked against the
+//! Topology: the BEAM server runs as a Microkit PD linked against the
 //! LionsOS POSIX libc, talking to real sDDF driver PDs. We build the serial
 //! (console) and timer (clock) subsystems with sdfgen's high-level helpers,
 //! which both render the .sdf AND serialise the per-PD config blobs the

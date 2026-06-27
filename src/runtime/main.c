@@ -1,5 +1,5 @@
 /*
- * Microkit entry point for the beam_server protection domain (Plan B).
+ * Microkit entry point for the beam_server protection domain.
  *
  * beam_server links against the LionsOS POSIX libc (libc.a) and talks to the
  * real sDDF serial and timer driver PDs. init() mirrors the LionsOS reference
