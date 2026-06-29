@@ -25,6 +25,8 @@
 #include <libmicrokitco.h>
 #include <sddf/serial/config.h>
 #include <sddf/serial/queue.h>
+#include <sddf/timer/client.h>
+#include <sddf/timer/config.h>
 
 #include "memfs.h"
 
@@ -32,6 +34,7 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/resource.h>
@@ -44,6 +47,9 @@
 /* Serial RX queue handle for console input, defined in main.c */
 extern serial_queue_handle_t serial_rx_queue_handle;
 extern serial_client_config_t serial_config;
+/* Timer client config (driver_id channel), defined in main.c. Used by
+ * clock_nanosleep to read the monotonic clock for a real timed sleep. */
+extern timer_client_config_t timer_config;
 
 #define SERIAL_RX_CH 1
 
@@ -258,6 +264,40 @@ static long bringup_clock_getres(va_list ap) {
   if (res != NULL) {
     res->tv_sec = 0;
     res->tv_nsec = 1;
+  }
+  return 0;
+}
+
+/* clock_nanosleep: a real timed sleep (musl's nanosleep/usleep/sleep all route
+ * here via SYS_clock_nanosleep). The old stub returned immediately, making
+ * those calls no-ops. We busy-poll the sDDF monotonic clock and yield to the
+ * cothread scheduler until the deadline -- the SAME pattern process.c's
+ * pthread_cond_timedwait uses. We deliberately do NOT block on a notification
+ * (microkit_cothread_wait_on_channel): erl_start runs on the root cothread and
+ * never returns, so notified()/recv_ntfn never fire and such a wait would hang
+ * forever (the whole PD works by busy-polling shared memory). */
+static long bringup_clock_nanosleep(va_list ap) {
+  (void)va_arg(ap, long); /* clockid */
+  int flags = va_arg(ap, int);
+  const struct timespec *req = va_arg(ap, const struct timespec *);
+  struct timespec *rem = va_arg(ap, struct timespec *);
+  if (req == NULL) {
+    return -EFAULT;
+  }
+  if (req->tv_sec < 0 || req->tv_nsec < 0 || req->tv_nsec >= 1000000000L) {
+    return -EINVAL;
+  }
+  unsigned ch = timer_config.driver_id;
+  uint64_t reqns =
+      (uint64_t)req->tv_sec * 1000000000ull + (uint64_t)req->tv_nsec;
+  uint64_t target =
+      (flags & TIMER_ABSTIME) ? reqns : sddf_timer_time_now(ch) + reqns;
+  while (sddf_timer_time_now(ch) < target) {
+    microkit_cothread_yield();
+  }
+  if (rem != NULL && !(flags & TIMER_ABSTIME)) {
+    rem->tv_sec = 0;
+    rem->tv_nsec = 0;
   }
   return 0;
 }
@@ -542,7 +582,7 @@ void bringup_register_syscalls(void) {
   libc_define_syscall(SYS_uname, bringup_uname);
   libc_define_syscall(SYS_getcwd, bringup_getcwd);
   libc_define_syscall(SYS_clock_getres, bringup_clock_getres);
-  libc_define_syscall(SYS_clock_nanosleep, bringup_poll_yield);
+  libc_define_syscall(SYS_clock_nanosleep, bringup_clock_nanosleep);
   libc_define_syscall(SYS_sched_yield, bringup_zero);
   libc_define_syscall(SYS_rt_sigaction, bringup_zero);
   libc_define_syscall(SYS_rt_sigprocmask, bringup_zero);

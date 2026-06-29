@@ -7,7 +7,7 @@
 >
 > [^1]: The Oxford Dictionary of Byzantium, Vol I.
 
-A (WIP) verified foundation for BEAM applications, based on NixOS and seL4.
+A verified foundation for BEAM applications, based on NixOS and seL4.
 
 ## What is this?
 
@@ -15,31 +15,17 @@ Chrysopolis aims to run the BEAM on the [seL4 microkernel](https://sel4.systems/
 
 - **seL4** is a formally verified microkernel (~10k lines with machine-checked correctness proofs). It provides strong isolation guarantees, where each component runs in its own protection domain (PD), communicating via capabilities.
 - **LionsOS** is a reference OS stack for seL4. It provides a musl-based libc, sDDF drivers (serial, timer, block), and a cooperative cothread runtime (`libmicrokitco`). Chrysopolis links ERTS against LionsOS `libc.a` (the same POSIX API, but backed by seL4 IPC instead of Linux syscalls).
-- **Nix** is the build system. A `flake.nix` cross-compiles ERTS, builds the LionsOS reference stack, generates the Microkit system description from a Zig metaprogram, embeds boot files into memory (`memfs`), and produces a bootable `sel4-beam.img`. Every input is pinned in `flake.lock`, builds are hermetic and reproducible.
-
-## Quick start
-
-```bash
-nix develop                                     
-# or
-direnv allow
-```
-
-Then cross-compile everything:
-
-```bash
-nix build .#test-image                          
-timeout 300 qemu-system-aarch64 \
-  -machine virt,virtualization=on \
-  -cpu cortex-a53 -m 2G -nographic \
-  -serial mon:stdio \
-  -device loader,file=result/sel4-beam.img,addr=0x70000000,cpu-num=0
-```
+- **Nix** is the build system and fetch/lock authority. 
+    - A `flake.nix` cross-compiles ERTS, builds musl `libc.a` (autotools), and pins every input in `flake.lock`. 
+    - **Zig** is invoked by Nix as the build driver via two `build.zig` metaprograms: 
+        - [tools/sdf](tools/sdf) generates the Microkit system description.
+        - the root [build.zig](build.zig) builds `libmicrokitco`, the sDDF driver/virtualiser PDs, and compiles and links the `beam_server` PD (ERTS glue) from [src/runtime](src/runtime). 
+    - Boot files are embedded into memory (`memfs`), the result is a hermetic, reproducible `sel4-beam.img`.
 
 ## Architecture
 
 ```mermaid
-flowchart TD
+flowchart LR
     %% Nodes
     App["Gleam / Erlang Application"]
     ERTS["ERTS 28.5<br/>(scheduler, GC, code loader)"]
@@ -73,23 +59,6 @@ nix develop
 direnv allow
 ```
 
-### Build Targets
-
-```bash
-# full bootable image with ERTS + memfs
-nix build .#test-image
-# beam_test.elf only
-nix build .#beam-test
-# Gleam bytecode only
-nix build .#app
-# system description only
-nix build .#sdf         
-# LionsOS reference stack
-nix build .#lions-stack 
-# static ERTS archive
-nix build .#liberts     
-```
-
 ### Formatting
 
 ```bash
@@ -100,32 +69,53 @@ nix fmt
 ### Testing
 
 ```bash
-# Gleam tests (not on seL4)
-gleam test               
 # Hermetic boot-smoke test (QEMU headless)
-nix flake check           
+nix build .#checks.x86_64-linux.boot-smoke -L
 ```
 
-The `boot-smoke` check builds the image, boots it under QEMU, and asserts three
-markers in the serial log:
+The `boot-smoke` check builds the image, boots it under QEMU (headless), and asserts three markers in the serial log:
 
 1. `beam_server` up on the LionsOS reference stack (PD init success).
 2. `monotonic clock` via sDDF timer (timer driver working).
 3. Handing off to ERTS core loop (ERTS linked and launched).
 
-### Validating the Erlang REPL
+### Running the BEAM shell
 
-The boot-smoke check proves ERTS is present and starts. To verify the
-interactive shell (requires a terminal):
+Build the ERTS-linked image:
 
 ```bash
-nix build .#test-image
+nix build .#test-image                          
+```
+and boot it under QEMU with an **interactive** serial (`-serial mon:stdio`).
+
+```bash
 timeout 300 qemu-system-aarch64 \
   -machine virt,virtualization=on \
   -cpu cortex-a53 -m 2G -nographic \
   -serial mon:stdio \
   -device loader,file=result/sel4-beam.img,addr=0x70000000,cpu-num=0
 ```
+
+After seL4 boots, you'll see the `beam_server` PD come up, the sDDF timer report a
+monotonic clock, ERTS hand off, and then the Erlang shell:
+
+```text
+Chrysopolis: beam_server up on the LionsOS reference stack.
+monotonic clock via sDDF timer: 0.667284592 s
+Handing off to ERTS core loop...
+POSIX|ERROR: Unimplemented syscall number: 78
+POSIX|ERROR: Unimplemented syscall number: 220
+POSIX|ERROR: Unimplemented syscall number: 198
+POSIX|ERROR: Unimplemented syscall number: 209
+Erlang/OTP 28 [erts-16.4.0.1] [source] [64-bit] [smp:1:1] [ds:1:1:10] [async-threads:1]
+
+Eshell V16.4.0.1 (press Ctrl+G to abort, type help(). for help)
+1>
+```
+
+> The `Unimplemented syscall` lines are **expected**, not failures: missing POSIX
+> calls are mapped to `ENOSYS` so ERTS takes its user-space fallback path (risk) 
+> and continues to the shell.
 
 At the `1>` prompt:
 
@@ -139,4 +129,4 @@ ok
 [1,2,3,4,5]
 ```
 
-Press `Ctrl+G` for job control, `Ctrl+A X` to exit QEMU.
+Press `Ctrl+G` for job control; `Ctrl+A` then `X` to exit QEMU.

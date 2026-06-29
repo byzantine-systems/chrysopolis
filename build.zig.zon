@@ -1,0 +1,20 @@
+.{
+    .name = .chrysopolis,
+    .version = "0.0.0",
+    .fingerprint = 0x8f80d636954edc0f,
+    .minimum_zig_version = "0.15.1",
+
+    // No Zig package dependencies: this build cross-compiles the libmicrokitco
+    // and sDDF C sources (passed in via -Dlibmicrokitco-src / -Dsddf) and links
+    // the PD glue against Nix-provided archives (libc.a, libmicrokit, the ERTS
+    // archives, all passed in as -D options). Nothing to fetch, so no
+    // build.zig.zon2json-lock / zig2nix machinery is needed (unlike tools/sdf,
+    // which depends on sdfgen).
+    .dependencies = .{},
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src/runtime",
+    },
+}

@@ -13,8 +13,10 @@
 #   MICROKIT_BOARD  e.g. qemu_virt_aarch64
 #   MICROKIT_CONFIG e.g. debug
 #
-# Produces, in $(BUILD_DIR): libc/lib/libc.a, libc/include/, the board DTB,
-# timer_driver.elf, serial_driver.elf, serial_virt_tx.elf, serial_virt_rx.elf.
+# Produces, in $(BUILD_DIR): libc/lib/libc.a, libc/include/, and the board DTB.
+# The sDDF driver/virtualiser PDs and libmicrokitco are built separately by Zig
+# packages (tools/sddf-drivers, libmicrokitco), their .mk includes below remain
+# only so their rules/vars parse; their targets are no longer requested by `all`.
 
 MICROKIT_CONFIG ?= debug
 TOOLCHAIN := clang
@@ -96,5 +98,8 @@ FS_IMAGES := blk_driver.elf blk_virt.elf fat.elf
 $(DRIVER_IMAGES) $(FS_IMAGES): $(LIONS_LIBC)/lib/libc.a libsddf_util_debug.a
 
 # Defined here, after the includes, so LIONS_LIBC and DTB are non-empty.
-all: $(LIONS_LIBC)/lib/libc.a $(DRIVER_IMAGES) $(FS_IMAGES) \
-     libmicrokitco_beam.a $(DTB)
+# The sDDF driver/virtualiser PDs ($(DRIVER_IMAGES)/$(FS_IMAGES)) and libmicrokitco
+# are built by Zig now (tools/sddf-drivers, libmicrokitco), so they are intentionally 
+# NOT in `all`; this make only produces the musl libc.a (autotools) and the 
+# board DTB.
+all: $(LIONS_LIBC)/lib/libc.a $(DTB)
