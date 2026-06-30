@@ -189,6 +189,88 @@ fn addBeamExe(
     b.installArtifact(exe);
 }
 
+// The LionsOS FAT fs_server PD (fat.elf): FatFs (dep/ff15) + the fat component
+// (event/op/io) + lib_fs_server, on its OWN libmicrokitco variant (the fat
+// config's opts header caps cothreads at FAT_THREAD_NUM, distinct from beam's),
+// linked against the real LionsOS libc.a, NOT the sddf util custom libc.
+// Mirrors lionsos components/fs/fat/fat.mk. addPd already supplies libmicrokit,
+// microkit.ld and the board include, so we don't re-link microkit here.
+fn addFatServer(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    libmicrokitco_src: []const u8,
+    lions_libc: []const u8,
+    libc_dir: []const u8,
+    lionsos_src: []const u8,
+    board_dir: []const u8,
+) void {
+    const fat_cflags = &[_][]const u8{ "-ffreestanding", "-O2", "-g", "-Wall" };
+    const fat_config_inc = b.fmt("{s}/components/fs/fat/config", .{lionsos_src});
+
+    // A second libmicrokitco built against the fat component's opts header
+    // (LIBMICROKITCO_MAX_COTHREADS = FAT_THREAD_NUM); otherwise identical to the
+    // beam variant above.
+    const microkitco_fat = b.addLibrary(.{
+        .name = "microkitco_fat",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .strip = false }),
+    });
+    microkitco_fat.root_module.addCSourceFiles(.{
+        .root = .{ .cwd_relative = libmicrokitco_src },
+        .files = &.{ "libco/libco.c", "libmicrokitco.c" },
+        .flags = fat_cflags,
+    });
+    microkitco_fat.root_module.addIncludePath(.{ .cwd_relative = libmicrokitco_src });
+    microkitco_fat.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libco", .{libmicrokitco_src}) });
+    microkitco_fat.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
+    microkitco_fat.root_module.addIncludePath(libmicrokit_include);
+    microkitco_fat.root_module.addIncludePath(.{ .cwd_relative = fat_config_inc }); // libmicrokitco_opts.h + fat_config.h
+
+    const fat = addPd(b, "fat.elf", target, optimize);
+    fat.root_module.addCSourceFiles(.{
+        .root = .{ .cwd_relative = b.fmt("{s}/dep/ff15", .{lionsos_src}) },
+        .files = &.{ "ff.c", "ffunicode.c" },
+        .flags = fat_cflags,
+    });
+    fat.root_module.addCSourceFiles(.{
+        .root = .{ .cwd_relative = b.fmt("{s}/components/fs/fat", .{lionsos_src}) },
+        .files = &.{ "event.c", "op.c", "io.c" },
+        .flags = fat_cflags,
+    });
+    fat.root_module.addCSourceFiles(.{
+        .root = .{ .cwd_relative = b.fmt("{s}/lib/fs/server", .{lionsos_src}) },
+        .files = &.{ "fd.c", "memory.c" },
+        .flags = fat_cflags,
+    });
+
+    // FAT_CFLAGS include set + sddf + lions fs headers + musl libc headers.
+    fat.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/dep/ff15", .{lionsos_src}) });
+    fat.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/components/fs/fat", .{lionsos_src}) }); // decl.h
+    fat.root_module.addIncludePath(.{ .cwd_relative = fat_config_inc }); // fat_config.h, ffconf.h
+    fat.root_module.addIncludePath(.{ .cwd_relative = libmicrokitco_src }); // libmicrokitco.h
+    fat.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
+    fat.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{sddf}) });
+    fat.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/microkit", .{sddf}) });
+    fat.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lionsos_src}) }); // lions/fs/*
+    fat.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) }); // musl headers
+
+    // Link the fat libmicrokitco variant (whole-archive), libc.a (the lionsc
+    // alias), and the sddf debug putchar lib (libsddf_util_debug).
+    const lazy: std.Build.Module.LinkSystemLibraryOptions = .{ .preferred_link_mode = .static, .use_pkg_config = .no };
+    fat.root_module.addObjectFile(microkitco_fat.getEmittedBin());
+    fat.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{board_dir}) });
+    fat.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{lions_libc}) });
+    fat.root_module.addLibraryPath(.{ .cwd_relative = libc_dir });
+    fat.root_module.linkSystemLibrary("lionsc", lazy);
+    fat.root_module.linkLibrary(util_putchar_debug);
+
+    fat.pie = false;
+    fat.bundle_compiler_rt = false;
+    fat.link_gc_sections = false;
+    b.installArtifact(fat);
+}
+
 pub fn build(b: *std.Build) void {
     const target = crossTarget(b);
     const optimize: std.builtin.OptimizeMode = .ReleaseFast;
@@ -211,6 +293,7 @@ pub fn build(b: *std.Build) void {
     const with_serial = b.option(bool, "with-serial", "build the serial driver + virtualisers") orelse true;
     const with_timer = b.option(bool, "with-timer", "build the timer driver") orelse true;
     const with_blk = b.option(bool, "with-blk", "build the block driver + virtualiser") orelse false;
+    const with_fs = b.option(bool, "with-fs", "build the FAT fs_server (fat.elf)") orelse false;
     const with_net = b.option(bool, "with-net", "build the network driver + virtualisers") orelse false;
 
     libmicrokit = .{ .cwd_relative = b.fmt("{s}/lib/libmicrokit.a", .{board_dir}) };
@@ -308,11 +391,17 @@ pub fn build(b: *std.Build) void {
             b.fmt("drivers/blk/{s}", .{cfg.blk}),
         }, &.{});
         // DEBUG_BLK_VIRT turns on the virt's success log ("MBR partitioning
-        // detected"), which is otherwise compiled out — boot-smoke gates on it.
+        // detected"), which is otherwise compiled out; boot-smoke gates on it.
         component(b, target, optimize, "blk_virt.elf", &.{
             "blk/components/virt.c",
             "blk/components/partitioning.c",
         }, &.{}, &.{"DEBUG_BLK_VIRT"});
+    }
+
+    // FAT filesystem server: the disk-backed fs_server beam_server's libc fs
+    // path talks to (built on its own libmicrokitco variant + the real libc.a).
+    if (with_fs) {
+        addFatServer(b, target, optimize, libmicrokitco_src, lions_libc, libc_dir, lionsos_src, board_dir);
     }
 
     // Network: LwIP / TCP-IP + BEAM<->BEAM distribution (Phase 8).

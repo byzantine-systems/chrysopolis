@@ -19,7 +19,6 @@
 #include <lions/fs/helpers.h>
 #include <lions/fs/protocol.h>
 #include <microkit.h>
-#include <sddf/blk/config.h>
 #include <sddf/serial/config.h>
 #include <sddf/serial/queue.h>
 #include <sddf/timer/config.h>
@@ -37,13 +36,6 @@ __attribute__((
 __attribute__((
     __section__(".timer_client_config"))) timer_client_config_t timer_config;
 __attribute__((__section__(".fs_client_config"))) fs_client_config_t fs_config;
-/* Passive blk client: beam_server is registered with the blk virtualiser on
- * partition 0 so the driver queue has non-zero capacity (the virt faults at
- * init otherwise). beam_server issues no blk requests — this config stays
- * dormant, like fs_config. The FAT fs_server (next issue) becomes the real
- * blk client. */
-__attribute__((
-    __section__(".blk_client_config"))) blk_client_config_t blk_config;
 
 /* The libc console path (lib/libc/posix/fd.c) writes through this handle. */
 serial_queue_handle_t serial_tx_queue_handle;
@@ -100,6 +92,18 @@ static void beam_run(void) {
   clock_gettime(CLOCK_MONOTONIC, &ts);
   printf("monotonic clock via sDDF timer: %lld.%09lld s\n",
          (long long)ts.tv_sec, (long long)ts.tv_nsec);
+
+  /* Verify the FAT fs_server is wired: the objcopied .fs_client_config gives a
+   * non-NULL share region + command/completion queues from fatfs. The libc fs
+   * path stays OFF (memfs is still the active filesystem) until the cutover;
+   * this only proves the protocol link is mapped. */
+  if (fs_config.server.share.vaddr != NULL) {
+    printf("fs_server share mapped: %p (cmd=%p cmpl=%p)\n",
+           fs_config.server.share.vaddr, fs_config.server.command_queue.vaddr,
+           fs_config.server.completion_queue.vaddr);
+  } else {
+    printf("WARNING: fs_server share is NULL (.fs_client_config not wired)\n");
+  }
 
   if (erl_start) {
     /* erlexec normally exports these; we bypass it, so erl_prim_loader / init

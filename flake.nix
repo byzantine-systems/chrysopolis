@@ -461,6 +461,7 @@
                 -Dboot-data="$PWD/boot_data.c" \
                 -Dwith-erts=true \
                 -Dwith-blk=true \
+                -Dwith-fs=true \
                 -Derts-archive-dir="$PWD"
 
               # Headers a downstream consumer of libmicrokitco.a would need; the
@@ -615,7 +616,8 @@
                    ${beamZig}/bin/serial_virt_tx.elf \
                    ${beamZig}/bin/serial_virt_rx.elf \
                    ${beamZig}/bin/blk_driver.elf \
-                   ${beamZig}/bin/blk_virt.elf build/
+                   ${beamZig}/bin/blk_virt.elf \
+                   ${beamZig}/bin/fat.elf build/
                 chmod -R u+w build
 
                 cfg=${systemSdf}
@@ -628,18 +630,17 @@
                 oc .serial_client_config serial_client_beam_server.data      beam_server.elf
                 oc .timer_client_config  timer_client_beam_server.data       beam_server.elf
 
-                # Block subsystem: driver device resources + driver/virt configs,
-                # plus beam_server's passive blk-client config (partition 0).
+                # Block subsystem: driver device resources + driver/virt configs.
                 oc .device_resources     blk_driver_device_resources.data    blk_driver.elf
                 oc .blk_driver_config    blk_driver.data                     blk_driver.elf
                 oc .blk_virt_config      blk_virt.data                       blk_virt.elf
-                oc .blk_client_config    blk_client_beam_server.data         beam_server.elf
 
-                # FAT fs_server: DISABLED for now (next issue).
-                # oc .blk_client_config    blk_client_fatfs.data               fat.elf
-                # oc .fs_server_config     fs_server_fatfs.data                fat.elf
-                # beam_server's fs client config (the fs protocol to fatfs).
-                # oc .fs_client_config     fs_client_beam_server.data          beam_server.elf
+                # FAT fs_server: fatfs is the blk client (partition 0) and the fs
+                # server; beam_server is the fs client (libc fs path dormant until
+                # the memfs cutover).
+                oc .blk_client_config    blk_client_fatfs.data               fat.elf
+                oc .fs_server_config     fs_server_fatfs.data                fat.elf
+                oc .fs_client_config     fs_client_beam_server.data          beam_server.elf
 
                 ${microkitSdk}/bin/microkit $cfg/system.sdf \
                   --search-path build \
@@ -726,6 +727,8 @@
                   check "Handing off to ERTS core loop..."
                   # Step 3: the blk virtualiser read + validated partition 0 of fatDisk.
                   check "MBR partitioning detected"
+                  # Step 4: the FAT fs_server is wired (beam_server sees a non-NULL share).
+                  check "fs_server share mapped"
 
                   [ $fail -eq 0 ] || { echo "boot-smoke: assertions failed"; exit 1; }
                   touch $out

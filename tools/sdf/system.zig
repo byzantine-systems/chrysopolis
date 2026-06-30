@@ -93,13 +93,8 @@ pub fn main() !void {
     var timer_system = sddf.Timer.init(allocator, &sdf, timer_node, &timer_driver);
     try timer_system.addClient(&beam_server);
 
-    // Block subsystem: virtio-mmio block driver + block virtualiser. beam_server
-    // is registered as a passive client on partition 0 only to give the driver
-    // queue a non-zero capacity (the sDDF blk virt's driver-queue capacity is the
-    // sum of its clients' capacities; with zero clients it faults at init when it
-    // enqueues the MBR read). beam_server never issues blk requests — the virt
-    // reads/validates the MBR and maps partition 0, then sits idle. The real
-    // client is the FAT fs_server (next issue), which replaces this passive map.
+    // Block subsystem: virtio-mmio block driver + block virtualiser. The FAT
+    // fs_server (fatfs, below) is the sole blk client, on partition 0.
     //
     // The DTB node is virtio_mmio@a000200 (IRQ 17), matching the LionsOS board
     // config (sddf tools/meta/board.py: blk="virtio_mmio@a000200") and the QEMU
@@ -114,22 +109,29 @@ pub fn main() !void {
 
     const blk_node = blob.child("virtio_mmio@a000200") orelse return error.BlkNodeNotFound;
     var blk_system = try sddf.Blk.init(allocator, &sdf, blk_node, &blk_driver, &blk_virt, .{});
-    try blk_system.addClient(&beam_server, .{ .partition = 0 });
 
-    // FAT filesystem (fs_server): deferred to the next issue.
-    // var fatfs = Pd.create(allocator, "fatfs", "fat.elf", .{ .priority = 96 });
-    // var fs = try lionsos.FileSystem.init(allocator, &sdf, &fatfs, &beam_server, .{});
+    // FAT fs_server: mounts partition 0 of the disk via the blk virtualiser and
+    // serves the LionsOS fs protocol to beam_server. The FileSystem.Fat helper
+    // registers fatfs as the blk client AND maps the FatFs worker-thread stacks
+    // (worker_thread_stack_one..four), so we do NOT add a blk client by hand.
+    // The libc fs path in beam_server stays dormant until the memfs cutover; for
+    // now beam_server only verifies the share/queues are mapped at init.
+    var fatfs = Pd.create(allocator, "fatfs", "fat.elf", .{ .priority = 96 });
+    sdf.addProtectionDomain(&fatfs);
+    var fs = try lionsos.FileSystem.Fat.init(allocator, &sdf, &fatfs, &beam_server, &blk_system, .{ .partition = 0 });
 
     // Wire channels/queues/shared regions, then serialise every subsystem's
     // per-PD config blobs into out_dir (objcopied into the ELFs by the build).
+    // fs.connect() registers fatfs as a blk client, so it must precede
+    // blk_system.connect() (which iterates the registered clients).
     try serial_system.connect();
     try serial_system.serialiseConfig(out_dir);
     try timer_system.connect();
     try timer_system.serialiseConfig(out_dir);
+    try fs.connect();
     try blk_system.connect();
     try blk_system.serialiseConfig(out_dir);
-    // fs.connect(.{});
-    // try fs.serialiseConfig(out_dir);
+    try fs.serialiseConfig(out_dir);
 
     const xml = try sdf.render();
     const sdf_path = try std.fs.path.join(allocator, &.{ out_dir, "system.sdf" });
