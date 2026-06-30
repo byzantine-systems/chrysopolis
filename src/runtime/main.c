@@ -19,6 +19,7 @@
 #include <lions/fs/helpers.h>
 #include <lions/fs/protocol.h>
 #include <microkit.h>
+#include <sddf/blk/config.h>
 #include <sddf/serial/config.h>
 #include <sddf/serial/queue.h>
 #include <sddf/timer/config.h>
@@ -36,6 +37,13 @@ __attribute__((
 __attribute__((
     __section__(".timer_client_config"))) timer_client_config_t timer_config;
 __attribute__((__section__(".fs_client_config"))) fs_client_config_t fs_config;
+/* Passive blk client: beam_server is registered with the blk virtualiser on
+ * partition 0 so the driver queue has non-zero capacity (the virt faults at
+ * init otherwise). beam_server issues no blk requests — this config stays
+ * dormant, like fs_config. The FAT fs_server (next issue) becomes the real
+ * blk client. */
+__attribute__((
+    __section__(".blk_client_config"))) blk_client_config_t blk_config;
 
 /* The libc console path (lib/libc/posix/fd.c) writes through this handle. */
 serial_queue_handle_t serial_tx_queue_handle;

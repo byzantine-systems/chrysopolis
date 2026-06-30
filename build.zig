@@ -32,11 +32,14 @@ const BoardCfg = struct {
     timer: []const u8,
     blk: []const u8,
     net: []const u8,
+    // virtio drivers (blk/net) split the bus transport into its own unit
+    // (virtio/transport/<blk_transport>.c); block.c links against it.
+    blk_transport: []const u8,
 };
 
 fn boardCfg(board: []const u8) BoardCfg {
     if (std.mem.eql(u8, board, "qemu_virt_aarch64"))
-        return .{ .serial = "arm", .timer = "arm", .blk = "virtio", .net = "virtio" };
+        return .{ .serial = "arm", .timer = "arm", .blk = "virtio", .net = "virtio", .blk_transport = "mmio" };
     std.debug.panic("unknown -Dboard={s}; add it to boardCfg()", .{board});
 }
 
@@ -116,11 +119,13 @@ fn component(
     name: []const u8,
     srcs: []const []const u8,
     extra_includes: []const []const u8,
+    defines: []const []const u8,
 ) void {
     const pd = addPd(b, name, target, optimize);
     for (srcs) |s| pd.root_module.addCSourceFile(.{ .file = sddfPath(b, s) });
     addSddfIncludes(b, pd.root_module);
     for (extra_includes) |inc| pd.root_module.addIncludePath(sddfPath(b, inc));
+    for (defines) |d| pd.root_module.addCMacro(d, "1");
     pd.root_module.linkLibrary(util);
     pd.root_module.linkLibrary(util_putchar_debug);
     b.installArtifact(pd);
@@ -280,29 +285,34 @@ pub fn build(b: *std.Build) void {
             b.fmt("drivers/serial/{s}/uart.c", .{cfg.serial}),
         }, &.{
             b.fmt("drivers/serial/{s}/include", .{cfg.serial}),
-        });
-        component(b, target, optimize, "serial_virt_tx.elf", &.{"serial/components/virt_tx.c"}, &.{});
-        component(b, target, optimize, "serial_virt_rx.elf", &.{"serial/components/virt_rx.c"}, &.{});
+        }, &.{});
+        component(b, target, optimize, "serial_virt_tx.elf", &.{"serial/components/virt_tx.c"}, &.{}, &.{});
+        component(b, target, optimize, "serial_virt_rx.elf", &.{"serial/components/virt_rx.c"}, &.{}, &.{});
     }
 
     // Timer: clock.
     if (with_timer) {
         component(b, target, optimize, "timer_driver.elf", &.{
             b.fmt("drivers/timer/{s}/timer.c", .{cfg.timer}),
-        }, &.{});
+        }, &.{}, &.{});
     }
 
     // Block: backs the FAT fs_server ERTS loads modules from (Phase 5).
     if (with_blk) {
         component(b, target, optimize, "blk_driver.elf", &.{
             b.fmt("drivers/blk/{s}/block.c", .{cfg.blk}),
+            // block.c links against the virtio bus transport (mmio on qemu),
+            // which sDDF builds as a separate translation unit.
+            b.fmt("virtio/transport/{s}.c", .{cfg.blk_transport}),
         }, &.{
             b.fmt("drivers/blk/{s}", .{cfg.blk}),
-        });
+        }, &.{});
+        // DEBUG_BLK_VIRT turns on the virt's success log ("MBR partitioning
+        // detected"), which is otherwise compiled out — boot-smoke gates on it.
         component(b, target, optimize, "blk_virt.elf", &.{
             "blk/components/virt.c",
             "blk/components/partitioning.c",
-        }, &.{});
+        }, &.{}, &.{"DEBUG_BLK_VIRT"});
     }
 
     // Network: LwIP / TCP-IP + BEAM<->BEAM distribution (Phase 8).
@@ -311,10 +321,10 @@ pub fn build(b: *std.Build) void {
             b.fmt("drivers/network/{s}/ethernet.c", .{cfg.net}),
         }, &.{
             b.fmt("drivers/network/{s}", .{cfg.net}),
-        });
-        component(b, target, optimize, "net_virt_rx.elf", &.{"network/components/virt_rx.c"}, &.{});
-        component(b, target, optimize, "net_virt_tx.elf", &.{"network/components/virt_tx.c"}, &.{});
-        component(b, target, optimize, "net_copy.elf", &.{"network/components/copy.c"}, &.{});
+        }, &.{});
+        component(b, target, optimize, "net_virt_rx.elf", &.{"network/components/virt_rx.c"}, &.{}, &.{});
+        component(b, target, optimize, "net_virt_tx.elf", &.{"network/components/virt_tx.c"}, &.{}, &.{});
+        component(b, target, optimize, "net_copy.elf", &.{"network/components/copy.c"}, &.{}, &.{});
     }
 
     // === beam_server PD glue. Compile main/bringup/process/memfs + the

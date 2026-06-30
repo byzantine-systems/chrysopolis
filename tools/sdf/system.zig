@@ -93,14 +93,31 @@ pub fn main() !void {
     var timer_system = sddf.Timer.init(allocator, &sdf, timer_node, &timer_driver);
     try timer_system.addClient(&beam_server);
 
-    // Block + FAT filesystem: TEMPORARILY DISABLED
-    // Testing ERTS boot without filesystem to confirm threading/syscalls work
-    // Will implement minimal in-memory boot environment as workaround
-    // var blk_driver = Pd.create(allocator, "blk_driver", "blk_driver.elf", .{ .priority = 200 });
-    // var blk_virt = Pd.create(allocator, "blk_virt", "blk_virt.elf", .{ .priority = 199 });
+    // Block subsystem: virtio-mmio block driver + block virtualiser. beam_server
+    // is registered as a passive client on partition 0 only to give the driver
+    // queue a non-zero capacity (the sDDF blk virt's driver-queue capacity is the
+    // sum of its clients' capacities; with zero clients it faults at init when it
+    // enqueues the MBR read). beam_server never issues blk requests — the virt
+    // reads/validates the MBR and maps partition 0, then sits idle. The real
+    // client is the FAT fs_server (next issue), which replaces this passive map.
+    //
+    // The DTB node is virtio_mmio@a000200 (IRQ 17), matching the LionsOS board
+    // config (sddf tools/meta/board.py: blk="virtio_mmio@a000200") and the QEMU
+    // attach `bus=virtio-mmio-bus.1`. QEMU maps virtio-mmio-bus.N to address
+    // 0xa000000 + N*0x200, so bus.1 == a000200. (a000000/bus.0 is reserved for
+    // ethernet in that config.) Pinning the bus keeps the disk on a fixed slot
+    // rather than relying on QEMU's highest-slot-first auto-placement.
+    var blk_driver = Pd.create(allocator, "blk_driver", "blk_driver.elf", .{ .priority = 200 });
+    sdf.addProtectionDomain(&blk_driver);
+    var blk_virt = Pd.create(allocator, "blk_virt", "blk_virt.elf", .{ .priority = 199 });
+    sdf.addProtectionDomain(&blk_virt);
+
+    const blk_node = blob.child("virtio_mmio@a000200") orelse return error.BlkNodeNotFound;
+    var blk_system = try sddf.Blk.init(allocator, &sdf, blk_node, &blk_driver, &blk_virt, .{});
+    try blk_system.addClient(&beam_server, .{ .partition = 0 });
+
+    // FAT filesystem (fs_server): deferred to the next issue.
     // var fatfs = Pd.create(allocator, "fatfs", "fat.elf", .{ .priority = 96 });
-    // const blk_node = blob.child("virtio_mmio@a000000") orelse return error.BlkNodeNotFound;
-    // var blk_system = try sddf.Blk.init(allocator, &sdf, blk_node, &blk_driver, &blk_virt, .{});
     // var fs = try lionsos.FileSystem.init(allocator, &sdf, &fatfs, &beam_server, .{});
 
     // Wire channels/queues/shared regions, then serialise every subsystem's
@@ -109,8 +126,8 @@ pub fn main() !void {
     try serial_system.serialiseConfig(out_dir);
     try timer_system.connect();
     try timer_system.serialiseConfig(out_dir);
-    // try blk_system.connect();
-    // try blk_system.serialiseConfig(out_dir);
+    try blk_system.connect();
+    try blk_system.serialiseConfig(out_dir);
     // fs.connect(.{});
     // try fs.serialiseConfig(out_dir);
 

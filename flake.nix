@@ -460,6 +460,7 @@
                 -Dlionsos-src=${lionsosSrc} \
                 -Dboot-data="$PWD/boot_data.c" \
                 -Dwith-erts=true \
+                -Dwith-blk=true \
                 -Derts-archive-dir="$PWD"
 
               # Headers a downstream consumer of libmicrokitco.a would need; the
@@ -612,7 +613,9 @@
                 cp ${beamZig}/bin/serial_driver.elf \
                    ${beamZig}/bin/timer_driver.elf \
                    ${beamZig}/bin/serial_virt_tx.elf \
-                   ${beamZig}/bin/serial_virt_rx.elf build/
+                   ${beamZig}/bin/serial_virt_rx.elf \
+                   ${beamZig}/bin/blk_driver.elf \
+                   ${beamZig}/bin/blk_virt.elf build/
                 chmod -R u+w build
 
                 cfg=${systemSdf}
@@ -625,10 +628,14 @@
                 oc .serial_client_config serial_client_beam_server.data      beam_server.elf
                 oc .timer_client_config  timer_client_beam_server.data       beam_server.elf
 
-                # Block subsystem + FAT fs_server: DISABLED for now
-                # oc .device_resources     blk_driver_device_resources.data    blk_driver.elf
-                # oc .blk_driver_config    blk_driver.data                     blk_driver.elf
-                # oc .blk_virt_config      blk_virt.data                       blk_virt.elf
+                # Block subsystem: driver device resources + driver/virt configs,
+                # plus beam_server's passive blk-client config (partition 0).
+                oc .device_resources     blk_driver_device_resources.data    blk_driver.elf
+                oc .blk_driver_config    blk_driver.data                     blk_driver.elf
+                oc .blk_virt_config      blk_virt.data                       blk_virt.elf
+                oc .blk_client_config    blk_client_beam_server.data         beam_server.elf
+
+                # FAT fs_server: DISABLED for now (next issue).
                 # oc .blk_client_config    blk_client_fatfs.data               fat.elf
                 # oc .fs_server_config     fs_server_fatfs.data                fat.elf
                 # beam_server's fs client config (the fs protocol to fatfs).
@@ -693,6 +700,10 @@
                     -display none -monitor none \
                     -serial file:boot.log \
                     -device loader,file=${sel4TestImage}/sel4-beam.img,addr=0x70000000,cpu-num=0 \
+                    -global virtio-mmio.force-legacy=false \
+                    -drive file=${fatDisk},if=none,format=raw,id=hd,readonly=on \
+                    -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1 \
+                    -d guest_errors \
                     || true
 
                   echo "=== serial log ==="
@@ -713,6 +724,8 @@
                   check "monotonic clock via sDDF timer:"
                   # Step 2: ERTS (liberts.a) is linked and launched.
                   check "Handing off to ERTS core loop..."
+                  # Step 3: the blk virtualiser read + validated partition 0 of fatDisk.
+                  check "MBR partitioning detected"
 
                   [ $fail -eq 0 ] || { echo "boot-smoke: assertions failed"; exit 1; }
                   touch $out
@@ -765,6 +778,10 @@
               enable = true;
             };
 
+            languages.zig = {
+              enable = true;
+            };
+
             scripts.run-sel4.exec = ''
               set -e
               img="''${1:-result/sel4-beam.img}"
@@ -777,7 +794,10 @@
                 -m size=2G \
                 -serial mon:stdio \
                 -nographic \
-                -device loader,file="$img",addr=0x70000000,cpu-num=0
+                -device loader,file="$img",addr=0x70000000,cpu-num=0 \
+                -global virtio-mmio.force-legacy=false \
+                -drive file=${fatDisk},if=none,format=raw,id=hd,readonly=on \
+                -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1
             '';
 
             enterShell = ''
