@@ -416,10 +416,6 @@
 
             buildPhase = ''
               runHook preBuild
-              # Generate boot_data.c with embedded boot files (memfs).
-              bash ${./tools/gen-boot-data.sh} boot_data.c ${pkgs.beamPackages.erlang}/lib/erlang \
-                ${pkgs.beamPackages.erlang}/lib/erlang/releases/28/start_clean.boot
-
               # The ERTS archives reference each other and libgcc circularly.
               # The Makefile resolved that with `ld --start-group`; the Zig
               # build graph has no group API, so merge them (plus the cross
@@ -444,10 +440,9 @@
               mkdir -p libalias
               ln -sf ${lionsStack}/lib/libc.a libalias/liblionsc.a
 
-              # build.zig owns the cross target/flags (one resolveTargetQuery)
-              # and compiles boot_data.c with them, so the flag string is no
-              # longer duplicated here. -Dwith-erts builds beam_test.elf too;
-              # installArtifact emits $out/{lib,bin}.
+              # build.zig owns the cross target/flags (one resolveTargetQuery).
+              # -Dwith-erts builds beam_test.elf too; installArtifact emits
+              # $out/{lib,bin}.
               mkdir -p $out
               export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
               zig build --prefix $out \
@@ -458,8 +453,9 @@
                 -Dlions-libc=${lionsStack} \
                 -Dlibc-dir="$PWD/libalias" \
                 -Dlionsos-src=${lionsosSrc} \
-                -Dboot-data="$PWD/boot_data.c" \
                 -Dwith-erts=true \
+                -Dwith-blk=true \
+                -Dwith-fs=true \
                 -Derts-archive-dir="$PWD"
 
               # Headers a downstream consumer of libmicrokitco.a would need; the
@@ -612,7 +608,10 @@
                 cp ${beamZig}/bin/serial_driver.elf \
                    ${beamZig}/bin/timer_driver.elf \
                    ${beamZig}/bin/serial_virt_tx.elf \
-                   ${beamZig}/bin/serial_virt_rx.elf build/
+                   ${beamZig}/bin/serial_virt_rx.elf \
+                   ${beamZig}/bin/blk_driver.elf \
+                   ${beamZig}/bin/blk_virt.elf \
+                   ${beamZig}/bin/fat.elf build/
                 chmod -R u+w build
 
                 cfg=${systemSdf}
@@ -625,14 +624,17 @@
                 oc .serial_client_config serial_client_beam_server.data      beam_server.elf
                 oc .timer_client_config  timer_client_beam_server.data       beam_server.elf
 
-                # Block subsystem + FAT fs_server: DISABLED for now
-                # oc .device_resources     blk_driver_device_resources.data    blk_driver.elf
-                # oc .blk_driver_config    blk_driver.data                     blk_driver.elf
-                # oc .blk_virt_config      blk_virt.data                       blk_virt.elf
-                # oc .blk_client_config    blk_client_fatfs.data               fat.elf
-                # oc .fs_server_config     fs_server_fatfs.data                fat.elf
-                # beam_server's fs client config (the fs protocol to fatfs).
-                # oc .fs_client_config     fs_client_beam_server.data          beam_server.elf
+                # Block subsystem: driver device resources + driver/virt configs.
+                oc .device_resources     blk_driver_device_resources.data    blk_driver.elf
+                oc .blk_driver_config    blk_driver.data                     blk_driver.elf
+                oc .blk_virt_config      blk_virt.data                       blk_virt.elf
+
+                # FAT fs_server: fatfs is the blk client (partition 0) and the fs
+                # server; beam_server is the fs client (libc fs path dormant until
+                # the memfs cutover).
+                oc .blk_client_config    blk_client_fatfs.data               fat.elf
+                oc .fs_server_config     fs_server_fatfs.data                fat.elf
+                oc .fs_client_config     fs_client_beam_server.data          beam_server.elf
 
                 ${microkitSdk}/bin/microkit $cfg/system.sdf \
                   --search-path build \
@@ -686,13 +688,24 @@
                 }
                 ''
                   echo "Booting ${sel4TestImage.name} under QEMU..."
-                  timeout 120 qemu-system-aarch64 \
+                  # The FAT volume must mount read-write (ERTS opens /dev/null as
+                  # a write sink); copy the read-only store image to a writable
+                  # file and attach it without readonly=on.
+                  cp ${fatDisk} disk.img
+                  chmod u+w disk.img
+                  # Booting to the shell loads ~all of kernel+stdlib over FAT
+                  # (synchronous fs reads), which is much slower than memfs.
+                  timeout 300 qemu-system-aarch64 \
                     -machine virt,virtualization=on \
                     -cpu cortex-a53 \
                     -m size=2G \
                     -display none -monitor none \
                     -serial file:boot.log \
                     -device loader,file=${sel4TestImage}/sel4-beam.img,addr=0x70000000,cpu-num=0 \
+                    -global virtio-mmio.force-legacy=false \
+                    -drive file=disk.img,if=none,format=raw,id=hd \
+                    -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1 \
+                    -d guest_errors \
                     || true
 
                   echo "=== serial log ==="
@@ -713,6 +726,11 @@
                   check "monotonic clock via sDDF timer:"
                   # Step 2: ERTS (liberts.a) is linked and launched.
                   check "Handing off to ERTS core loop..."
+                  # Step 3: the blk virtualiser read + validated partition 0 of fatDisk.
+                  check "MBR partitioning detected"
+                  # Step 4: ERTS reaches the Erlang shell, having loaded kernel +
+                  # stdlib from the FAT fs_server (memfs is gone from the image).
+                  check "Eshell"
 
                   [ $fail -eq 0 ] || { echo "boot-smoke: assertions failed"; exit 1; }
                   touch $out
@@ -765,11 +783,22 @@
               enable = true;
             };
 
+            languages.zig = {
+              enable = true;
+            };
+
             scripts.run-sel4.exec = ''
               set -e
               img="''${1:-result/sel4-beam.img}"
               if [ ! -f "$img" ]; then
                 nix build
+              fi
+              # The FAT volume mounts read-write (ERTS opens /dev/null; the
+              # filesystem must accept writes). The store image is read-only, so
+              # keep a writable working copy that persists across reboots.
+              disk="''${CHRYSO_DISK:-./chrysopolis-disk.img}"
+              if [ ! -f "$disk" ]; then
+                cp --no-preserve=mode ${fatDisk} "$disk"
               fi
               exec qemu-system-aarch64 \
                 -machine virt,virtualization=on \
@@ -777,7 +806,10 @@
                 -m size=2G \
                 -serial mon:stdio \
                 -nographic \
-                -device loader,file="$img",addr=0x70000000,cpu-num=0
+                -device loader,file="$img",addr=0x70000000,cpu-num=0 \
+                -global virtio-mmio.force-legacy=false \
+                -drive file="$disk",if=none,format=raw,id=hd \
+                -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1
             '';
 
             enterShell = ''

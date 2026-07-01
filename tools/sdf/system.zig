@@ -93,26 +93,45 @@ pub fn main() !void {
     var timer_system = sddf.Timer.init(allocator, &sdf, timer_node, &timer_driver);
     try timer_system.addClient(&beam_server);
 
-    // Block + FAT filesystem: TEMPORARILY DISABLED
-    // Testing ERTS boot without filesystem to confirm threading/syscalls work
-    // Will implement minimal in-memory boot environment as workaround
-    // var blk_driver = Pd.create(allocator, "blk_driver", "blk_driver.elf", .{ .priority = 200 });
-    // var blk_virt = Pd.create(allocator, "blk_virt", "blk_virt.elf", .{ .priority = 199 });
-    // var fatfs = Pd.create(allocator, "fatfs", "fat.elf", .{ .priority = 96 });
-    // const blk_node = blob.child("virtio_mmio@a000000") orelse return error.BlkNodeNotFound;
-    // var blk_system = try sddf.Blk.init(allocator, &sdf, blk_node, &blk_driver, &blk_virt, .{});
-    // var fs = try lionsos.FileSystem.init(allocator, &sdf, &fatfs, &beam_server, .{});
+    // Block subsystem: virtio-mmio block driver + block virtualiser. The FAT
+    // fs_server (fatfs, below) is the sole blk client, on partition 0.
+    //
+    // The DTB node is virtio_mmio@a000200 (IRQ 17), matching the LionsOS board
+    // config (sddf tools/meta/board.py: blk="virtio_mmio@a000200") and the QEMU
+    // attach `bus=virtio-mmio-bus.1`. QEMU maps virtio-mmio-bus.N to address
+    // 0xa000000 + N*0x200, so bus.1 == a000200. (a000000/bus.0 is reserved for
+    // ethernet in that config.) Pinning the bus keeps the disk on a fixed slot
+    // rather than relying on QEMU's highest-slot-first auto-placement.
+    var blk_driver = Pd.create(allocator, "blk_driver", "blk_driver.elf", .{ .priority = 200 });
+    sdf.addProtectionDomain(&blk_driver);
+    var blk_virt = Pd.create(allocator, "blk_virt", "blk_virt.elf", .{ .priority = 199 });
+    sdf.addProtectionDomain(&blk_virt);
+
+    const blk_node = blob.child("virtio_mmio@a000200") orelse return error.BlkNodeNotFound;
+    var blk_system = try sddf.Blk.init(allocator, &sdf, blk_node, &blk_driver, &blk_virt, .{});
+
+    // FAT fs_server: mounts partition 0 of the disk via the blk virtualiser and
+    // serves the LionsOS fs protocol to beam_server. The FileSystem.Fat helper
+    // registers fatfs as the blk client AND maps the FatFs worker-thread stacks
+    // (worker_thread_stack_one..four), so we do NOT add a blk client by hand.
+    // The libc fs path in beam_server stays dormant until the memfs cutover; for
+    // now beam_server only verifies the share/queues are mapped at init.
+    var fatfs = Pd.create(allocator, "fatfs", "fat.elf", .{ .priority = 96 });
+    sdf.addProtectionDomain(&fatfs);
+    var fs = try lionsos.FileSystem.Fat.init(allocator, &sdf, &fatfs, &beam_server, &blk_system, .{ .partition = 0 });
 
     // Wire channels/queues/shared regions, then serialise every subsystem's
     // per-PD config blobs into out_dir (objcopied into the ELFs by the build).
+    // fs.connect() registers fatfs as a blk client, so it must precede
+    // blk_system.connect() (which iterates the registered clients).
     try serial_system.connect();
     try serial_system.serialiseConfig(out_dir);
     try timer_system.connect();
     try timer_system.serialiseConfig(out_dir);
-    // try blk_system.connect();
-    // try blk_system.serialiseConfig(out_dir);
-    // fs.connect(.{});
-    // try fs.serialiseConfig(out_dir);
+    try fs.connect();
+    try blk_system.connect();
+    try blk_system.serialiseConfig(out_dir);
+    try fs.serialiseConfig(out_dir);
 
     const xml = try sdf.render();
     const sdf_path = try std.fs.path.join(allocator, &.{ out_dir, "system.sdf" });
