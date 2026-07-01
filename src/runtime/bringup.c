@@ -1,20 +1,16 @@
 /*
- * Bring-up shims for the beam_server PD (TODO: remove this in-memory
- * filesystem).
+ * Bring-up syscall shims for the beam_server PD.
  *
- * 1. libc_init_file: a strong override of the libc's file syscall init
- *    (lib/libc/posix/file.c). The real one wires open/read/stat to the
- *    fs_server via the fs_share region; with no server, fs_share is NULL and
- *    ERTS's early filesystem probes (open("/proc/self/mountinfo"), ...) fault
- *    on a NULL write. We instead register those syscalls to use the in-memory
- *    filesystem (memfs) which provides boot files and device files.
+ * The LionsOS libc only registers the syscalls its own components need; ERTS
+ * reaches for a number more during boot (epoll/pselect6/ppoll for its poll set,
+ * pipe2/timerfd/socketpair, a cothread-aware futex, sched_getaffinity for the
+ * CPU count, uname, clock_nanosleep, signal and scheduler no-ops). libc leaves
+ * those slots NULL -> sel4_vsyscall returns -ENOSYS and ERTS spins, so
+ * bringup_register_syscalls() installs benign stubs (called after libc_init,
+ * while the slots are still free, so no double-register assert).
  *
- * 2. bringup_register_syscalls: the LionsOS libc only registers the syscalls
- *    its own components need. ERTS reaches for a few more during boot
- *    (sched_getaffinity for the CPU count, uname, clock_nanosleep, signal and
- *    scheduler no-ops). libc leaves those slots NULL -> sel4_vsyscall returns
- *    -ENOSYS and ERTS spins. We register benign stubs (called after
- *    libc_init, while the slots are still free, so no double-register assert).
+ * File I/O (open/read/write/stat/lseek) is NOT handled here: the real libc fs
+ * path (lib/libc/posix/file.c, wired in main.c) routes it to the FAT fs_server.
  */
 #include <lions/posix/fd.h>
 #include <lions/posix/posix.h>
@@ -27,8 +23,6 @@
 #include <sddf/serial/queue.h>
 #include <sddf/timer/client.h>
 #include <sddf/timer/config.h>
-
-#include "memfs.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -53,9 +47,8 @@ extern timer_client_config_t timer_config;
 
 #define SERIAL_RX_CH 1
 
-/* /dev/null: writes discarded, reads return EOF. ERTS opens it during boot
- * (for sink/null fds) and busy-retries open() forever if it fails, so it must
- * succeed even before the real fs_server is wired. */
+/* Discard sink / EOF source for the synthetic fds below (pipe write end,
+ * timerfd, socketpair): writes are discarded, reads return EOF. */
 static ssize_t devnull_write(const void *data, size_t count, int fd) {
   (void)data;
   (void)fd;
@@ -184,14 +177,6 @@ static long bringup_socketpair(va_list ap) {
   sv[0] = a;
   sv[1] = b;
   return 0;
-}
-
-/* libc_init_file override: TODO this is a workaround - no fs_server present.
- * Prevents libc from initializing fs syscalls so ERTS's filesystem probes
- * return ENOENT cleanly instead of faulting on NULL fs_share.
- * Strong override of lib/libc/posix/file.c:libc_init_file() */
-__attribute__((used)) void libc_init_file(void) {
-  /* No-op: don't initialize fs syscalls since fs_server isn't wired */
 }
 
 static long bringup_zero(va_list ap) {
@@ -538,43 +523,10 @@ static long bringup_uname(va_list ap) {
   return 0;
 }
 
-/* readlinkat: No symlinks without filesystem */
-static long bringup_readlinkat(va_list ap) {
-  (void)ap;
-  return -ENOENT;
-}
-
-/* clone3: Not implemented - ERTS uses clone */
-static long bringup_clone3(va_list ap) {
-  (void)ap;
-  return -ENOSYS;
-}
-
-/* openat: TODO: remove in-memory filesystem */
-static long bringup_openat(va_list ap) {
-  (void)va_arg(ap, int); /* dirfd */
-  const char *path = va_arg(ap, const char *);
-  int flags = va_arg(ap, int);
-  /* mode_t mode = va_arg(ap, mode_t); */ /* unused */
-
-  return memfs_open(path, flags);
-}
-
-/* fstatat: TODO: remove in-memory files */
-static long bringup_fstatat(va_list ap) {
-  (void)va_arg(ap, int); /* dirfd */
-  const char *path = va_arg(ap, const char *);
-  struct stat *st = va_arg(ap, struct stat *);
-  (void)va_arg(ap, int); /* flags */
-
-  return memfs_stat(path, st);
-}
-
 void bringup_register_syscalls(void) {
-  libc_define_syscall(SYS_openat, bringup_openat);      /* TODO: remove memfs */
-  libc_define_syscall(SYS_newfstatat, bringup_fstatat); /* TODO: remove memfs */
-  /* readlinkat (78) and clone3 (220) warnings are harmless - not in musl
-   * syscall table */
+  /* File syscalls (openat/newfstatat/readlinkat/lseek/mkdirat/unlinkat) are
+   * registered by the real libc_init_file() against the FAT fs_server, do not
+   * register them here (libc_define_syscall asserts the slot is still NULL). */
   libc_define_syscall(175, bringup_getid_zero); /* SYS_geteuid */
   libc_define_syscall(177, bringup_getid_zero); /* SYS_getegid */
   libc_define_syscall(SYS_sched_getaffinity, bringup_sched_getaffinity);

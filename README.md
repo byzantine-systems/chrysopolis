@@ -1,6 +1,7 @@
 # Chrysopolis
 
 [![Built with Nix](https://builtwithnix.org/badge.svg)](https://builtwithnix.org)
+[![Build & Test](https://github.com/byzantine-systems/chrysopolis/actions/workflows/build.yml/badge.svg)](https://github.com/byzantine-systems/chrysopolis/actions/workflows/build.yml)
 ![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)
 
 > **CHRYSOPOLIS (Χρυσόπολις, lit. "Golden City")**, the name of at least two Byz. cities, one in Macedonia, the other in Bithynia. [^1]
@@ -20,7 +21,7 @@ Chrysopolis aims to run the BEAM on the [seL4 microkernel](https://sel4.systems/
     - **Zig** is invoked by Nix as the build driver via two `build.zig` metaprograms: 
         - [tools/sdf](tools/sdf) generates the Microkit system description.
         - the root [build.zig](build.zig) builds `libmicrokitco`, the sDDF driver/virtualiser PDs, and compiles and links the `beam_server` PD (ERTS glue) from [src/runtime](src/runtime). 
-    - Boot files are embedded into memory (`memfs`), the result is a hermetic, reproducible `sel4-beam.img`.
+    - ERTS loads its OTP modules and boot script from a FAT filesystem (`fatfs` PD -> sDDF block subsystem), the result is a hermetic, reproducible `sel4-beam.img`.
 
 ## Architecture
 
@@ -29,7 +30,7 @@ flowchart LR
     %% Nodes
     App["Gleam / Erlang Application"]
     ERTS["ERTS 28.5<br/>(scheduler, GC, code loader)"]
-    Runtime["Runtime Adapter<br/>(pthread -> cothreads, syscall stubs, memfs)"]
+    Runtime["Runtime Adapter<br/>(pthread -> cothreads, syscall stubs, FAT fs client)"]
     LionsOS["LionsOS<br/>(musl libc, sDDF serial/timer drivers, libmicrokitco)"]
     Microkit["Microkit<br/>(seL4 system init + IPC)"]
     seL4["seL4 Microkernel<br/>(formally verified)"]
@@ -86,14 +87,10 @@ Build the ERTS-linked image:
 ```bash
 nix build .#test-image                          
 ```
-and boot it under QEMU with an **interactive** serial (`-serial mon:stdio`).
+and boot it under QEMU using our custom (nix devenv) script:
 
 ```bash
-timeout 300 qemu-system-aarch64 \
-  -machine virt,virtualization=on \
-  -cpu cortex-a53 -m 2G -nographic \
-  -serial mon:stdio \
-  -device loader,file=result/sel4-beam.img,addr=0x70000000,cpu-num=0
+run-sel4
 ```
 
 After seL4 boots, you'll see the `beam_server` PD come up, the sDDF timer report a

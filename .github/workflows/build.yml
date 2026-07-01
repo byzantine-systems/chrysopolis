@@ -1,6 +1,6 @@
 # CI pipeline: formatting, compilation safety, image packaging
 # and a headless QEMU boot of the synthesized system image.
-name: build
+name: "[Nix] Build & Test"
 
 on:
   push:

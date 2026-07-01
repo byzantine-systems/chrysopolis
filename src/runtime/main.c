@@ -41,10 +41,9 @@ __attribute__((__section__(".fs_client_config"))) fs_client_config_t fs_config;
 serial_queue_handle_t serial_tx_queue_handle;
 serial_queue_handle_t serial_rx_queue_handle;
 
-/* The fs client globals the libc fs path references. Defined (so libc.a
- * links) but dormant in bring-up: no fs_server PD is wired yet, so the
- * config section stays zero and the queues stay NULL. File I/O is a later
- * concern (fat fs_server + blk + libmicrokitco). */
+/* The fs client globals the libc fs path (lib/libc/posix/file.c) and the fs
+ * helpers reference. beam_run() points them at the fatfs share/queues from
+ * fs_config before libc_init; the libc open/read/stat/lseek path uses them. */
 fs_queue_t *fs_command_queue;
 fs_queue_t *fs_completion_queue;
 char *fs_share;
@@ -62,29 +61,57 @@ extern void beam_process_external_events(microkit_channel ch)
 extern void bringup_register_syscalls(void);
 extern void thread_init(void);
 extern void thread_notified(microkit_channel ch);
-extern void memfs_init(void);
 
-/* The libc fs path blocks here waiting for an fatfs completion; a cothread
- * yields to the scheduler and is woken by the fs channel notification. */
+/* The libc fs path spins here until fatfs records the completion of an fs
+ * command. erl_start never returns to the Microkit event loop, so notified()
+ * never fires and we cannot block on the fs channel (the reference clients park
+ * the cothread and let notified() drain); instead we drain the completion queue
+ * directly (fatfs, a higher-priority PD, fills it via seL4 preemption).
+ *
+ * Crucially this does NOT yield to other cothreads: yielding lets an ERTS
+ * helper cothread issue a reentrant fs read mid-command, and the two
+ * overlapping reads alias fs_share buffers, corrupting each other's data (a
+ * .beam then loads with the wrong module's bytes). Keeping the wait synchronous
+ * serialises fs ops exactly as the old memfs reads did. */
 static void fs_blocking_wait(microkit_channel ch) {
-  microkit_cothread_wait_on_channel(ch);
+  (void)ch;
+  fs_process_completions(NULL);
 }
 
 static void beam_run(void) {
+  /* Wire the libc fs client to the FAT fs_server before libc_init: the real
+   * libc_init_file() (called inside libc_init) routes open/read/stat/lseek to
+   * the fs protocol, and that path reads these globals + the blocking_wait
+   * callback at the first file op. fatfs serves the OTP release ERTS boots
+   * from, so this replaces the old in-memory filesystem entirely. */
+  fs_command_queue = fs_config.server.command_queue.vaddr;
+  fs_completion_queue = fs_config.server.completion_queue.vaddr;
+  fs_share = fs_config.server.share.vaddr;
+  fs_set_blocking_wait(fs_blocking_wait);
+
   libc_init(NULL, (void *)beam_heap_start, BEAM_HEAP_SIZE);
-  memfs_init(); /* Initialize in-memory filesystem before syscall registration
-                 */
   bringup_register_syscalls();
   /* Stand up the cothread runtime ERTS's helper threads spawn onto. Must
-   * follow libc_init (uses malloc for the cothread stacks). */
+   * follow libc_init (uses malloc for the cothread stacks) and precede the
+   * FS_CMD_INITIALISE below (fs_command_blocking runs on the cothread runtime).
+   */
   thread_init();
 
-  /* Wire the libc fs client: DISABLED for now
-   * Testing ERTS boot without filesystem */
-  // fs_set_blocking_wait(fs_blocking_wait);
-  // fs_command_queue = fs_config.server.command_queue.vaddr;
-  // fs_completion_queue = fs_config.server.completion_queue.vaddr;
-  // fs_share = fs_config.server.share.vaddr;
+  /* Mount the FAT volume. The libc fs path issues per-op commands but never the
+   * one-time FS_CMD_INITIALISE that fatfs's f_mount() hangs off; the client
+   * must send it, exactly as the LionsOS posix_test / micropython clients do.
+   * Without this every open fails (FS_STATUS_ERROR) and ERTS busy-retries
+   * forever. */
+  {
+    fs_cmpl_t cmpl;
+    int err = fs_command_blocking(&cmpl, (fs_cmd_t){.type = FS_CMD_INITIALISE});
+    if (err != 0 || cmpl.status != FS_STATUS_SUCCESS) {
+      printf("FATAL: FAT mount (FS_CMD_INITIALISE) failed: status %d\n",
+             (int)cmpl.status);
+    } else {
+      printf("FAT filesystem mounted via fs_server.\n");
+    }
+  }
 
   printf("Chrysopolis: beam_server up on the LionsOS reference stack.\n");
 
@@ -93,22 +120,10 @@ static void beam_run(void) {
   printf("monotonic clock via sDDF timer: %lld.%09lld s\n",
          (long long)ts.tv_sec, (long long)ts.tv_nsec);
 
-  /* Verify the FAT fs_server is wired: the objcopied .fs_client_config gives a
-   * non-NULL share region + command/completion queues from fatfs. The libc fs
-   * path stays OFF (memfs is still the active filesystem) until the cutover;
-   * this only proves the protocol link is mapped. */
-  if (fs_config.server.share.vaddr != NULL) {
-    printf("fs_server share mapped: %p (cmd=%p cmpl=%p)\n",
-           fs_config.server.share.vaddr, fs_config.server.command_queue.vaddr,
-           fs_config.server.completion_queue.vaddr);
-  } else {
-    printf("WARNING: fs_server share is NULL (.fs_client_config not wired)\n");
-  }
-
   if (erl_start) {
     /* erlexec normally exports these; we bypass it, so erl_prim_loader / init
-     * would otherwise abort ("Environment variable BINDIR is not set"). The
-     * paths are nominal until the fs_server is wired. */
+     * would otherwise abort ("Environment variable BINDIR is not set"). These
+     * paths resolve against the FAT filesystem served by fatfs. */
     setenv("BINDIR", "/bin", 1);
     setenv("ROOTDIR", "/", 1);
     setenv("EMU", "beam", 1);

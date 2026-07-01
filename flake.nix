@@ -416,10 +416,6 @@
 
             buildPhase = ''
               runHook preBuild
-              # Generate boot_data.c with embedded boot files (memfs).
-              bash ${./tools/gen-boot-data.sh} boot_data.c ${pkgs.beamPackages.erlang}/lib/erlang \
-                ${pkgs.beamPackages.erlang}/lib/erlang/releases/28/start_clean.boot
-
               # The ERTS archives reference each other and libgcc circularly.
               # The Makefile resolved that with `ld --start-group`; the Zig
               # build graph has no group API, so merge them (plus the cross
@@ -444,10 +440,9 @@
               mkdir -p libalias
               ln -sf ${lionsStack}/lib/libc.a libalias/liblionsc.a
 
-              # build.zig owns the cross target/flags (one resolveTargetQuery)
-              # and compiles boot_data.c with them, so the flag string is no
-              # longer duplicated here. -Dwith-erts builds beam_test.elf too;
-              # installArtifact emits $out/{lib,bin}.
+              # build.zig owns the cross target/flags (one resolveTargetQuery).
+              # -Dwith-erts builds beam_test.elf too; installArtifact emits
+              # $out/{lib,bin}.
               mkdir -p $out
               export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
               zig build --prefix $out \
@@ -458,7 +453,6 @@
                 -Dlions-libc=${lionsStack} \
                 -Dlibc-dir="$PWD/libalias" \
                 -Dlionsos-src=${lionsosSrc} \
-                -Dboot-data="$PWD/boot_data.c" \
                 -Dwith-erts=true \
                 -Dwith-blk=true \
                 -Dwith-fs=true \
@@ -694,7 +688,14 @@
                 }
                 ''
                   echo "Booting ${sel4TestImage.name} under QEMU..."
-                  timeout 120 qemu-system-aarch64 \
+                  # The FAT volume must mount read-write (ERTS opens /dev/null as
+                  # a write sink); copy the read-only store image to a writable
+                  # file and attach it without readonly=on.
+                  cp ${fatDisk} disk.img
+                  chmod u+w disk.img
+                  # Booting to the shell loads ~all of kernel+stdlib over FAT
+                  # (synchronous fs reads), which is much slower than memfs.
+                  timeout 300 qemu-system-aarch64 \
                     -machine virt,virtualization=on \
                     -cpu cortex-a53 \
                     -m size=2G \
@@ -702,7 +703,7 @@
                     -serial file:boot.log \
                     -device loader,file=${sel4TestImage}/sel4-beam.img,addr=0x70000000,cpu-num=0 \
                     -global virtio-mmio.force-legacy=false \
-                    -drive file=${fatDisk},if=none,format=raw,id=hd,readonly=on \
+                    -drive file=disk.img,if=none,format=raw,id=hd \
                     -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1 \
                     -d guest_errors \
                     || true
@@ -727,8 +728,9 @@
                   check "Handing off to ERTS core loop..."
                   # Step 3: the blk virtualiser read + validated partition 0 of fatDisk.
                   check "MBR partitioning detected"
-                  # Step 4: the FAT fs_server is wired (beam_server sees a non-NULL share).
-                  check "fs_server share mapped"
+                  # Step 4: ERTS reaches the Erlang shell, having loaded kernel +
+                  # stdlib from the FAT fs_server (memfs is gone from the image).
+                  check "Eshell"
 
                   [ $fail -eq 0 ] || { echo "boot-smoke: assertions failed"; exit 1; }
                   touch $out
@@ -791,6 +793,13 @@
               if [ ! -f "$img" ]; then
                 nix build
               fi
+              # The FAT volume mounts read-write (ERTS opens /dev/null; the
+              # filesystem must accept writes). The store image is read-only, so
+              # keep a writable working copy that persists across reboots.
+              disk="''${CHRYSO_DISK:-./chrysopolis-disk.img}"
+              if [ ! -f "$disk" ]; then
+                cp --no-preserve=mode ${fatDisk} "$disk"
+              fi
               exec qemu-system-aarch64 \
                 -machine virt,virtualization=on \
                 -cpu cortex-a53 \
@@ -799,7 +808,7 @@
                 -nographic \
                 -device loader,file="$img",addr=0x70000000,cpu-num=0 \
                 -global virtio-mmio.force-legacy=false \
-                -drive file=${fatDisk},if=none,format=raw,id=hd,readonly=on \
+                -drive file="$disk",if=none,format=raw,id=hd \
                 -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1
             '';
 

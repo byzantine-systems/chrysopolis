@@ -16,7 +16,7 @@ const std = @import("std");
 // The host gen-sdf tool (tools/sdf) stays a separate package: it has a real Zig
 // dependency (sdfgen) that needs zig2nix's offline cache, whereas everything
 // here is dependency-free and only needs a custom Nix buildPhase
-// (gen-boot-data.sh, the ERTS llvm-ar merge) the canned zig2nix builder can't do.
+// (the ERTS llvm-ar merge) the canned zig2nix builder can't do.
 //
 // Nix still fetches/locks every input (libc.a, the libmicrokitco/sDDF source
 // trees, the Microkit SDK, the ERTS archives) and passes them in as -D options;
@@ -33,7 +33,7 @@ const BoardCfg = struct {
     blk: []const u8,
     net: []const u8,
     // virtio drivers (blk/net) split the bus transport into its own unit
-    // (virtio/transport/<blk_transport>.c); block.c links against it.
+    // (virtio/transport/<blk_transport>.c), block.c links against it.
     blk_transport: []const u8,
 };
 
@@ -150,11 +150,11 @@ fn addBeamExe(
     });
 
     // Link order mirrors the old Makefile: glue object, libmicrokitco, [ERTS],
-    // then libmicrokit + libc so later archives resolve earlier references.
-    // The glue is linked as an object (not module C) so it precedes the prebuilt
-    // archives: Zig emits a module's own objects AFTER all link inputs, so if
-    // libc.a were scanned before the glue, lld would pull file.o (libc_init_file,
-    // referenced by posix.o) and collide with bringup.c's override.
+    // then libmicrokit + libc so later archives resolve earlier references. The
+    // glue is linked as an object (not module C) so it precedes the prebuilt
+    // archives (Zig emits a module's own objects AFTER all link inputs). The
+    // glue defines no libc overrides, posix.o pulls libc.a's real file.o for the
+    // fs syscalls (open/read/stat/lseek → the FAT fs_server).
     exe.root_module.addObjectFile(cfg.glue_obj);
     // libmicrokitco.a (built in this same build). addObjectFile whole-archives
     // it, pulling both libco + libmicrokitco objects.
@@ -209,7 +209,7 @@ fn addFatServer(
     const fat_config_inc = b.fmt("{s}/components/fs/fat/config", .{lionsos_src});
 
     // A second libmicrokitco built against the fat component's opts header
-    // (LIBMICROKITCO_MAX_COTHREADS = FAT_THREAD_NUM); otherwise identical to the
+    // (LIBMICROKITCO_MAX_COTHREADS = FAT_THREAD_NUM), otherwise identical to the
     // beam variant above.
     const microkitco_fat = b.addLibrary(.{
         .name = "microkitco_fat",
@@ -282,14 +282,12 @@ pub fn build(b: *std.Build) void {
     const libmicrokitco_src = b.option([]const u8, "libmicrokitco-src", "libmicrokitco source tree") orelse @panic("set -Dlibmicrokitco-src");
     const lions_libc = b.option([]const u8, "lions-libc", "lions-stack output (lib/libc.a + include/)") orelse @panic("set -Dlions-libc");
     const lionsos_src = b.option([]const u8, "lionsos-src", "LionsOS source tree (headers)") orelse @panic("set -Dlionsos-src");
-    const boot_data = b.option([]const u8, "boot-data", "path to the Nix-generated boot_data.c") orelse @panic("set -Dboot-data");
     const libc_dir = b.option([]const u8, "libc-dir", "dir holding liblionsc.a (LionsOS libc.a, aliased off the special name 'c')") orelse @panic("set -Dlibc-dir");
     const with_erts = b.option(bool, "with-erts", "also build beam_test.elf (the static ERTS link)") orelse false;
 
     const cfg = boardCfg(board);
 
-    // Subsystem toggles. serial+timer are today's image; blk (Phase 5) and net
-    // (Phase 8) are off until the SDF wires them.
+    // Subsystem toggles. serial+timer are today's image, blk and net are off until the SDF wires them.
     const with_serial = b.option(bool, "with-serial", "build the serial driver + virtualisers") orelse true;
     const with_timer = b.option(bool, "with-timer", "build the timer driver") orelse true;
     const with_blk = b.option(bool, "with-blk", "build the block driver + virtualiser") orelse false;
@@ -302,7 +300,7 @@ pub fn build(b: *std.Build) void {
 
     // === libmicrokitco: the cooperative cothread runtime ERTS's helper threads
     // spawn onto. Mirrors libmicrokitco.mk (libco/libco.c #includes the
-    // arch-specific file, so it is the only libco unit; plus libmicrokitco.c).
+    // arch-specific file, so it is the only libco unit, plus libmicrokitco.c).
     // The opts header is src/runtime/libmicrokitco_opts.h, on the include path
     // via b.path. Output: $out/lib/libmicrokitco.a, also linked into beam below.
     const microkitco = b.addLibrary(.{
@@ -380,7 +378,7 @@ pub fn build(b: *std.Build) void {
         }, &.{}, &.{});
     }
 
-    // Block: backs the FAT fs_server ERTS loads modules from (Phase 5).
+    // Block: backs the FAT fs_server ERTS loads modules from.
     if (with_blk) {
         component(b, target, optimize, "blk_driver.elf", &.{
             b.fmt("drivers/blk/{s}/block.c", .{cfg.blk}),
@@ -404,7 +402,7 @@ pub fn build(b: *std.Build) void {
         addFatServer(b, target, optimize, libmicrokitco_src, lions_libc, libc_dir, lionsos_src, board_dir);
     }
 
-    // Network: LwIP / TCP-IP + BEAM<->BEAM distribution (Phase 8).
+    // Network: LwIP / TCP-IP + BEAM<->BEAM distribution.
     if (with_net) {
         component(b, target, optimize, "eth_driver.elf", &.{
             b.fmt("drivers/network/{s}/ethernet.c", .{cfg.net}),
@@ -416,10 +414,10 @@ pub fn build(b: *std.Build) void {
         component(b, target, optimize, "net_copy.elf", &.{"network/components/copy.c"}, &.{}, &.{});
     }
 
-    // === beam_server PD glue. Compile main/bringup/process/memfs + the
-    // generated boot_data.c into ONE object (see addBeamExe for why the object,
-    // not module C). -O2 is pinned via cflags; ReleaseFast keeps Zig from adding
-    // safety/UBSan instrumentation to the C compile.
+    // === beam_server PD glue. Compile main/bringup/process into ONE object
+    // (see addBeamExe for why the object, not module C). -O2 is pinned via
+    // cflags, ReleaseFast keeps Zig from adding safety/UBSan instrumentation to
+    // the C compile. File I/O goes to the FAT fs_server (no embedded boot data).
     const cflags = &[_][]const u8{ "-ffreestanding", "-O2", "-g", "-Wall" };
     const glue = b.addObject(.{
         .name = "beam_glue",
@@ -433,14 +431,11 @@ pub fn build(b: *std.Build) void {
     });
     glue.root_module.addCSourceFiles(.{
         .root = b.path("src/runtime"),
-        .files = &.{ "main.c", "bringup.c", "process.c", "memfs.c" },
+        .files = &.{ "main.c", "bringup.c", "process.c" },
         .flags = cflags,
     });
-    // boot_data.c is generated by tools/gen-boot-data.sh in the Nix build and
-    // lives outside this package tree.
-    glue.root_module.addCSourceFile(.{ .file = .{ .cwd_relative = boot_data }, .flags = cflags });
 
-    glue.root_module.addIncludePath(b.path("src/runtime")); // libmicrokitco_opts.h, memfs.h
+    glue.root_module.addIncludePath(b.path("src/runtime")); // libmicrokitco_opts.h
     glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });
     glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
     // libmicrokitco.h + libhostedqueue/ (process.c's cothread layer), straight
@@ -452,9 +447,8 @@ pub fn build(b: *std.Build) void {
     glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lionsos_src}) });
 
     // Prebuilt archives are linked lazily (pulled on demand), the way the
-    // Makefile's `-lmicrokit -lc` and ld --start-group did. This is a
-    // correctness requirement, not just size: bringup.c strong-overrides
-    // libc.a's libc_init_file, which only holds while file.o stays unextracted.
+    // Makefile's `-lmicrokit -lc` and ld --start-group did, so members are
+    // extracted on demand to resolve the glue + inter-archive references.
     const beam_cfg = BeamCfg{
         .glue_obj = glue.getEmittedBin(),
         .microkitco_obj = microkitco.getEmittedBin(),
