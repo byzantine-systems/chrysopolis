@@ -7,10 +7,6 @@
  * configs the Microkit tool patched into our ELF sections, initialises the
  * serial TX/RX queue handles, then hands the beam_heap region to libc_init()
  * as the malloc arena and runs the BEAM.
- *
- * erl_start comes out of liberts.a (Phase 4+); it is weak so the same image
- * boots in bring-up mode (console + clock + heap, no ERTS) before the static
- * ERTS archive joins the link.
  */
 #include <lions/posix/posix.h>
 
@@ -19,15 +15,28 @@
 #include <lions/fs/helpers.h>
 #include <lions/fs/protocol.h>
 #include <microkit.h>
+#include <sddf/network/config.h>
+#include <sddf/network/lib_sddf_lwip.h>
+#include <sddf/network/queue.h>
 #include <sddf/serial/config.h>
 #include <sddf/serial/queue.h>
+#include <sddf/timer/client.h>
 #include <sddf/timer/config.h>
+#include <sddf/timer/protocol.h>
 
+#include <arpa/inet.h>
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
 #include <time.h>
+#include <unistd.h>
 
 /* Config blobs the sdfgen metaprogram emits and the build objcopies into
  * these ELF sections (.serial_client_config etc.). */
@@ -36,6 +45,10 @@ __attribute__((
 __attribute__((
     __section__(".timer_client_config"))) timer_client_config_t timer_config;
 __attribute__((__section__(".fs_client_config"))) fs_client_config_t fs_config;
+__attribute__((
+    __section__(".net_client_config"))) net_client_config_t net_config;
+__attribute__((__section__(
+    ".lib_sddf_lwip_config"))) lib_sddf_lwip_config_t lib_sddf_lwip_config;
 
 /* The libc console path (lib/libc/posix/fd.c) writes through this handle. */
 serial_queue_handle_t serial_tx_queue_handle;
@@ -43,10 +56,29 @@ serial_queue_handle_t serial_rx_queue_handle;
 
 /* The fs client globals the libc fs path (lib/libc/posix/file.c) and the fs
  * helpers reference. beam_run() points them at the fatfs share/queues from
- * fs_config before libc_init; the libc open/read/stat/lseek path uses them. */
+ * fs_config before libc_init, the libc open/read/stat/lseek path uses them. */
 fs_queue_t *fs_command_queue;
 fs_queue_t *fs_completion_queue;
 char *fs_share;
+
+/* Net client queue handles the linked lwIP stack (lib_sddf_lwip + lib/sock/
+ * tcp.c) drives, tcp.c references them extern. socket_config is tcp.c's
+ * function-pointer table the prebuilt libc sock.c dereferences once
+ * libc_init(&socket_config, ...) enables the socket syscalls. */
+net_queue_handle_t net_rx_handle;
+net_queue_handle_t net_tx_handle;
+extern libc_socket_config_t socket_config;
+
+/* net_enabled: net_config's magic validated (the SDF wired the net client).
+ * lwip_up: sddf_lwip_init has run, so notified() may pump the stack (it must
+ * never pump an uninitialised stack). dhcp_ready: the DHCP lease has landed. */
+static bool net_enabled;
+static bool lwip_up;
+static bool dhcp_ready;
+
+/* Period of the lwIP service timer (RX poll + lwIP timeouts), matching the
+ * LionsOS posix_test client. */
+#define NET_TIMEOUT (1 * NS_IN_MS)
 
 /* beam_heap region base, patched by the Microkit tool at synthesis time
  * (setvar_vaddr). Handed to libc_init() as the malloc arena, which
@@ -65,7 +97,7 @@ extern void thread_notified(microkit_channel ch);
 /* The libc fs path spins here until fatfs records the completion of an fs
  * command. erl_start never returns to the Microkit event loop, so notified()
  * never fires and we cannot block on the fs channel (the reference clients park
- * the cothread and let notified() drain); instead we drain the completion queue
+ * the cothread and let notified() drain), instead we drain the completion queue
  * directly (fatfs, a higher-priority PD, fills it via seL4 preemption).
  *
  * Crucially this does NOT yield to other cothreads: yielding lets an ERTS
@@ -76,6 +108,85 @@ extern void thread_notified(microkit_channel ch);
 static void fs_blocking_wait(microkit_channel ch) {
   (void)ch;
   fs_process_completions(NULL);
+}
+
+/* DHCP lease callback: lwIP invokes this when the netif comes up with an IP. */
+static void netif_status_callback(char *ip_addr) {
+  printf("SOCKET_SMOKE|DHCP: %s\n", ip_addr);
+  dhcp_ready = true;
+}
+
+/* Bring up the linked lwIP stack over the sDDF net queues and arm the periodic
+ * service timer that drives RX/timeout processing from notified(). Mirrors the
+ * LionsOS posix_test client's cont(). Runs on the main context after libc_init
+ * (so the socket syscalls are registered) and thread_init. */
+static void net_init(void) {
+  net_queue_init(&net_rx_handle, net_config.rx.free_queue.vaddr,
+                 net_config.rx.active_queue.vaddr, net_config.rx.num_buffers);
+  net_queue_init(&net_tx_handle, net_config.tx.free_queue.vaddr,
+                 net_config.tx.active_queue.vaddr, net_config.tx.num_buffers);
+  net_buffers_init(&net_tx_handle, 0);
+  sddf_lwip_init(&lib_sddf_lwip_config, &net_config, &timer_config,
+                 net_rx_handle, net_tx_handle, NULL, printf,
+                 netif_status_callback, NULL, NULL, NULL);
+  lwip_up = true;
+  sddf_lwip_maybe_notify();
+  sddf_timer_set_timeout(timer_config.driver_id, NET_TIMEOUT);
+}
+
+/* Bring-up socket smoke test (no ERTS). Runs on a cothread so notified() can
+ * pump lwIP RX/timeouts while we wait for the DHCP lease, then exercises the
+ * libc socket path end to end (socket/bind/listen locally, plus a non-blocking
+ * connect to the slirp gateway). Prints SOCKET_SMOKE|PASS on success, the
+ * socket-smoke nix check gates on it. */
+static void socket_smoke(void) {
+  printf("SOCKET_SMOKE|START\n");
+  while (!dhcp_ready) {
+    microkit_cothread_yield();
+  }
+
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0) {
+    printf("SOCKET_SMOKE|FAIL: socket errno=%d\n", errno);
+    return;
+  }
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(7777);
+  addr.sin_addr.s_addr = INADDR_ANY;
+  if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    printf("SOCKET_SMOKE|FAIL: bind errno=%d\n", errno);
+    return;
+  }
+  if (listen(s, 1) != 0) {
+    printf("SOCKET_SMOKE|FAIL: listen errno=%d\n", errno);
+    return;
+  }
+  close(s);
+
+  /* Non-blocking connect() to the slirp gateway returns 0 or EINPROGRESS
+   * immediately, proving the connect path is wired without needing a listener.
+   */
+  int c = socket(AF_INET, SOCK_STREAM, 0);
+  if (c < 0) {
+    printf("SOCKET_SMOKE|FAIL: socket2 errno=%d\n", errno);
+    return;
+  }
+  fcntl(c, F_SETFL, O_NONBLOCK);
+  struct sockaddr_in host;
+  memset(&host, 0, sizeof(host));
+  host.sin_family = AF_INET;
+  host.sin_port = htons(9); /* discard */
+  host.sin_addr.s_addr = inet_addr("10.0.2.2");
+  int rc = connect(c, (struct sockaddr *)&host, sizeof(host));
+  if (rc != 0 && errno != EINPROGRESS) {
+    printf("SOCKET_SMOKE|FAIL: connect rc=%d errno=%d\n", rc, errno);
+    return;
+  }
+  close(c);
+
+  printf("SOCKET_SMOKE|PASS\n");
 }
 
 static void beam_run(void) {
@@ -89,7 +200,22 @@ static void beam_run(void) {
   fs_share = fs_config.server.share.vaddr;
   fs_set_blocking_wait(fs_blocking_wait);
 
-  libc_init(NULL, (void *)beam_heap_start, BEAM_HEAP_SIZE);
+  /* Enable the libc socket layer. Passing a socket config to libc_init makes it
+   * call libc_init_sock, which registers socket/bind/connect/listen/accept/...
+   * We keep bringup's ppoll (it yields to the cothread scheduler, which ERTS's
+   * boot needs to make progress) rather than sock.c's non-yielding sys_ppoll:
+   * sock.c only claims __NR_ppoll when all four socket-poll callbacks are set,
+   * so we null them in a local copy. The socket call/data path is unaffected
+   * (sock.c's only other use of tcp_socket_err, in getsockopt, is
+   * NULL-guarded), socket-aware poll() is deferred to 0.2.0-gen-tcp-validate.
+   */
+  static libc_socket_config_t beam_socket_config;
+  beam_socket_config = socket_config;
+  beam_socket_config.tcp_socket_readable = NULL;
+  beam_socket_config.tcp_socket_writable = NULL;
+  beam_socket_config.tcp_socket_hup = NULL;
+  beam_socket_config.tcp_socket_err = NULL;
+  libc_init(&beam_socket_config, (void *)beam_heap_start, BEAM_HEAP_SIZE);
   bringup_register_syscalls();
   /* Stand up the cothread runtime ERTS's helper threads spawn onto. Must
    * follow libc_init (uses malloc for the cothread stacks) and precede the
@@ -98,7 +224,7 @@ static void beam_run(void) {
   thread_init();
 
   /* Mount the FAT volume. The libc fs path issues per-op commands but never the
-   * one-time FS_CMD_INITIALISE that fatfs's f_mount() hangs off; the client
+   * one-time FS_CMD_INITIALISE that fatfs's f_mount() hangs off, the client
    * must send it, exactly as the LionsOS posix_test / micropython clients do.
    * Without this every open fails (FS_STATUS_ERROR) and ERTS busy-retries
    * forever. */
@@ -120,8 +246,14 @@ static void beam_run(void) {
   printf("monotonic clock via sDDF timer: %lld.%09lld s\n",
          (long long)ts.tv_sec, (long long)ts.tv_nsec);
 
+  /* net_config's magic validates iff the SDF wired the net client (it does when
+   * the image is built with the network subsystem). The socket syscalls are
+   * already registered via libc_init above, the lwIP stack + smoke test only
+   * come up in bring-up mode below, where notified() can pump them. */
+  net_enabled = net_config_check_magic(&net_config);
+
   if (erl_start) {
-    /* erlexec normally exports these; we bypass it, so erl_prim_loader / init
+    /* erlexec normally exports these, we bypass it, so erl_prim_loader / init
      * would otherwise abort ("Environment variable BINDIR is not set"). These
      * paths resolve against the FAT filesystem served by fatfs. */
     setenv("BINDIR", "/bin", 1);
@@ -137,7 +269,7 @@ static void beam_run(void) {
      * NOTE: the emulator parses allocator flags in their `-M...` form;
      * erlexec normally translates the user-facing `+M...`. We bypass erlexec
      * (calling erl_start directly), so we pass the `-M` form. */
-    /* Emulator flags come first; everything after `--` is passed to `init`
+    /* Emulator flags come first, everything after `--` is passed to `init`
      * (erl_prim_loader reads -root/-boot from there to find the boot script).
      * Without the `--`, the emulator treats -root as an unknown flag and
      * prints usage. */
@@ -166,6 +298,15 @@ static void beam_run(void) {
     erl_start(13, argv);
   } else {
     printf("liberts.a not linked: bring-up mode (console + clock + heap).\n");
+    /* Bring up the linked lwIP stack and run the socket smoke test on a
+     * cothread. init() then returns to the Microkit event loop, whose
+     * notified() pumps lwIP RX/timeouts and wakes the cothread. */
+    if (net_enabled) {
+      net_init();
+      microkit_cothread_spawn(socket_smoke, NULL);
+    } else {
+      printf("SOCKET_SMOKE|SKIP: net config magic invalid\n");
+    }
   }
 }
 
@@ -184,8 +325,24 @@ void init(void) {
 }
 
 void notified(microkit_channel ch) {
-  /* Wake any cothread blocked on this channel (fs/serial completions). */
+  /* Pump the linked lwIP stack on the net-RX / service-timer channels before
+   * waking any cothread blocked on this channel, so a woken socket cothread
+   * sees fresh RX. Gated on lwip_up so we never touch an uninitialised stack
+   * (lwip_up is only set in bring-up mode, after sddf_lwip_init). */
+  if (lwip_up) {
+    if (ch == timer_config.driver_id) {
+      sddf_lwip_process_rx();
+      sddf_lwip_process_timeout();
+      sddf_timer_set_timeout(timer_config.driver_id, NET_TIMEOUT);
+    } else if (ch == net_config.rx.id) {
+      sddf_lwip_process_rx();
+    }
+  }
+  /* Wake any cothread blocked on this channel (fs/serial/net completions). */
   thread_notified(ch);
+  if (lwip_up) {
+    sddf_lwip_maybe_notify();
+  }
   if (beam_process_external_events) {
     beam_process_external_events(ch);
   }

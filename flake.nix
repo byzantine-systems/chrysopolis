@@ -642,14 +642,18 @@
                 oc .fs_client_config     fs_client_beam_server.data          beam_server.elf
 
                 # Network subsystem: driver device resources + driver/virt/copy
-                # configs. net_client_beam_server.data is also emitted but not
-                # embedded yet: beam_server carries no .net_client_config section
-                # until the lwIP socket client lands.
+                # configs.
                 oc .device_resources     eth_driver_device_resources.data    eth_driver.elf
                 oc .net_driver_config    net_driver.data                     eth_driver.elf
                 oc .net_virt_rx_config   net_virt_rx.data                    net_virt_rx.elf
                 oc .net_virt_tx_config   net_virt_tx.data                    net_virt_tx.elf
                 oc .net_copy_config      net_copy_net_copy.data              net_copy.elf
+
+                # Socket client: beam_server links the lwIP stack + LionsOS
+                # socket backend, so it now carries the net client config and
+                # the lib_sddf_lwip (pbuf pool) config it reads at sddf_lwip_init.
+                oc .net_client_config    net_client_beam_server.data           beam_server.elf
+                oc .lib_sddf_lwip_config lib_sddf_lwip_config_beam_server.data  beam_server.elf
 
                 ${microkitSdk}/bin/microkit $cfg/system.sdf \
                   --search-path build \
@@ -759,6 +763,68 @@
                   fi
 
                   [ $fail -eq 0 ] || { echo "boot-smoke: assertions failed"; exit 1; }
+                  touch $out
+                '';
+
+            # Socket client smoke test. Boots the BRING-UP image (no ERTS), whose
+            # beam_run() spawns a cothread that brings up the linked lwIP stack,
+            # waits for a DHCP lease over the sDDF net path, and exercises the
+            # libc socket()/bind()/listen()/connect() calls. Pins the
+            # lwip-socket-client acceptance criterion (sockets work from a C path
+            # before ERTS is involved). Uses QEMU user-mode networking (slirp):
+            # the guest gets 10.0.2.15 via DHCP with no external setup.
+            socket-smoke =
+              pkgs.runCommand "socket-smoke"
+                {
+                  nativeBuildInputs = [ pkgs.qemu ];
+                }
+                ''
+                  echo "Booting ${sel4SystemImage.name} (bring-up) under QEMU..."
+                  # beam_run() still mounts the FAT volume before the socket path;
+                  # attach a writable disk as boot-smoke does.
+                  cp ${fatDisk} disk.img
+                  chmod u+w disk.img
+                  timeout 120 qemu-system-aarch64 \
+                    -machine virt,virtualization=on \
+                    -cpu cortex-a53 \
+                    -m size=2G \
+                    -display none -monitor none \
+                    -serial file:sock.log \
+                    -device loader,file=${sel4SystemImage}/sel4-beam.img,addr=0x70000000,cpu-num=0 \
+                    -global virtio-mmio.force-legacy=false \
+                    -drive file=disk.img,if=none,format=raw,id=hd \
+                    -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1 \
+                    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.0 \
+                    -netdev user,id=net0,hostfwd=tcp::8081-:8081 \
+                    -d guest_errors \
+                    || true
+
+                  echo "=== serial log ==="
+                  cat sock.log
+
+                  fail=0
+                  check() {
+                    if grep -qF "$1" sock.log; then
+                      echo "PASS: $1"
+                    else
+                      echo "FAIL (missing): $1"
+                      fail=1
+                    fi
+                  }
+                  # The lwIP netif acquired a DHCP lease (full RX/TX path through
+                  # the driver + virtualisers + copier works end to end).
+                  check "SOCKET_SMOKE|DHCP:"
+                  # socket()/bind()/listen()/connect() all returned as expected.
+                  check "SOCKET_SMOKE|PASS"
+                  # No PD faulted bringing up the socket stack.
+                  if grep -qF "MON|ERROR" sock.log; then
+                    echo "FAIL (present): MON|ERROR fault output"
+                    fail=1
+                  else
+                    echo "PASS: no MON|ERROR fault output"
+                  fi
+
+                  [ $fail -eq 0 ] || { echo "socket-smoke: assertions failed"; exit 1; }
                   touch $out
                 '';
           };

@@ -1,7 +1,7 @@
 /*
  * Bring-up syscall shims for the beam_server PD.
  *
- * The LionsOS libc only registers the syscalls its own components need; ERTS
+ * The LionsOS libc only registers the syscalls its own components need, ERTS
  * reaches for a number more during boot (epoll/pselect6/ppoll for its poll set,
  * pipe2/timerfd/socketpair, a cothread-aware futex, sched_getaffinity for the
  * CPU count, uname, clock_nanosleep, signal and scheduler no-ops). libc leaves
@@ -65,7 +65,7 @@ static ssize_t devnull_read(void *data, size_t count, int fd) {
 static int devnull_close(int fd) { return posix_fd_deallocate(fd); }
 
 /* An always-empty read end (pipes, timerfd): no data will ever arrive. A
- * non-blocking fd reports EAGAIN (ERTS's poll wakeup pipe drains this way); a
+ * non-blocking fd reports EAGAIN (ERTS's poll wakeup pipe drains this way), a
  * blocking fd parks the calling cothread forever (ERTS's signal-dispatcher
  * thread blocks reading the signal pipe, no OS signals exist here, so it
  * simply never returns, which is correct). */
@@ -154,10 +154,13 @@ static long bringup_timerfd_create(va_list ap) {
   return bringup_alloc_fd(empty_read, devnull_write, O_RDWR | O_NONBLOCK);
 }
 
-/* socketpair: ERTS's spawn_init opens a unix-domain socketpair to talk to its
- * port forker (erl_child_setup). We cannot spawn OS processes, but spawn_init
- * must succeed for ERTS to boot, so we hand back two valid non-blocking fds.
- * Port operations over them simply never complete. */
+/* socketpair: the ERTS-only shim. ERTS's spawn_init opens a unix-domain
+ * (AF_UNIX) socketpair to talk to its port forker (erl_child_setup). This is
+ * unrelated to the real AF_INET socket path (sock.c + lwIP, enabled via
+ * libc_init in main.c): sock.c does not implement socketpair, and we cannot
+ * spawn OS processes, but spawn_init must succeed for ERTS to boot, so we hand
+ * back two valid non-blocking fds. Port operations over them simply never
+ * complete. */
 static long bringup_socketpair(va_list ap) {
   (void)va_arg(ap, int); /* domain */
   (void)va_arg(ap, int); /* type */
@@ -187,7 +190,7 @@ static long bringup_zero(va_list ap) {
 /* Cothread-aware futex. ERTS's low-level thread-event primitive (ethr_event)
  * uses futex directly and treats ENOSYS as fatal. Under cooperative
  * cothreads, FUTEX_WAIT yields (letting the waker cothread run) until the
- * word changes or a bounded number of rounds elapse (spurious return; ERTS
+ * word changes or a bounded number of rounds elapse (spurious return, ERTS
  * re-checks its event flag). FUTEX_WAKE is a no-op: waiters observe the word
  * when they next run. */
 #define FUTEX_WAIT_OP 0
@@ -217,7 +220,7 @@ static long bringup_futex(va_list ap) {
   return 0; /* spurious; the caller re-checks */
 }
 
-/* musl's _Exit() calls exit_group then loops on exit; neither is implemented
+/* musl's _Exit() calls exit_group then loops on exit, neither is implemented
  * by the libc, so an ERTS abort spins forever flooding the console. A Microkit
  * PD cannot truly exit, so we announce the code once and park the PD quietly
  * (the monitor reports the fault context if needed). */
@@ -229,7 +232,7 @@ static long bringup_exit(va_list ap) {
   }
 }
 
-/* ERTS reads the CPU affinity mask to size its scheduler pool; report a
+/* ERTS reads the CPU affinity mask to size its scheduler pool, report a
  * single online CPU (matches the +S 1:1 single-threaded boot). */
 static long bringup_sched_getaffinity(va_list ap) {
   (void)va_arg(ap, long); /* pid */
@@ -242,7 +245,7 @@ static long bringup_sched_getaffinity(va_list ap) {
   return (long)sizeof(unsigned long);
 }
 
-/* ERTS queries the monotonic clock resolution; report a 1ns granularity. */
+/* ERTS queries the monotonic clock resolution, report a 1ns granularity. */
 static long bringup_clock_getres(va_list ap) {
   (void)va_arg(ap, long); /* clockid */
   struct timespec *res = va_arg(ap, struct timespec *);
@@ -287,7 +290,7 @@ static long bringup_clock_nanosleep(va_list ap) {
   return 0;
 }
 
-/* ERTS queries RLIMIT_NOFILE to size its fd tables; report a fixed limit. */
+/* ERTS queries RLIMIT_NOFILE to size its fd tables, report a fixed limit. */
 static long bringup_getrlimit(va_list ap) {
   (void)va_arg(ap, int); /* resource */
   struct rlimit *rl = va_arg(ap, struct rlimit *);
@@ -431,10 +434,10 @@ static long bringup_epoll_pwait(va_list ap) {
   return n;
 }
 
-/* epoll_pwait / ppoll: ERTS's scheduler polls for I/O when idle. Returning
- * immediately would busy-spin the scheduler cothread and starve the helper
- * cothreads (aux, poll, dirty-I/O), stalling boot. Yield first so the
- * cothread scheduler runs the others, then report no ready events. */
+/* ppoll: ERTS's scheduler polls for I/O when idle. Returning immediately would
+ * busy-spin the scheduler cothread and starve the helper cothreads (aux, poll,
+ * dirty-I/O), stalling boot. Yield first so the cothread scheduler runs the
+ * others, then report no ready events. */
 static long bringup_poll_yield(va_list ap) {
   (void)ap;
   microkit_cothread_yield();
@@ -546,6 +549,9 @@ void bringup_register_syscalls(void) {
   libc_define_syscall(SYS_epoll_ctl, bringup_epoll_ctl);
   libc_define_syscall(SYS_epoll_pwait, bringup_epoll_pwait);
   libc_define_syscall(SYS_pselect6, bringup_pselect6);
+  /* ppoll stays with bringup (not sock.c): main.c nulls sock.c's poll callbacks
+   * so sock.c does not claim __NR_ppoll, keeping the cothread-yielding stub
+   * that ERTS boot needs. */
   libc_define_syscall(SYS_ppoll, bringup_poll_yield);
   libc_define_syscall(SYS_pipe2, bringup_pipe2);
   libc_define_syscall(SYS_timerfd_create, bringup_timerfd_create);
@@ -560,7 +566,7 @@ void bringup_register_syscalls(void) {
   libc_define_syscall(SYS_exit_group, bringup_exit);
 
   /* Wire stdin (fd 0) to the serial RX queue. The libc fd.c initializes
-   * stdin with O_RDONLY but no read callback; we provide the missing read
+   * stdin with O_RDONLY but no read callback, we provide the missing read
    * path by dequeuing from serial_rx_queue_handle. */
   fd_entry_t *stdin_entry = posix_fd_entry(STDIN_FILENO);
   if (stdin_entry != NULL) {

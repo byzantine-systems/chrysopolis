@@ -48,6 +48,9 @@ fn boardCfg(board: []const u8) BoardCfg {
 const BeamCfg = struct {
     glue_obj: std.Build.LazyPath,
     microkitco_obj: std.Build.LazyPath,
+    // lib_sddf_lwip.a: the lwIP stack + sDDF glue + LionsOS socket backend
+    // (tcp.c) linked into beam so the libc socket layer has an AF_INET path.
+    lwip_obj: std.Build.LazyPath,
     board_dir: []const u8,
     lions_libc: []const u8,
     libc_dir: []const u8,
@@ -61,7 +64,7 @@ var sddf: []const u8 = undefined;
 var libmicrokit: std.Build.LazyPath = undefined;
 var libmicrokit_include: std.Build.LazyPath = undefined;
 var libmicrokit_linker_script: std.Build.LazyPath = undefined;
-// Shared across every driver PD; built once in build().
+// Shared across every driver PD, built once in build().
 var util: *std.Build.Step.Compile = undefined;
 var util_putchar_debug: *std.Build.Step.Compile = undefined;
 
@@ -160,6 +163,13 @@ fn addBeamExe(
     // libmicrokitco.a (built in this same build). addObjectFile whole-archives
     // it, pulling both libco + libmicrokitco objects.
     exe.root_module.addObjectFile(cfg.microkitco_obj);
+    // lib_sddf_lwip.a: the lwIP stack + socket backend. Whole-archived so
+    // tcp.o's socket_config is pulled in for the lazily-linked libc.a sock.c.
+    exe.root_module.addObjectFile(cfg.lwip_obj);
+    // lwIP routes its diagnostics through sDDF's printf (sddf_printf_/sddf_dprintf
+    // -> seL4 debug putchar) and uses sDDF's _assert_fail.
+    // util_putchar_debug provides both, the same lib the driver PDs link.
+    exe.root_module.linkLibrary(util_putchar_debug);
 
     exe.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{cfg.board_dir}) });
     exe.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{cfg.lions_libc}) });
@@ -270,6 +280,97 @@ fn addFatServer(
     fat.bundle_compiler_rt = false;
     fat.link_gc_sections = false;
     b.installArtifact(fat);
+}
+
+// Include set for the lwIP stack and any TU that pulls
+// <sddf/network/lib_sddf_lwip.h> (it transitively includes lwip/pbuf.h, which
+// resolves lwipopts.h + arch/cc.h from our vendored lwip_include). Shared by
+// the lib_sddf_lwip archive and beam_server's glue object (main.c uses it).
+fn addLwipIncludes(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    lionsos_src: []const u8,
+    lions_libc: []const u8,
+    libmicrokitco_src: []const u8,
+) void {
+    // sDDF headers WITHOUT include/sddf/util/custom_libc: the lwIP stack + tcp.c
+    // link against musl (lions_libc), so the standard headers must resolve to
+    // musl's (custom_libc's stdlib.h lacks rand, which lwIP's LWIP_RAND needs).
+    mod.addIncludePath(sddfPath(b, "include"));
+    mod.addIncludePath(sddfPath(b, "include/microkit")); // os/sddf.h
+    mod.addIncludePath(libmicrokit_include); // microkit.h
+    mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lionsos_src}) }); // lions/*
+    mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) }); // musl headers
+    mod.addIncludePath(.{ .cwd_relative = libmicrokitco_src }); // libmicrokitco.h
+    mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
+    mod.addIncludePath(b.path("src/runtime")); // libmicrokitco_opts.h (beam variant)
+    mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
+    mod.addIncludePath(b.path("src/runtime/lwip_include")); // lwipopts.h, arch/cc.h
+}
+
+// lib_sddf_lwip.a: the lwIP TCP/IP stack + sDDF glue + LionsOS socket backend,
+// linked into beam_server so the prebuilt libc's socket layer (sock.c) has a
+// working AF_INET path. lwIP is a LIBRARY here (not a PD), mirroring LionsOS's
+// posix_test client: lib/sock/tcp.c defines the libc_socket_config_t that
+// sock.c dereferences, and lib_sddf_lwip.c bridges lwIP to the sDDF net queues.
+// Built as one archive.
+//
+// addBeamExe whole-archives it so tcp.o's socket_config is always pulled for
+// the lazily-linked libc.a to resolve.
+fn addLwipLib(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    lionsos_src: []const u8,
+    lions_libc: []const u8,
+    libmicrokitco_src: []const u8,
+) *std.Build.Step.Compile {
+    const lwip_src = b.fmt("{s}/network/ipstacks/lwip/src", .{sddf});
+    // lwIP is noisy under -Wall, match posix_test's warning suppressions.
+    const flags = &[_][]const u8{
+        "-ffreestanding",
+        "-O2",
+        "-g",
+        "-Wno-bitwise-op-parentheses",
+        "-Wno-shift-op-parentheses",
+        "-Wno-unused-function",
+        "-Wno-tautological-constant-out-of-range-compare",
+    };
+    const lib = b.addLibrary(.{
+        .name = "lib_sddf_lwip",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .strip = false }),
+    });
+    // lwIP core: Filelists.mk COREFILES + CORE4FILES + netif/ethernet + api/err.
+    lib.root_module.addCSourceFiles(.{
+        .root = .{ .cwd_relative = lwip_src },
+        .files = &.{
+            "core/init.c",        "core/def.c",           "core/dns.c",
+            "core/inet_chksum.c", "core/ip.c",            "core/mem.c",
+            "core/memp.c",        "core/netif.c",         "core/pbuf.c",
+            "core/raw.c",         "core/stats.c",         "core/sys.c",
+            "core/altcp.c",       "core/altcp_alloc.c",   "core/altcp_tcp.c",
+            "core/tcp.c",         "core/tcp_in.c",        "core/tcp_out.c",
+            "core/timeouts.c",    "core/udp.c",           "core/ipv4/acd.c",
+            "core/ipv4/autoip.c", "core/ipv4/dhcp.c",     "core/ipv4/etharp.c",
+            "core/ipv4/icmp.c",   "core/ipv4/igmp.c",     "core/ipv4/ip4_frag.c",
+            "core/ipv4/ip4.c",    "core/ipv4/ip4_addr.c", "netif/ethernet.c",
+            "api/err.c",
+        },
+        .flags = flags,
+    });
+    // sDDF<->lwIP glue.
+    lib.root_module.addCSourceFile(.{
+        .file = .{ .cwd_relative = b.fmt("{s}/network/lib_sddf_lwip/lib_sddf_lwip.c", .{sddf}) },
+        .flags = flags,
+    });
+    // LionsOS TCP socket backend (defines the socket_config sock.c dereferences).
+    lib.root_module.addCSourceFile(.{
+        .file = .{ .cwd_relative = b.fmt("{s}/lib/sock/tcp.c", .{lionsos_src}) },
+        .flags = flags,
+    });
+    addLwipIncludes(b, lib.root_module, lionsos_src, lions_libc, libmicrokitco_src);
+    return lib;
 }
 
 pub fn build(b: *std.Build) void {
@@ -390,7 +491,7 @@ pub fn build(b: *std.Build) void {
             b.fmt("drivers/blk/{s}", .{cfg.blk}),
         }, &.{});
         // DEBUG_BLK_VIRT turns on the virt's success log ("MBR partitioning
-        // detected"), which is otherwise compiled out; boot-smoke gates on it.
+        // detected"), which is otherwise compiled out, boot-smoke gates on it.
         component(b, target, optimize, "blk_virt.elf", &.{
             "blk/components/virt.c",
             "blk/components/partitioning.c",
@@ -449,13 +550,20 @@ pub fn build(b: *std.Build) void {
     glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{sddf}) });
     glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/microkit", .{sddf}) });
     glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lionsos_src}) });
+    // lwIP headers: main.c includes <sddf/network/lib_sddf_lwip.h>, which pulls
+    // lwip/pbuf.h -> lwipopts.h + arch/cc.h from our vendored lwip_include.
+    glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
+    glue.root_module.addIncludePath(b.path("src/runtime/lwip_include"));
 
     // Prebuilt archives are linked lazily (pulled on demand), the way the
     // Makefile's `-lmicrokit -lc` and ld --start-group did, so members are
     // extracted on demand to resolve the glue + inter-archive references.
+    const lwip_lib = addLwipLib(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src);
+
     const beam_cfg = BeamCfg{
         .glue_obj = glue.getEmittedBin(),
         .microkitco_obj = microkitco.getEmittedBin(),
+        .lwip_obj = lwip_lib.getEmittedBin(),
         .board_dir = board_dir,
         .lions_libc = lions_libc,
         .libc_dir = libc_dir,
