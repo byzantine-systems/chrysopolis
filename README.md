@@ -15,12 +15,12 @@ A verified foundation for BEAM applications, based on NixOS and seL4.
 Chrysopolis aims to run the BEAM on the [seL4 microkernel](https://sel4.systems/) via the [Microkit](https://github.com/seL4/microkit) framework and [LionsOS](https://github.com/au-ts/lionsos).
 
 - **seL4** is a formally verified microkernel (~10k lines with machine-checked correctness proofs). It provides strong isolation guarantees, where each component runs in its own protection domain (PD), communicating via capabilities.
-- **LionsOS** is a reference OS stack for seL4. It provides a musl-based libc, sDDF drivers (serial, timer, block), and a cooperative cothread runtime (`libmicrokitco`). Chrysopolis links ERTS against LionsOS `libc.a` (the same POSIX API, but backed by seL4 IPC instead of Linux syscalls).
+- **LionsOS** is a reference OS stack for seL4. It provides a musl-based libc, [sDDF drivers](https://sel4.systems/Summit/2022/slides/d1_06_The_seL4_Device_Driver_Framework_(sDDF)_Lucy_Parker.pdf) (serial, timer, block), and a cooperative cothread runtime (`libmicrokitco`). Chrysopolis links ERTS against LionsOS `libc.a` (the same POSIX API, but backed by seL4 IPC instead of Linux syscalls).
 - **Nix** is the build system and fetch/lock authority. 
     - A `flake.nix` cross-compiles ERTS, builds musl `libc.a` (autotools), and pins every input in `flake.lock`. 
     - **Zig** is invoked by Nix as the build driver via two `build.zig` metaprograms: 
         - [tools/sdf](tools/sdf) generates the Microkit system description.
-        - the root [build.zig](build.zig) builds `libmicrokitco`, the sDDF driver/virtualiser PDs, and compiles and links the `beam_server` PD (ERTS glue) from [src/runtime](src/runtime). 
+        - the root [build.zig](build.zig) builds [libmicrokitco](https://github.com/au-ts/libmicrokitco), the sDDF driver/virtualiser PDs, and compiles and links the `beam_server` PD (ERTS glue) from [src/runtime](src/runtime). 
     - ERTS loads its OTP modules and boot script from a FAT filesystem (`fatfs` PD -> sDDF block subsystem), the result is a hermetic, reproducible `sel4-beam.img`.
 
 ## Architecture
@@ -93,8 +93,7 @@ and boot it under QEMU using our custom (nix devenv) script:
 run-sel4
 ```
 
-After seL4 boots, you'll see the `beam_server` PD come up, the sDDF timer report a
-monotonic clock, ERTS hand off, and then the Erlang shell:
+After seL4 boots, you'll see the `beam_server` PD come up, the sDDF timer report a monotonic clock, ERTS hand off, and then the Erlang shell:
 
 ```text
 Chrysopolis: beam_server up on the LionsOS reference stack.

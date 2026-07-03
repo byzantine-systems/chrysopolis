@@ -33,13 +33,14 @@ const BoardCfg = struct {
     blk: []const u8,
     net: []const u8,
     // virtio drivers (blk/net) split the bus transport into its own unit
-    // (virtio/transport/<blk_transport>.c), block.c links against it.
+    // (virtio/transport/<*_transport>.c) the driver links against.
     blk_transport: []const u8,
+    net_transport: []const u8,
 };
 
 fn boardCfg(board: []const u8) BoardCfg {
     if (std.mem.eql(u8, board, "qemu_virt_aarch64"))
-        return .{ .serial = "arm", .timer = "arm", .blk = "virtio", .net = "virtio", .blk_transport = "mmio" };
+        return .{ .serial = "arm", .timer = "arm", .blk = "virtio", .net = "virtio", .blk_transport = "mmio", .net_transport = "mmio" };
     std.debug.panic("unknown -Dboard={s}; add it to boardCfg()", .{board});
 }
 
@@ -405,9 +406,12 @@ pub fn build(b: *std.Build) void {
     // Network: LwIP / TCP-IP + BEAM<->BEAM distribution.
     if (with_net) {
         component(b, target, optimize, "eth_driver.elf", &.{
-            b.fmt("drivers/network/{s}/ethernet.c", .{cfg.net}),
+            // The virtio driver body is transport-agnostic (common/) and links
+            // against the bus transport (mmio on qemu), same split as blk.
+            b.fmt("drivers/network/{s}/common/ethernet.c", .{cfg.net}),
+            b.fmt("virtio/transport/{s}.c", .{cfg.net_transport}),
         }, &.{
-            b.fmt("drivers/network/{s}", .{cfg.net}),
+            b.fmt("drivers/network/{s}/{s}", .{ cfg.net, cfg.net_transport }),
         }, &.{});
         component(b, target, optimize, "net_virt_rx.elf", &.{"network/components/virt_rx.c"}, &.{}, &.{});
         component(b, target, optimize, "net_virt_tx.elf", &.{"network/components/virt_tx.c"}, &.{}, &.{});

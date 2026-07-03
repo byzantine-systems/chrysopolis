@@ -456,6 +456,7 @@
                 -Dwith-erts=true \
                 -Dwith-blk=true \
                 -Dwith-fs=true \
+                -Dwith-net=true \
                 -Derts-archive-dir="$PWD"
 
               # Headers a downstream consumer of libmicrokitco.a would need; the
@@ -611,6 +612,10 @@
                    ${beamZig}/bin/serial_virt_rx.elf \
                    ${beamZig}/bin/blk_driver.elf \
                    ${beamZig}/bin/blk_virt.elf \
+                   ${beamZig}/bin/eth_driver.elf \
+                   ${beamZig}/bin/net_virt_rx.elf \
+                   ${beamZig}/bin/net_virt_tx.elf \
+                   ${beamZig}/bin/net_copy.elf \
                    ${beamZig}/bin/fat.elf build/
                 chmod -R u+w build
 
@@ -635,6 +640,16 @@
                 oc .blk_client_config    blk_client_fatfs.data               fat.elf
                 oc .fs_server_config     fs_server_fatfs.data                fat.elf
                 oc .fs_client_config     fs_client_beam_server.data          beam_server.elf
+
+                # Network subsystem: driver device resources + driver/virt/copy
+                # configs. net_client_beam_server.data is also emitted but not
+                # embedded yet: beam_server carries no .net_client_config section
+                # until the lwIP socket client lands.
+                oc .device_resources     eth_driver_device_resources.data    eth_driver.elf
+                oc .net_driver_config    net_driver.data                     eth_driver.elf
+                oc .net_virt_rx_config   net_virt_rx.data                    net_virt_rx.elf
+                oc .net_virt_tx_config   net_virt_tx.data                    net_virt_tx.elf
+                oc .net_copy_config      net_copy_net_copy.data              net_copy.elf
 
                 ${microkitSdk}/bin/microkit $cfg/system.sdf \
                   --search-path build \
@@ -705,6 +720,8 @@
                     -global virtio-mmio.force-legacy=false \
                     -drive file=disk.img,if=none,format=raw,id=hd \
                     -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1 \
+                    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.0 \
+                    -netdev user,id=net0,hostfwd=tcp::8080-:8080 \
                     -d guest_errors \
                     || true
 
@@ -731,6 +748,15 @@
                   # Step 4: ERTS reaches the Erlang shell, having loaded kernel +
                   # stdlib from the FAT fs_server (memfs is gone from the image).
                   check "Eshell"
+                  # Step 5: no PD faulted. The Microkit monitor reports faults on
+                  # serial as MON|ERROR lines; the net PDs (eth_driver + the
+                  # virtualisers/copier) must initialise without one.
+                  if grep -qF "MON|ERROR" boot.log; then
+                    echo "FAIL (present): MON|ERROR fault output"
+                    fail=1
+                  else
+                    echo "PASS: no MON|ERROR fault output"
+                  fi
 
                   [ $fail -eq 0 ] || { echo "boot-smoke: assertions failed"; exit 1; }
                   touch $out
@@ -809,7 +835,9 @@
                 -device loader,file="$img",addr=0x70000000,cpu-num=0 \
                 -global virtio-mmio.force-legacy=false \
                 -drive file="$disk",if=none,format=raw,id=hd \
-                -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1
+                -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1 \
+                -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.0 \
+                -netdev user,id=net0,hostfwd=tcp::8080-:8080
             '';
 
             enterShell = ''

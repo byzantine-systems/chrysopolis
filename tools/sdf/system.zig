@@ -2,16 +2,15 @@
 //!
 //! Topology: the BEAM server runs as a Microkit PD linked against the
 //! LionsOS POSIX libc, talking to real sDDF driver PDs. We build the serial
-//! (console) and timer (clock) subsystems with sdfgen's high-level helpers,
-//! which both render the .sdf AND serialise the per-PD config blobs the
-//! reference stack needs (driver device-resources, virtualiser configs,
-//! per-client configs). The build step objcopies those .data blobs into the
-//! matching ELF sections.
+//! (console), timer (clock), block (FAT disk) and network (ethernet)
+//! subsystems with sdfgen's high-level helpers, which both render the .sdf
+//! AND serialise the per-PD config blobs the reference stack needs (driver
+//! device-resources, virtualiser configs, per-client configs). The build
+//! step objcopies those .data blobs into the matching ELF sections.
 //!
 //! The boot heap is kept as a dedicated memory region mapped into beam_server
-//! with setvar_vaddr="beam_heap_start" (ADR 01): the C runtime hands that
-//! region to libc_init() as the malloc arena rather than baking a BSS array
-//! into the ELF.
+//! with setvar_vaddr="beam_heap_start": the C runtime hands that region to
+//! libc_init() as the malloc arena rather than baking a BSS array into the ELF.
 //!
 //! Invoked at build time:
 //!   gen-sdf <board.dtb> <sddf-source-path> <output-dir>
@@ -58,7 +57,7 @@ pub fn main() !void {
 
     // The BEAM server PD and its malloc arena. The map carries the
     // setvar_vaddr symbol the Microkit tool patches into beam_server.elf, so
-    // the C runtime reads the heap base from beam_heap_start (ADR 01).
+    // the C runtime reads the heap base from beam_heap_start.
     var beam_server = Pd.create(allocator, "beam_server", "beam_server.elf", .{ .priority = 1 });
     // The default Microkit PD stack is a single page; printf's formatting
     // frames overflow it, and ERTS's main scheduler runs on this stack
@@ -120,6 +119,30 @@ pub fn main() !void {
     sdf.addProtectionDomain(&fatfs);
     var fs = try lionsos.FileSystem.Fat.init(allocator, &sdf, &fatfs, &beam_server, &blk_system, .{ .partition = 0 });
 
+    // Network subsystem: virtio-net driver + RX/TX virtualisers + the RX
+    // copier for beam_server. The DTB node is virtio_mmio@a000000, i.e. QEMU
+    // virtio-mmio-bus.0, the slot reserved for ethernet (blk is pinned to
+    // bus.1/a000200 above). The driver's budget/period bound its CPU time,
+    // sDDF rate-limits high-priority net components to avoid starvation
+    // collapse; values follow the upstream sdfgen webserver/echo examples.
+    var eth_driver = Pd.create(allocator, "eth_driver", "eth_driver.elf", .{ .priority = 110, .budget = 100, .period = 400 });
+    sdf.addProtectionDomain(&eth_driver);
+    var net_virt_tx = Pd.create(allocator, "net_virt_tx", "net_virt_tx.elf", .{ .priority = 109, .budget = 100, .period = 500 });
+    sdf.addProtectionDomain(&net_virt_tx);
+    var net_virt_rx = Pd.create(allocator, "net_virt_rx", "net_virt_rx.elf", .{ .priority = 108, .budget = 100, .period = 500 });
+    sdf.addProtectionDomain(&net_virt_rx);
+    var net_copy = Pd.create(allocator, "net_copy", "net_copy.elf", .{ .priority = 97, .budget = 20000 });
+    sdf.addProtectionDomain(&net_copy);
+
+    const net_node = blob.child("virtio_mmio@a000000") orelse return error.NetNodeNotFound;
+    var net_system = sddf.Net.init(allocator, &sdf, net_node, &eth_driver, &net_virt_tx, &net_virt_rx, .{});
+    // beam_server is the sole net client (the lwIP socket layer lands next
+    // milestone; until then its .net_client_config stays un-embedded). The
+    // fixed MAC matches the NIC MAC the virtio driver hardcodes, QEMU filters
+    // unicast RX by it, and keeps the generated config deterministic (sdfgen
+    // otherwise randomises client MACs).
+    try net_system.addClientWithCopier(&beam_server, &net_copy, .{ .mac_addr = "52:54:01:00:00:07" });
+
     // Wire channels/queues/shared regions, then serialise every subsystem's
     // per-PD config blobs into out_dir (objcopied into the ELFs by the build).
     // fs.connect() registers fatfs as a blk client, so it must precede
@@ -132,6 +155,8 @@ pub fn main() !void {
     try blk_system.connect();
     try blk_system.serialiseConfig(out_dir);
     try fs.serialiseConfig(out_dir);
+    try net_system.connect();
+    try net_system.serialiseConfig(out_dir);
 
     const xml = try sdf.render();
     const sdf_path = try std.fs.path.join(allocator, &.{ out_dir, "system.sdf" });
