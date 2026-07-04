@@ -134,6 +134,42 @@ static void net_init(void) {
   sddf_timer_set_timeout(timer_config.driver_id, NET_TIMEOUT);
 }
 
+/* Deliver Microkit's pending deferred notification immediately, mirroring the
+ * libmicrokit handler epilogue (seL4_Send on the stashed signal cap/msg that
+ * microkit_deferred_notify set). sddf_lwip_maybe_notify() defers the RX/TX
+ * virtualiser signal into Microkit's single-slot pending-signal, which the
+ * epilogue only flushes when the PD returns from notified()/init(). Under ERTS
+ * erl_start() never returns, so without this flush the deferred signal is
+ * stashed but never delivered: net_virt_tx is never woken and the TX queue
+ * (DHCP DISCOVER, then TCP segments) never drains. Called from beam_net_pump
+ * after sddf_lwip_maybe_notify(). */
+static void beam_flush_deferred_notify(void) {
+  if (microkit_have_signal) {
+    microkit_have_signal = seL4_False;
+    seL4_Send(microkit_signal_cap, microkit_signal_msg);
+  }
+}
+
+/* Pump the linked lwIP stack. Under ERTS, erl_start() never returns to the
+ * Microkit event loop, so notified() is dead, instead the poll/sleep syscall
+ * stubs ERTS spins on (epoll_pwait, ppoll, pselect6, clock_nanosleep) call this
+ * to advance lwIP's RX and flush pending TX. process_timeout is decimated: it
+ * costs a timer PPC per call (sys_now) and epoll_pwait is the scheduler's hot
+ * idle loop, while TCP/DHCP timers need only coarse (~100 ms) granularity.
+ * No-op until net_init has run (lwip_up). */
+void beam_net_pump(void) {
+  static unsigned pump_count;
+  if (!lwip_up) {
+    return;
+  }
+  sddf_lwip_process_rx();
+  if ((++pump_count & 63) == 0) {
+    sddf_lwip_process_timeout();
+  }
+  sddf_lwip_maybe_notify();
+  beam_flush_deferred_notify();
+}
+
 /* Bring-up socket smoke test (no ERTS). Runs on a cothread so notified() can
  * pump lwIP RX/timeouts while we wait for the DHCP lease, then exercises the
  * libc socket path end to end (socket/bind/listen locally, plus a non-blocking
@@ -201,20 +237,19 @@ static void beam_run(void) {
   fs_set_blocking_wait(fs_blocking_wait);
 
   /* Enable the libc socket layer. Passing a socket config to libc_init makes it
-   * call libc_init_sock, which registers socket/bind/connect/listen/accept/...
-   * We keep bringup's ppoll (it yields to the cothread scheduler, which ERTS's
-   * boot needs to make progress) rather than sock.c's non-yielding sys_ppoll:
-   * sock.c only claims __NR_ppoll when all four socket-poll callbacks are set,
-   * so we null them in a local copy. The socket call/data path is unaffected
-   * (sock.c's only other use of tcp_socket_err, in getsockopt, is
-   * NULL-guarded), socket-aware poll() is deferred to 0.2.0-gen-tcp-validate.
-   */
+   * call libc_init_sock, which registers socket/bind/connect/listen/accept/
+   * getsockopt(SO_ERROR)/... We keep bringup's cothread-yielding ppoll (ERTS
+   * boot needs it) rather than sock.c's non-yielding sys_ppoll: sock.c claims
+   * __NR_ppoll only when ALL FOUR socket-poll callbacks are set, so we null
+   * three in a local copy. We KEEP tcp_socket_err so getsockopt(SO_ERROR)
+   * reports real connect completion/errors (ERTS reads it after a nonblocking
+   * connect). bringup's socket-aware epoll uses tcp.c's full socket_config
+   * table directly for readiness (readable/writable/hup/err). */
   static libc_socket_config_t beam_socket_config;
   beam_socket_config = socket_config;
   beam_socket_config.tcp_socket_readable = NULL;
   beam_socket_config.tcp_socket_writable = NULL;
   beam_socket_config.tcp_socket_hup = NULL;
-  beam_socket_config.tcp_socket_err = NULL;
   libc_init(&beam_socket_config, (void *)beam_heap_start, BEAM_HEAP_SIZE);
   bringup_register_syscalls();
   /* Stand up the cothread runtime ERTS's helper threads spawn onto. Must
@@ -247,10 +282,15 @@ static void beam_run(void) {
          (long long)ts.tv_sec, (long long)ts.tv_nsec);
 
   /* net_config's magic validates iff the SDF wired the net client (it does when
-   * the image is built with the network subsystem). The socket syscalls are
-   * already registered via libc_init above, the lwIP stack + smoke test only
-   * come up in bring-up mode below, where notified() can pump them. */
+   * the image is built with the network subsystem). Bring up the linked lwIP
+   * stack in BOTH modes so the socket path works: under ERTS the pump is driven
+   * by beam_net_pump() from the poll/sleep syscall stubs (erl_start never
+   * returns to notified()), in bring-up mode notified() pumps it and we run the
+   * socket smoke test. */
   net_enabled = net_config_check_magic(&net_config);
+  if (net_enabled) {
+    net_init();
+  }
 
   if (erl_start) {
     /* erlexec normally exports these, we bypass it, so erl_prim_loader / init
@@ -298,11 +338,10 @@ static void beam_run(void) {
     erl_start(13, argv);
   } else {
     printf("liberts.a not linked: bring-up mode (console + clock + heap).\n");
-    /* Bring up the linked lwIP stack and run the socket smoke test on a
-     * cothread. init() then returns to the Microkit event loop, whose
-     * notified() pumps lwIP RX/timeouts and wakes the cothread. */
+    /* Run the socket smoke test on a cothread. init() then returns to the
+     * Microkit event loop, whose notified() pumps lwIP RX/timeouts and wakes
+     * the cothread. (lwIP itself was already brought up by net_init above.) */
     if (net_enabled) {
-      net_init();
       microkit_cothread_spawn(socket_smoke, NULL);
     } else {
       printf("SOCKET_SMOKE|SKIP: net config magic invalid\n");
@@ -327,8 +366,9 @@ void init(void) {
 void notified(microkit_channel ch) {
   /* Pump the linked lwIP stack on the net-RX / service-timer channels before
    * waking any cothread blocked on this channel, so a woken socket cothread
-   * sees fresh RX. Gated on lwip_up so we never touch an uninitialised stack
-   * (lwip_up is only set in bring-up mode, after sddf_lwip_init). */
+   * sees fresh RX. Gated on lwip_up so we never touch an uninitialised stack.
+   * This drives lwIP in bring-up mode, under ERTS notified() never fires
+   * (erl_start monopolises the loop) and beam_net_pump() does the pumping. */
   if (lwip_up) {
     if (ch == timer_config.driver_id) {
       sddf_lwip_process_rx();

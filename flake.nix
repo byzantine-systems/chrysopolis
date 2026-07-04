@@ -696,142 +696,27 @@
           };
 
           # Hermetic QEMU integration tests, run by `nix flake check` and CI.
-          # Each check boots an image headless under emulation and asserts on
-          # the serial trace, pinning a phase's exit criterion as an automated
-          # gate rather than a manual step.
-          checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-            boot-smoke =
-              pkgs.runCommand "boot-smoke"
-                {
-                  nativeBuildInputs = [ pkgs.qemu ];
-                }
-                ''
-                  echo "Booting ${sel4TestImage.name} under QEMU..."
-                  # The FAT volume must mount read-write (ERTS opens /dev/null as
-                  # a write sink); copy the read-only store image to a writable
-                  # file and attach it without readonly=on.
-                  cp ${fatDisk} disk.img
-                  chmod u+w disk.img
-                  # Booting to the shell loads ~all of kernel+stdlib over FAT
-                  # (synchronous fs reads), which is much slower than memfs.
-                  timeout 300 qemu-system-aarch64 \
-                    -machine virt,virtualization=on \
-                    -cpu cortex-a53 \
-                    -m size=2G \
-                    -display none -monitor none \
-                    -serial file:boot.log \
-                    -device loader,file=${sel4TestImage}/sel4-beam.img,addr=0x70000000,cpu-num=0 \
-                    -global virtio-mmio.force-legacy=false \
-                    -drive file=disk.img,if=none,format=raw,id=hd \
-                    -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1 \
-                    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.0 \
-                    -netdev user,id=net0,hostfwd=tcp::8080-:8080 \
-                    -d guest_errors \
-                    || true
-
-                  echo "=== serial log ==="
-                  cat boot.log
-
-                  # Exit criteria, asserted as gates.
-                  fail=0
-                  check() {
-                    if grep -qF "$1" boot.log; then
-                      echo "PASS: $1"
-                    else
-                      echo "FAIL (missing): $1"
-                      fail=1
-                    fi
-                  }
-                  # Step 1: beam_server boots on the LionsOS reference stack.
-                  check "beam_server up on the LionsOS reference stack."
-                  check "monotonic clock via sDDF timer:"
-                  # Step 2: ERTS (liberts.a) is linked and launched.
-                  check "Handing off to ERTS core loop..."
-                  # Step 3: the blk virtualiser read + validated partition 0 of fatDisk.
-                  check "MBR partitioning detected"
-                  # Step 4: ERTS reaches the Erlang shell, having loaded kernel +
-                  # stdlib from the FAT fs_server (memfs is gone from the image).
-                  check "Eshell"
-                  # Step 5: no PD faulted. The Microkit monitor reports faults on
-                  # serial as MON|ERROR lines; the net PDs (eth_driver + the
-                  # virtualisers/copier) must initialise without one.
-                  if grep -qF "MON|ERROR" boot.log; then
-                    echo "FAIL (present): MON|ERROR fault output"
-                    fail=1
-                  else
-                    echo "PASS: no MON|ERROR fault output"
-                  fi
-
-                  [ $fail -eq 0 ] || { echo "boot-smoke: assertions failed"; exit 1; }
-                  touch $out
-                '';
-
-            # Socket client smoke test. Boots the BRING-UP image (no ERTS), whose
-            # beam_run() spawns a cothread that brings up the linked lwIP stack,
-            # waits for a DHCP lease over the sDDF net path, and exercises the
-            # libc socket()/bind()/listen()/connect() calls. Pins the
-            # lwip-socket-client acceptance criterion (sockets work from a C path
-            # before ERTS is involved). Uses QEMU user-mode networking (slirp):
-            # the guest gets 10.0.2.15 via DHCP with no external setup.
-            socket-smoke =
-              pkgs.runCommand "socket-smoke"
-                {
-                  nativeBuildInputs = [ pkgs.qemu ];
-                }
-                ''
-                  echo "Booting ${sel4SystemImage.name} (bring-up) under QEMU..."
-                  # beam_run() still mounts the FAT volume before the socket path;
-                  # attach a writable disk as boot-smoke does.
-                  cp ${fatDisk} disk.img
-                  chmod u+w disk.img
-                  timeout 120 qemu-system-aarch64 \
-                    -machine virt,virtualization=on \
-                    -cpu cortex-a53 \
-                    -m size=2G \
-                    -display none -monitor none \
-                    -serial file:sock.log \
-                    -device loader,file=${sel4SystemImage}/sel4-beam.img,addr=0x70000000,cpu-num=0 \
-                    -global virtio-mmio.force-legacy=false \
-                    -drive file=disk.img,if=none,format=raw,id=hd \
-                    -device virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1 \
-                    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.0 \
-                    -netdev user,id=net0,hostfwd=tcp::8081-:8081 \
-                    -d guest_errors \
-                    || true
-
-                  echo "=== serial log ==="
-                  cat sock.log
-
-                  fail=0
-                  check() {
-                    if grep -qF "$1" sock.log; then
-                      echo "PASS: $1"
-                    else
-                      echo "FAIL (missing): $1"
-                      fail=1
-                    fi
-                  }
-                  # The lwIP netif acquired a DHCP lease (full RX/TX path through
-                  # the driver + virtualisers + copier works end to end).
-                  check "SOCKET_SMOKE|DHCP:"
-                  # socket()/bind()/listen()/connect() all returned as expected.
-                  check "SOCKET_SMOKE|PASS"
-                  # No PD faulted bringing up the socket stack.
-                  if grep -qF "MON|ERROR" sock.log; then
-                    echo "FAIL (present): MON|ERROR fault output"
-                    fail=1
-                  else
-                    echo "PASS: no MON|ERROR fault output"
-                  fi
-
-                  [ $fail -eq 0 ] || { echo "socket-smoke: assertions failed"; exit 1; }
-                  touch $out
-                '';
-          };
+          # NixOS-test-driver based (see tests.nix): each check boots a
+          # seL4 image headless under emulation via driver.create_machine and
+          # asserts on the serial trace / drives TCP peers from the test
+          # script, pinning a phase's exit criterion as an automated gate.
+          checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
+            import ./tests.nix {
+              inherit
+                pkgs
+                sel4SystemImage
+                sel4TestImage
+                fatDisk
+                ;
+            }
+          );
 
           # nix fmt + nix flake check (auto-wired by flakeModule)
           treefmt = {
             projectRootFile = "flake.nix";
+            # tcp.c is vendored from LionsOS lib/sock/tcp.c with local patches;
+            # keep upstream's formatting so the diff stays upstreamable.
+            settings.global.excludes = [ "src/runtime/tcp.c" ];
             programs.clang-format.enable = true;
             programs.erlfmt.enable = true;
             programs.gleam.enable = true;
@@ -881,9 +766,16 @@
 
             scripts.run-sel4.exec = ''
               set -e
-              img="''${1:-result/sel4-beam.img}"
-              if [ ! -f "$img" ]; then
-                nix build
+              # The interactive Erlang shell lives in the ERTS-linked image
+              # (.#test-image); the default package is a bring-up image with no
+              # liberts.a. Build test-image into its own out-link so a stray
+              # `nix build` (default package) can't shadow it, and let $1
+              # override with an explicit image path.
+              if [ -n "''${1:-}" ]; then
+                img="$1"
+              else
+                nix build .#test-image --out-link result-test
+                img="result-test/sel4-beam.img"
               fi
               # The FAT volume mounts read-write (ERTS opens /dev/null; the
               # filesystem must accept writes). The store image is read-only, so

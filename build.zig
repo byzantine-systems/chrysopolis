@@ -364,9 +364,11 @@ fn addLwipLib(
         .file = .{ .cwd_relative = b.fmt("{s}/network/lib_sddf_lwip/lib_sddf_lwip.c", .{sddf}) },
         .flags = flags,
     });
-    // LionsOS TCP socket backend (defines the socket_config sock.c dereferences).
+    // Chrysopolis-patched TCP socket backend (defines the socket_config sock.c
+    // dereferences). Vendored at src/runtime/tcp.c: allows recv() to drain
+    // buffered data after the peer closes the connection (closed_by_peer state).
     lib.root_module.addCSourceFile(.{
-        .file = .{ .cwd_relative = b.fmt("{s}/lib/sock/tcp.c", .{lionsos_src}) },
+        .file = b.path("src/runtime/tcp.c"),
         .flags = flags,
     });
     addLwipIncludes(b, lib.root_module, lionsos_src, lions_libc, libmicrokitco_src);
