@@ -11,6 +11,8 @@
 *.ilk
 *.map
 *.exp
+# ...but our QEMU test harnesses are expect scripts, not MSVC export files.
+!/tools/*.exp
 
 # Precompiled Headers
 *.gch

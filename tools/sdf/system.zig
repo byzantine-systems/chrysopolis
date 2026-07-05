@@ -2,16 +2,15 @@
 //!
 //! Topology: the BEAM server runs as a Microkit PD linked against the
 //! LionsOS POSIX libc, talking to real sDDF driver PDs. We build the serial
-//! (console) and timer (clock) subsystems with sdfgen's high-level helpers,
-//! which both render the .sdf AND serialise the per-PD config blobs the
-//! reference stack needs (driver device-resources, virtualiser configs,
-//! per-client configs). The build step objcopies those .data blobs into the
-//! matching ELF sections.
+//! (console), timer (clock), block (FAT disk) and network (ethernet)
+//! subsystems with sdfgen's high-level helpers, which both render the .sdf
+//! AND serialise the per-PD config blobs the reference stack needs (driver
+//! device-resources, virtualiser configs, per-client configs). The build
+//! step objcopies those .data blobs into the matching ELF sections.
 //!
 //! The boot heap is kept as a dedicated memory region mapped into beam_server
-//! with setvar_vaddr="beam_heap_start" (ADR 01): the C runtime hands that
-//! region to libc_init() as the malloc arena rather than baking a BSS array
-//! into the ELF.
+//! with setvar_vaddr="beam_heap_start": the C runtime hands that region to
+//! libc_init() as the malloc arena rather than baking a BSS array into the ELF.
 //!
 //! Invoked at build time:
 //!   gen-sdf <board.dtb> <sddf-source-path> <output-dir>
@@ -58,9 +57,9 @@ pub fn main() !void {
 
     // The BEAM server PD and its malloc arena. The map carries the
     // setvar_vaddr symbol the Microkit tool patches into beam_server.elf, so
-    // the C runtime reads the heap base from beam_heap_start (ADR 01).
+    // the C runtime reads the heap base from beam_heap_start.
     var beam_server = Pd.create(allocator, "beam_server", "beam_server.elf", .{ .priority = 1 });
-    // The default Microkit PD stack is a single page; printf's formatting
+    // The default Microkit PD stack is a single page, printf's formatting
     // frames overflow it, and ERTS's main scheduler runs on this stack
     // (pthread_create is unavailable, so it cannot move to its own). Give
     // beam_server generous room.
@@ -71,7 +70,7 @@ pub fn main() !void {
     sdf.addProtectionDomain(&beam_server);
 
     // Serial subsystem: PL011 driver + TX/RX virtualisers. beam_server is the
-    // sole client; its console writes flow through the TX virtualiser to the
+    // sole client, its console writes flow through the TX virtualiser to the
     // driver. Image names match the ELFs nix/refstack.mk builds.
     var serial_driver = Pd.create(allocator, "serial_driver", "serial_driver.elf", .{ .priority = 100 });
     sdf.addProtectionDomain(&serial_driver);
@@ -114,11 +113,41 @@ pub fn main() !void {
     // serves the LionsOS fs protocol to beam_server. The FileSystem.Fat helper
     // registers fatfs as the blk client AND maps the FatFs worker-thread stacks
     // (worker_thread_stack_one..four), so we do NOT add a blk client by hand.
-    // The libc fs path in beam_server stays dormant until the memfs cutover; for
+    // The libc fs path in beam_server stays dormant until the memfs cutover, for
     // now beam_server only verifies the share/queues are mapped at init.
     var fatfs = Pd.create(allocator, "fatfs", "fat.elf", .{ .priority = 96 });
     sdf.addProtectionDomain(&fatfs);
     var fs = try lionsos.FileSystem.Fat.init(allocator, &sdf, &fatfs, &beam_server, &blk_system, .{ .partition = 0 });
+
+    // Network subsystem: virtio-net driver + RX/TX virtualisers + the RX
+    // copier for beam_server. The DTB node is virtio_mmio@a000000, i.e. QEMU
+    // virtio-mmio-bus.0, the slot reserved for ethernet (blk is pinned to
+    // bus.1/a000200 above). The driver's budget/period bound its CPU time,
+    // sDDF rate-limits high-priority net components to avoid starvation
+    // collapse, values follow the upstream sdfgen webserver/echo examples.
+    var eth_driver = Pd.create(allocator, "eth_driver", "eth_driver.elf", .{ .priority = 110, .budget = 100, .period = 400 });
+    sdf.addProtectionDomain(&eth_driver);
+    var net_virt_tx = Pd.create(allocator, "net_virt_tx", "net_virt_tx.elf", .{ .priority = 109, .budget = 100, .period = 500 });
+    sdf.addProtectionDomain(&net_virt_tx);
+    var net_virt_rx = Pd.create(allocator, "net_virt_rx", "net_virt_rx.elf", .{ .priority = 108, .budget = 100, .period = 500 });
+    sdf.addProtectionDomain(&net_virt_rx);
+    var net_copy = Pd.create(allocator, "net_copy", "net_copy.elf", .{ .priority = 97, .budget = 20000 });
+    sdf.addProtectionDomain(&net_copy);
+
+    const net_node = blob.child("virtio_mmio@a000000") orelse return error.NetNodeNotFound;
+    var net_system = sddf.Net.init(allocator, &sdf, net_node, &eth_driver, &net_virt_tx, &net_virt_rx, .{});
+    // beam_server is the sole net client. The fixed MAC matches the NIC MAC the
+    // virtio driver hardcodes, QEMU filters unicast RX by it, and keeps the
+    // generated config deterministic (sdfgen otherwise randomises client MACs).
+    try net_system.addClientWithCopier(&beam_server, &net_copy, .{ .mac_addr = "52:54:01:00:00:07" });
+
+    // lwIP is linked into beam_server (not a separate PD): the sdfgen Lwip
+    // helper maps a pbuf pool into beam_server and serialises the
+    // .lib_sddf_lwip_config the linked lib_sddf_lwip reads at sddf_lwip_init.
+    // Mirrors LionsOS posix_test's `Sddf.Lwip(sdf, net_system, client)`, must
+    // follow addClientWithCopier (it depends on the net client connection) and
+    // its connect() must follow net_system.connect().
+    var lwip = sddf.Lwip.init(allocator, &sdf, &net_system, &beam_server);
 
     // Wire channels/queues/shared regions, then serialise every subsystem's
     // per-PD config blobs into out_dir (objcopied into the ELFs by the build).
@@ -132,6 +161,10 @@ pub fn main() !void {
     try blk_system.connect();
     try blk_system.serialiseConfig(out_dir);
     try fs.serialiseConfig(out_dir);
+    try net_system.connect();
+    try net_system.serialiseConfig(out_dir);
+    try lwip.connect();
+    try lwip.serialiseConfig(out_dir);
 
     const xml = try sdf.render();
     const sdf_path = try std.fs.path.join(allocator, &.{ out_dir, "system.sdf" });

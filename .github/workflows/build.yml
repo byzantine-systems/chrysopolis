@@ -24,15 +24,21 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@v22
 
-      - name: Check formatting (treefmt)
+      - name: "[treefmt] Check formatting"
         run: nix build .#checks.x86_64-linux.treefmt --print-build-logs
 
-      - name: Build Gleam application and romfs
-        run: nix build .#app .#romfs --no-link --print-build-logs
+      - name: "[QEMU] Boot smoke test"
+        run: nix build .#checks.x86_64-linux.boot-smoke -L
 
-      - name: Boot smoke test (hermetic QEMU check)
-        run: nix build .#checks.x86_64-linux.boot-smoke --print-build-logs
+      - name: "[QEMU] Socket smoke test"
+        run: nix build .#checks.x86_64-linux.socket-smoke -L
 
-      - name: Build seL4 system image
-        run: nix build --print-build-logs
+      - name: "[QEMU] Shell smoke test"
+        run: nix build .#checks.x86_64-linux.shell-smoke -L
+
+      - name: "[QEMU] TCP smoke test"
+        run: nix build .#checks.x86_64-linux.tcp-smoke -L
+
+      - name: "[Nix] Build the ERTS-linked image"
+        run: nix build .#test-image                          
 
