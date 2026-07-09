@@ -4,17 +4,26 @@
     .fingerprint = 0x8f80d636954edc0f,
     .minimum_zig_version = "0.15.1",
 
-    // No Zig package dependencies: this build cross-compiles the libmicrokitco
-    // and sDDF C sources (passed in via -Dlibmicrokitco-src / -Dsddf) and links
-    // the PD glue against Nix-provided archives (libc.a, libmicrokit, the ERTS
-    // archives, all passed in as -D options). Nothing to fetch, so no
-    // build.zig.zon2json-lock / zig2nix machinery is needed (unlike tools/sdf,
-    // which depends on sdfgen).
-    .dependencies = .{},
+    // The LionsOS/sDDF/ERTS inputs stay Nix-provided -D options (they are
+    // patched/merged store paths, not fetchable packages). Real third-party
+    // packages are declared HERE and resolved through the Zig package manager;
+    // under Nix, zig2nix's deriveLockFile pre-populates the zig cache from the
+    // committed build.zig.zon2json-lock so `zig build` runs offline (the same
+    // machinery tools/sdf uses for sdfgen).
+    .dependencies = .{
+        // BearSSL: vetted embedded crypto (MIT). Backs src/runtime/rng.c's
+        // HMAC-DRBG (SHA-256, NIST SP 800-90A); build.zig compiles a 5-file
+        // subset (libbearssl_drbg.a), not the whole TLS stack.
+        .bearssl = .{
+            .url = "https://www.bearssl.org/bearssl-0.6.tar.gz",
+            .hash = "N-V-__8AAP0mNAAkyiY2ykjGvFxPCz3MG1hET12zva5TtOmP",
+        },
+    },
 
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "build.zig.zon2json-lock",
         "src/runtime",
     },
 }

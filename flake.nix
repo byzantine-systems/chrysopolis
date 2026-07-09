@@ -203,6 +203,33 @@
           # build (lib/libc/libc.mk, the sDDF driver .mk's) runs against this.
           # Preserve file modes (musl's ./configure must stay executable) but
           # add write permission so the empty submodule dirs can be replaced.
+          # RNG patch (issue 0.3.0-rng): libc_define_syscall asserts the slot is
+          # NULL, so beam_server cannot re-register the getrandom /
+          # clock_gettime / openat slots libc_init claims at startup.
+          # libc_redefine_syscall() REPLACES a claimed slot and returns the old
+          # handler so the RNG shims (src/runtime/bringup.c) can chain to
+          # upstream. ~10 lines, an upstream candidate alongside the TCP fixes.
+          # Appended (not patched by line number) so it survives lionsos bumps.
+          libcRedefineC = pkgs.writeText "libc_redefine_syscall.c" ''
+
+            /* Chrysopolis (issue 0.3.0-rng): replace an already-claimed syscall
+             * slot and return the previous handler, so a client can layer a new
+             * handler over libc's and chain to it. libc_define_syscall asserts
+             * the slot is NULL and so cannot do this. Upstream candidate. */
+            muslcsys_syscall_t libc_redefine_syscall(int syscall_num, muslcsys_syscall_t syscall_func) {
+                assert(syscall_num >= 0 && syscall_num < ARRAY_SIZE(syscall_table));
+                muslcsys_syscall_t old = syscall_table[syscall_num];
+                syscall_table[syscall_num] = syscall_func;
+                return old;
+            }
+          '';
+          libcRedefineH = pkgs.writeText "libc_redefine_syscall.h" ''
+
+            /* Chrysopolis (issue 0.3.0-rng): see posix.c. Replaces a claimed
+             * syscall slot, returning the old handler for chaining. */
+            muslcsys_syscall_t libc_redefine_syscall(int syscall_num, muslcsys_syscall_t syscall_func);
+          '';
+
           lionsosSrc = pkgs.runCommand "lionsos-src" { } ''
             cp -r ${inputs.lionsos} $out
             chmod -R u+w $out
@@ -211,7 +238,27 @@
             cp -r ${inputs.musllibc} $out/dep/musllibc
             cp -r ${inputs.libmicrokitco} $out/dep/libmicrokitco
             chmod -R u+w $out
+
+            cat ${libcRedefineC} >> $out/lib/libc/posix/posix.c
+            cat ${libcRedefineH} >> $out/include/lions/posix/posix.h
           '';
+
+          # One zig2nix env for everything Zig: the root build.zig's package
+          # dependencies (BearSSL, see build.zig.zon) and the tools/sdf host
+          # tool. deriveLockFile turns a committed build.zig.zon2json-lock into
+          # the Nix-fetched package cache `zig build` resolves offline.
+          zigEnv = inputs.zig2nix.zig-env.${system} {
+            zig = inputs.zig2nix.packages.${system}."zig-0_15_2";
+          };
+
+          # The root build's Zig package cache (BearSSL). Symlinked into
+          # ZIG_GLOBAL_CACHE_DIR/p in beamZig's buildPhase, exactly what
+          # zigEnv.package does internally; beamZig can't use that canned
+          # builder because of its custom buildPhase (the ERTS llvm-ar merge).
+          beamZigDeps = zigEnv.deriveLockFile ./build.zig.zon2json-lock {
+            inherit (zigEnv) zig;
+            name = "chrysopolis-dependencies";
+          };
 
           # The LionsOS reference stack: the POSIX libc.a + headers and the
           # board DTB, built under one make (nix/refstack.mk). musl's libc is an
@@ -399,6 +446,7 @@
               fileset = pkgs.lib.fileset.unions [
                 ./build.zig
                 ./build.zig.zon
+                ./build.zig.zon2json-lock
                 ./src/runtime
               ];
             };
@@ -445,6 +493,10 @@
               # $out/{lib,bin}.
               mkdir -p $out
               export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+              # Zig package deps (BearSSL) from the committed lock, so `zig
+              # build` resolves build.zig.zon offline (see beamZigDeps above).
+              mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
+              ln -s ${beamZigDeps} "$ZIG_GLOBAL_CACHE_DIR"/p
               zig build --prefix $out \
                 -Dboard-dir=${boardDir} \
                 -Dboard=${microkitBoard} \
@@ -539,10 +591,11 @@
                 mcopy -i $part start.boot "::/releases/$rel/start.boot"
 
                 # Device files ERTS opens (empty: reads EOF, /dev/null sink).
+                # NOT /dev/urandom or /dev/random: bringup.c's openat shim backs
+                # those with the DRBG (an empty FAT file would just read EOF).
                 : > empty
                 mcopy -i $part empty ::/dev/null
                 mcopy -i $part empty ::/dev/zero
-                mcopy -i $part empty ::/dev/urandom
 
                 # Wrap the FAT image in an MBR table; partition 1 (the blk
                 # virt's partition 0) starts at sector 2048 (1 MiB aligned).
@@ -563,15 +616,9 @@
           # build.zig.zon + committed build.zig.zon2json-lock and fetches the
           # sdfgen/dtb/sddf Zig packages through Nix, so `zig build` runs
           # offline. A host tool (we run it at build time to emit the SDF).
-          zigSdfTool =
-            let
-              zigEnv = inputs.zig2nix.zig-env.${system} {
-                zig = inputs.zig2nix.packages.${system}."zig-0_15_2";
-              };
-            in
-            zigEnv.package {
-              src = ./tools/sdf;
-            };
+          zigSdfTool = zigEnv.package {
+            src = ./tools/sdf;
+          };
 
           # Run gen-sdf to emit system.sdf and the per-PD config .data blobs.
           # It parses the board DTB (from lionsStack) and probes the sDDF

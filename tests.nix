@@ -155,6 +155,74 @@ in
     '';
   };
 
+  # Real entropy (issue 0.3.0-rng): the jitter-seeded HMAC-DRBG makes RNG and
+  # time-seeded values vary across boots. Boot the (default topology) ERTS image
+  # TWICE and assert the RNG fingerprint, rand:bytes/1 and erlang:make_ref/0 all
+  # differ between the two boots. The image and QEMU command line are unchanged
+  # from the other ERTS tests (Phase 1 adds no PD and no QEMU device), so this is
+  # purely a second boot, not a new topology.
+  rng-smoke = mkSel4Test {
+    name = "rng-smoke";
+    image = sel4TestImage;
+    testScript = ''
+      def boot_and_capture(machine):
+          # The RNG| line is printed by rng_init() before ERTS hands off.
+          wait_console(machine, r"RNG\|source=", 300)
+          wait_console(machine, r"Eshell", 300)
+          time.sleep(2)  # banner precedes the prompt; let the line editor come up
+          # One console line (writes are ~1s each under TCG) that also proves the
+          # openat shim: open /dev/urandom raw and read a BOUNDED 8 bytes
+          # (file:read_file would loop forever — /dev/urandom never EOFs). Tagged,
+          # space-separated prints so each value is unambiguous in the log.
+          machine.send_console(
+              '{ok,Fd}=file:open("/dev/urandom",[read,binary,raw]), {ok,U}=file:read(Fd,8), file:close(Fd), io:format("RNG_BYTES|~w RNG_REF|~p RNG_URANDOM|~w~n",[rand:bytes(8),erlang:make_ref(),U]).\r'
+          )
+          wait_console(machine, r"RNG_URANDOM\|", 60)
+          assert_no_pd_fault(machine)
+          return machine.get_console_log()
+
+      def extract(log, pat):
+          hits = re.findall(pat, log)
+          assert hits, f"pattern {pat!r} never appeared in the console log"
+          return hits[-1]
+
+      # Boot 1 is the machine the preamble already started.
+      log1 = boot_and_capture(chryso)
+      chryso.crash()
+
+      # Boot 2: a fresh machine, same command line (re-copies the FAT disk).
+      chryso2 = create_machine(
+          "${
+            startCommand {
+              image = sel4TestImage;
+              netdev = "user,id=net0";
+            }
+          }",
+          name="chrysopolis-2",
+      )
+      chryso2.start()
+      log2 = boot_and_capture(chryso2)
+      chryso2.crash()
+
+      fp1 = extract(log1, r"RNG\|source=\S+\|fp=([0-9a-f]+)")
+      fp2 = extract(log2, r"RNG\|source=\S+\|fp=([0-9a-f]+)")
+      assert fp1 != fp2, f"RNG fingerprint identical across boots ({fp1})"
+
+      b1 = extract(log1, r"RNG_BYTES\|(\S+)")
+      b2 = extract(log2, r"RNG_BYTES\|(\S+)")
+      assert b1 != b2, f"rand:bytes(8) identical across boots ({b1})"
+
+      r1 = extract(log1, r"RNG_REF\|(\S+)")
+      r2 = extract(log2, r"RNG_REF\|(\S+)")
+      assert r1 != r2, f"erlang:make_ref() identical across boots ({r1})"
+
+      # /dev/urandom read succeeded (openat shim + read callback), non-static.
+      u1 = extract(log1, r"RNG_URANDOM\|(\S+)")
+      u2 = extract(log2, r"RNG_URANDOM\|(\S+)")
+      assert u1 != u2, f"/dev/urandom returned identical bytes across boots ({u1})"
+    '';
+  };
+
   # gen_tcp end-to-end: TCP both ways over the real stack:
   #
   # ERTS inet_drv -> libc sock.c -> src/runtime/tcp.c -> lwIP ->

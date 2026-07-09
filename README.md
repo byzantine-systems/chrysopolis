@@ -76,12 +76,32 @@ nix flake check -L
 nix build .#checks.x86_64-linux.boot-smoke -L
 ```
 
-Four QEMU checks gate the build (each boots an image under emulation and asserts on the serial trace):
+Five QEMU checks gate the build (each boots an image under emulation and asserts on the serial trace):
 
 - **`boot-smoke`**: Headless boot of the ERTS image, asserts `beam_server` init, the sDDF monotonic clock, ERTS handoff, the FAT `MBR partitioning detected`, `Eshell`, and no PD faults.
 - **`socket-smoke`**: Boots the bring-up image (no ERTS) and asserts the linked lwIP stack gets a DHCP lease and `socket()/bind()/listen()/connect()` succeed from C.
 - **`shell-smoke`**: Drives the interactive Erlang shell under a pty (the Eshell only starts on a tty) and asserts that `> 1 + 1.` evaluates to `> 2.`.
 - **`tcp-smoke`**: Drives the shell to prove `gen_tcp` both directions: a host client echoes off a guest listener, and the guest connects out to a host listener.
+- **`rng-smoke`**: Boots the ERTS image twice and asserts the RNG fingerprint, `rand:bytes/1` and `erlang:make_ref/0` all differ across boots (see *Entropy* below).
+
+### Entropy
+
+`getrandom(2)`, `/dev/urandom` and `/dev/random` are backed by a CSPRNG in `beam_server`: an **HMAC-DRBG (SHA-256, NIST SP 800-90A)** from [BearSSL](https://bearssl.org/) (a vetted, MIT-licensed embedded crypto library — we do **not** hand-roll the DRBG), seeded from **AArch64 timing jitter** (`CNTPCT_EL0` deltas across a memory-perturbing loop). This is the *portable software floor*: it compiles in unconditionally, needs no extra protection domain and no QEMU device, and works on real hardware and any hypervisor.
+
+The entropy sources form a **portability ladder**, not a quality ladder:
+
+| Source | Works on | Role |
+|---|---|---|
+| Jitter DRBG (`CNTPCT_EL0`) | everywhere (real HW + any hypervisor) | **baseline floor** (this issue) |
+| virtio-rng | QEMU + KVM/cloud hypervisors | virt-only reseed upgrade (future) |
+| ARMv8.5 `RNDR`/`RNDRRS` (FEAT_RNG) | real AArch64 silicon with the feature | future bare-metal reseed |
+
+`rng_fill()` always reads the local DRBG, so it never blocks and never runs dry; virtio-rng/`RNDR` are optional *reseed* providers that slot into the same interface with **no new PD**. Jitter is fine for `rand`/refs/hashing. Two caveats worth knowing:
+
+- **QEMU/TCG determinism**: without `-icount` (our config) the guest counter tracks host time and genuinely jitters. Under `-icount`, or on a lockstep board, a distinct-delta health check trips and the DRBG falls back to a documented mix (build-time constant ⊕ initial counter ⊕ sDDF timer), printed as `RNG|source=fallback|…`.
+- **Deterministic *clock***: the deeper reason refs/seeds used to repeat was the wall clock, not `getrandom` — ERTS seeds `make_ref`/`rand` from `gettimeofday`, which LionsOS aliases to the monotonic timer that starts near 0 every boot. So `CLOCK_REALTIME` now gets a base epoch (2026-01-01) plus a small (< 15 min) per-boot entropy-derived offset; `CLOCK_MONOTONIC` is untouched.
+
+`crypto:strong_rand_bytes/1` is **not** covered here — the crypto NIF is unlinked (`micro-openssl.a` is md5-only); that's a separate future "link libcrypto + ship the crypto app" issue. The small LionsOS `libc_redefine_syscall` patch (which lets these shims chain over libc's handlers) is an upstream candidate.
 
 ### Running the BEAM shell
 

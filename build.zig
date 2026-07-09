@@ -51,6 +51,8 @@ const BeamCfg = struct {
     // lib_sddf_lwip.a: the lwIP stack + sDDF glue + LionsOS socket backend
     // (tcp.c) linked into beam so the libc socket layer has an AF_INET path.
     lwip_obj: std.Build.LazyPath,
+    // libbearssl_drbg.a: the HMAC-DRBG subset backing rng.c (src/runtime/rng.c).
+    bearssl_obj: std.Build.LazyPath,
     board_dir: []const u8,
     lions_libc: []const u8,
     libc_dir: []const u8,
@@ -166,6 +168,9 @@ fn addBeamExe(
     // lib_sddf_lwip.a: the lwIP stack + socket backend. Whole-archived so
     // tcp.o's socket_config is pulled in for the lazily-linked libc.a sock.c.
     exe.root_module.addObjectFile(cfg.lwip_obj);
+    // libbearssl_drbg.a: whole-archived so rng.o's br_hmac_drbg_* / br_sha256
+    // references (pulled from the glue object linked above) resolve.
+    exe.root_module.addObjectFile(cfg.bearssl_obj);
     // lwIP routes its diagnostics through sDDF's printf (sddf_printf_/sddf_dprintf
     // -> seL4 debug putchar) and uses sDDF's _assert_fail.
     // util_putchar_debug provides both, the same lib the driver PDs link.
@@ -389,6 +394,12 @@ pub fn build(b: *std.Build) void {
     const libc_dir = b.option([]const u8, "libc-dir", "dir holding liblionsc.a (LionsOS libc.a, aliased off the special name 'c')") orelse @panic("set -Dlibc-dir");
     const with_erts = b.option(bool, "with-erts", "also build beam_test.elf (the static ERTS link)") orelse false;
 
+    // BearSSL, a real Zig package dependency (build.zig.zon): a raw C source
+    // tree (no build.zig), consumed via .path(). Under Nix the flake symlinks
+    // zig2nix's deriveLockFile output into ZIG_GLOBAL_CACHE_DIR/p so this
+    // resolves offline from the committed build.zig.zon2json-lock.
+    const bearssl_dep = b.dependency("bearssl", .{});
+
     const cfg = boardCfg(board);
 
     // Subsystem toggles. serial+timer are today's image, blk and net are off until the SDF wires them.
@@ -538,7 +549,7 @@ pub fn build(b: *std.Build) void {
     });
     glue.root_module.addCSourceFiles(.{
         .root = b.path("src/runtime"),
-        .files = &.{ "main.c", "bringup.c", "process.c" },
+        .files = &.{ "main.c", "bringup.c", "process.c", "rng.c" },
         .flags = cflags,
     });
 
@@ -556,16 +567,43 @@ pub fn build(b: *std.Build) void {
     // lwip/pbuf.h -> lwipopts.h + arch/cc.h from our vendored lwip_include.
     glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
     glue.root_module.addIncludePath(b.path("src/runtime/lwip_include"));
+    // <bearssl.h> for rng.c's HMAC-DRBG calls.
+    glue.root_module.addIncludePath(bearssl_dep.path("inc"));
 
     // Prebuilt archives are linked lazily (pulled on demand), the way the
     // Makefile's `-lmicrokit -lc` and ld --start-group did, so members are
     // extracted on demand to resolve the glue + inter-archive references.
     const lwip_lib = addLwipLib(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src);
 
+    // libbearssl_drbg.a: a five-file subset of BearSSL (HMAC_DRBG/SHA-256,
+    // NIST SP 800-90A) backing src/runtime/rng.c. We compile only what the DRBG
+    // needs, not a whole TLS stack; the deliberate choice NOT to hand-roll the
+    // CSPRNG. inner.h pulls <string.h>/<limits.h> (musl, via lions_libc),
+    // "config.h" (BearSSL's default, in src/) and "bearssl.h" (in inc/).
+    const bearssl = b.addLibrary(.{
+        .name = "bearssl_drbg",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .strip = false }),
+    });
+    bearssl.root_module.addCSourceFiles(.{
+        .root = bearssl_dep.path("."),
+        // hmac_drbg + hmac + SHA-256, plus the two big-endian codec helpers
+        // sha2small.c calls out-of-line (br_range_enc32be/br_range_dec32be).
+        .files = &.{
+            "src/rand/hmac_drbg.c", "src/mac/hmac.c",      "src/hash/sha2small.c",
+            "src/codec/enc32be.c",  "src/codec/dec32be.c",
+        },
+        .flags = &.{ "-ffreestanding", "-O2", "-g" },
+    });
+    bearssl.root_module.addIncludePath(bearssl_dep.path("inc"));
+    bearssl.root_module.addIncludePath(bearssl_dep.path("src"));
+    bearssl.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) }); // musl headers
+
     const beam_cfg = BeamCfg{
         .glue_obj = glue.getEmittedBin(),
         .microkitco_obj = microkitco.getEmittedBin(),
         .lwip_obj = lwip_lib.getEmittedBin(),
+        .bearssl_obj = bearssl.getEmittedBin(),
         .board_dir = board_dir,
         .lions_libc = lions_libc,
         .libc_dir = libc_dir,
