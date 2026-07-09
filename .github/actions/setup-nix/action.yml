@@ -1,0 +1,21 @@
+# Shared Nix setup for all CI jobs, based on
+# https://nixcademy.com/posts/nixos-integration-test-on-github/
+# with Magic Nix Cache sharing builds between the pipeline stages.
+name: "Setup Nix"
+description: "Reclaim disk space, install Nix, and enable the build cache"
+runs:
+  using: "composite"
+  steps:
+    - uses: wimpysworld/nothing-but-nix@main
+      with:
+        hatchet-protocol: 'cleave'
+
+    # zig2nix uses bwrap which requires unprivileged user namespaces.
+    # Ubuntu's default apparmor_restrict_unprivileged_userns=1 blocks this.
+    - name: Enable unprivileged user namespaces
+      shell: bash
+      run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+    - uses: DeterminateSystems/nix-installer-action@v22
+
+    - uses: DeterminateSystems/magic-nix-cache-action@v14

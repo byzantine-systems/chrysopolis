@@ -2,10 +2,11 @@
 #
 # Drives the LionsOS POSIX libc + sDDF serial/timer drivers under a single
 # make, exactly the way the upstream examples/*/*.mk snippets do (this is a
-# trimmed examples/posix_test/posix_test.mk). Consumed by the `lionsStack`
-# Nix derivation, which supplies a hermetic toolchain (clang/lld/llvm + dtc),
-# the Microkit SDK, and the reconstructed LionsOS source tree (lionsosSrc)
-# with its dep/sddf and dep/musllibc submodules populated from flake inputs.
+# trimmed examples/posix_test/posix_test.mk). Consumed by the `lions-stack`
+# Nix derivation (modules/lionsos.nix), which supplies a hermetic toolchain
+# (clang/lld/llvm + dtc), the Microkit SDK, and the reconstructed LionsOS
+# source tree (`lionsos-src`) with its dep/sddf and dep/musllibc submodules
+# populated from flake inputs.
 #
 # Required variables (set by the derivation):
 #   LIONSOS         reconstructed LionsOS source tree (submodules populated)
@@ -14,9 +15,9 @@
 #   MICROKIT_CONFIG e.g. debug
 #
 # Produces, in $(BUILD_DIR): libc/lib/libc.a, libc/include/, and the board DTB.
-# The sDDF driver/virtualiser PDs and libmicrokitco are built separately by Zig
-# packages (tools/sddf-drivers, libmicrokitco), their .mk includes below remain
-# only so their rules/vars parse, their targets are no longer requested by `all`.
+# The sDDF driver/virtualiser PDs and libmicrokitco are built by the root
+# build.zig now; their .mk includes below remain only so their rules/vars
+# parse, their targets are no longer requested by `all`.
 
 MICROKIT_CONFIG ?= debug
 TOOLCHAIN := clang
@@ -99,7 +100,6 @@ $(DRIVER_IMAGES) $(FS_IMAGES): $(LIONS_LIBC)/lib/libc.a libsddf_util_debug.a
 
 # Defined here, after the includes, so LIONS_LIBC and DTB are non-empty.
 # The sDDF driver/virtualiser PDs ($(DRIVER_IMAGES)/$(FS_IMAGES)) and libmicrokitco
-# are built by Zig now (tools/sddf-drivers, libmicrokitco), so they are intentionally 
-# NOT in `all`, this make only produces the musl libc.a (autotools) and the 
-# board DTB.
+# are built by the root build.zig now, so they are intentionally NOT in `all`,
+# this make only produces the musl libc.a (autotools) and the board DTB.
 all: $(LIONS_LIBC)/lib/libc.a $(DTB)

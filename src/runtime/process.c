@@ -27,6 +27,8 @@
 
 #include <libmicrokitco.h>
 
+#include "rng.h" /* RNG_REALTIME_BASE_EPOCH, for the condvar deadline clock */
+
 /* -------------------------------------------------------------------------
  * Cothread runtime
  * ------------------------------------------------------------------------- */
@@ -204,13 +206,26 @@ int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
   int snapshot = LOAD(&c->__u.__i[0]);
   pthread_mutex_unlock(m);
 
+  /* ERTS computes condvar deadlines on CLOCK_REALTIME (the POSIX default,    *
+   * pthread_condattr_setclock below is a no-op). This was harmless while
+   * LionsOS aliased CLOCK_REALTIME to CLOCK_MONOTONIC, but the RNG work gives
+   * CLOCK_REALTIME a 2026 base epoch (rng.h), so a realtime deadline is
+   * ~1.8e9 s while the monotonic clock sits near zero: checked against
+   * CLOCK_MONOTONIC it never expires and this loop spins forever, which
+   * silently wedged ERTS boot right after the erl_start handoff. Pick the
+   * comparison clock by the deadline's magnitude: only a realtime-based
+   * abstime can be at/after the base epoch. */
+  clockid_t clk = (abstime->tv_sec >= (time_t)RNG_REALTIME_BASE_EPOCH)
+                      ? CLOCK_REALTIME
+                      : CLOCK_MONOTONIC;
+
   struct timespec now;
   for (;;) {
     co_yield_once();
     if (LOAD(&c->__u.__i[0]) != snapshot) {
       break;
     }
-    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+    if (clock_gettime(clk, &now) == 0) {
       if (now.tv_sec > abstime->tv_sec ||
           (now.tv_sec == abstime->tv_sec && now.tv_nsec >= abstime->tv_nsec)) {
         pthread_mutex_lock(m);

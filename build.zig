@@ -13,14 +13,21 @@ const std = @import("std");
 // board include), the sDDF `util`/`util_putchar_debug` libs, and the sDDF
 // include set. Single-sourcing all of that here is the point of the merge.
 //
-// The host gen-sdf tool (tools/sdf) stays a separate package: it has a real Zig
-// dependency (sdfgen) that needs zig2nix's offline cache, whereas everything
-// here is dependency-free and only needs a custom Nix buildPhase
-// (the ERTS llvm-ar merge) the canned zig2nix builder can't do.
+// The host gen-sdf tool (tools/sdf) stays a separate package: it needs the
+// canned zig2nix builder, whereas this build needs a custom Nix buildPhase
+// (the ERTS llvm-ar merge) that builder can't do.
 //
-// Nix still fetches/locks every input (libc.a, the libmicrokitco/sDDF source
-// trees, the Microkit SDK, the ERTS archives) and passes them in as -D options;
-// Zig is only the build driver. Artifacts (all installed into one $out):
+// Dependency policy: a third-party dep goes in build.zig.zon (fetched by the
+// Zig package manager; zig2nix's deriveLockFile pre-populates the cache under
+// Nix) iff it is (a) consumed only by this zig build, (b) an unpatched
+// upstream tarball, and (c) not rev-coupled to another input. BearSSL is the
+// current example. Everything else stays a Nix-provided -D option because it
+// fails one of those: lionsos is patched and reconstructed (submodules +
+// libc_redefine_syscall), sddf/musllibc/libmicrokitco must match the lionsos
+// rev's gitlinks and are also consumed by the Nix-side musl build
+// (refstack.mk) and the gen-sdf probe, the Microkit SDK is per-platform
+// binaries, and the ERTS archives are a Nix cross build. Artifacts (all
+// installed into one $out):
 //   lib/libmicrokitco.a
 //   the enabled driver/virtualiser PD ELFs (serial_driver.elf, timer_driver.elf, ...)
 //   bin/beam_server.elf            (bring-up: console + clock + heap)
@@ -384,7 +391,7 @@ pub fn build(b: *std.Build) void {
     const target = crossTarget(b);
     const optimize: std.builtin.OptimizeMode = .ReleaseFast;
 
-    // Nix store paths supplied by the derivation (see flake.nix).
+    // Nix store paths supplied by the derivation (see modules/beam.nix).
     const board_dir = b.option([]const u8, "board-dir", "Microkit board dir ($MICROKIT_SDK/board/<board>/<config>)") orelse @panic("set -Dboard-dir");
     const board = b.option([]const u8, "board", "Microkit board name (selects driver classes)") orelse "qemu_virt_aarch64";
     sddf = b.option([]const u8, "sddf", "sDDF source tree") orelse @panic("set -Dsddf");

@@ -1,8 +1,8 @@
 /*
  * Seeding + reseed glue around BearSSL's HMAC-DRBG (SHA-256). See rng.h for the
  * design rationale (portable software floor, pluggable reseed, no hand-rolled
- * crypto). The DRBG itself — instantiate, generate, reseed, and all the
- * conditioning — is BearSSL's br_hmac_drbg (NIST SP 800-90A). This file only
+ * crypto). The DRBG itself, instantiate, generate, reseed, and all the
+ * conditioning, is BearSSL's br_hmac_drbg (NIST SP 800-90A). This file only
  * provides the entropy BearSSL cannot: AArch64 timing jitter, the health check,
  * and a documented fallback.
  *
@@ -60,7 +60,7 @@ void rng_reseed_from(const rng_provider_t *provider) {
     return; /* empty provider: skip this reseed round */
   }
   /* br_hmac_drbg_update ADDS entropy (it never replaces the pool), so folding
-   * in even low-quality bytes can only help — exactly the reseed semantics we
+   * in even low-quality bytes can only help, exactly the reseed semantics we
    * want for the optional virtio-rng / RNDR providers. */
   br_hmac_drbg_update(&g_drbg, raw, n);
   memset(raw, 0, sizeof(raw));
@@ -98,7 +98,7 @@ static volatile uint8_t jitter_scratch[64];
  * Collect ~1024 CNTPCT_EL0 deltas, fold them into a 64-byte pool, and (on
  * passing the distinct-delta health check) emit up to len raw pool bytes.
  * Returns 0 on health-check failure so rng_init falls back to the documented
- * mix. No whitening here — HMAC-DRBG conditions whatever we hand it.
+ * mix. No whitening here, HMAC-DRBG conditions whatever we hand it.
  */
 static size_t jitter_collect(uint8_t *buf, size_t len) {
   uint64_t pool[JITTER_POOL_LANES];
@@ -139,7 +139,7 @@ static size_t jitter_collect(uint8_t *buf, size_t len) {
 }
 
 /* A fixed compile-time constant folded into the fallback seed. It is NOT the
- * source of per-boot variance (the counter/timer below are) — it only ensures
+ * source of per-boot variance (the counter/timer below are), it only ensures
  * the fallback never degenerates to an all-zero seed. Reproducible-build rules
  * (rightly) forbid __DATE__/__TIME__, so this is a plain literal. */
 #define RNG_FALLBACK_CONSTANT 0x9e3779b97f4a7c15ull
