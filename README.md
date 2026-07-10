@@ -17,7 +17,7 @@ Chrysopolis aims to run the BEAM on the [seL4 microkernel](https://sel4.systems/
 - **seL4** is a formally verified microkernel (~10k lines with machine-checked correctness proofs). It provides strong isolation guarantees, where each component runs in its own protection domain (PD), communicating via capabilities.
 - **LionsOS** is a reference OS stack for seL4. It provides a musl-based libc, [sDDF drivers](https://trustworthy.systems/projects/drivers/) (serial, timer, block), and a cooperative cothread runtime [libmicrokitco](https://github.com/au-ts/libmicrokitco). Chrysopolis links ERTS against LionsOS `libc.a` (the same POSIX API, but backed by seL4 IPC instead of Linux syscalls).
 - **Nix** is the build system and fetch/lock authority. 
-    - A `flake.nix` cross-compiles ERTS, builds musl `libc.a` (autotools), and pins every input in `flake.lock`. 
+    - A [flake-parts](https://flake.parts/)-structured flake (`flake.nix` + one module per concern under [modules/](modules)) cross-compiles ERTS, builds musl `libc.a` (autotools), and pins every input in `flake.lock`. 
     - **Zig** is invoked by Nix as the build driver via two `build.zig` metaprograms: 
         - [tools/sdf](tools/sdf) generates the Microkit system description.
         - the root [build.zig](build.zig) builds [libmicrokitco](https://github.com/au-ts/libmicrokitco), the sDDF driver/virtualiser PDs, and compiles and links the `beam_server` PD (ERTS glue) from [src/runtime](src/runtime). 
@@ -76,12 +76,13 @@ nix flake check -L
 nix build .#checks.x86_64-linux.boot-smoke -L
 ```
 
-Four QEMU checks gate the build (each boots an image under emulation and asserts on the serial trace):
+Five QEMU checks gate the build (each boots an image under emulation and asserts on the serial trace):
 
 - **`boot-smoke`**: Headless boot of the ERTS image, asserts `beam_server` init, the sDDF monotonic clock, ERTS handoff, the FAT `MBR partitioning detected`, `Eshell`, and no PD faults.
 - **`socket-smoke`**: Boots the bring-up image (no ERTS) and asserts the linked lwIP stack gets a DHCP lease and `socket()/bind()/listen()/connect()` succeed from C.
 - **`shell-smoke`**: Drives the interactive Erlang shell under a pty (the Eshell only starts on a tty) and asserts that `> 1 + 1.` evaluates to `> 2.`.
 - **`tcp-smoke`**: Drives the shell to prove `gen_tcp` both directions: a host client echoes off a guest listener, and the guest connects out to a host listener.
+- **`rng-smoke`**: Boots the ERTS image twice and asserts the RNG fingerprint, `rand:bytes/1` and `erlang:make_ref/0` all differ across boots (see *Entropy* below).
 
 ### Running the BEAM shell
 

@@ -21,6 +21,8 @@
 #include <lions/posix/fd.h>
 #include <lions/posix/posix.h>
 
+#include "rng.h"
+
 #include <microkit.h>
 #include <sel4/sel4.h>
 
@@ -104,7 +106,7 @@ static ssize_t empty_read(void *data, size_t count, int fd) {
 /* Echo a keystroke back to the console. QEMU's -serial mon:stdio raw-mode host
  * terminal does not echo, and ERTS runs in dumb-terminal mode (its prim_tty
  * line editor can't init through our ioctl stubs), so it neither echoes nor
- * edits — without this the user types blind. Cooked-mode echo: CR is shown as
+ * edits, without this the user types blind. Cooked-mode echo: CR is shown as
  * CRLF (Enter over serial arrives as '\r'), DEL/BS erase the last glyph. */
 static void console_echo(char c) {
   switch (c) {
@@ -327,7 +329,7 @@ static long bringup_clock_getres(va_list ap) {
  * never returns, so notified()/recv_ntfn never fire and such a wait would hang
  * forever (the whole PD works by busy-polling shared memory). */
 static long bringup_clock_nanosleep(va_list ap) {
-  (void)va_arg(ap, long); /* clockid */
+  long clockid = va_arg(ap, long);
   int flags = va_arg(ap, int);
   const struct timespec *req = va_arg(ap, const struct timespec *);
   struct timespec *rem = va_arg(ap, struct timespec *);
@@ -340,6 +342,16 @@ static long bringup_clock_nanosleep(va_list ap) {
   unsigned ch = timer_config.driver_id;
   uint64_t reqns =
       (uint64_t)req->tv_sec * 1000000000ull + (uint64_t)req->tv_nsec;
+  /* An absolute CLOCK_REALTIME deadline lives on the epoch-offset timeline
+   * (see bringup_clock_gettime); the sDDF timer is monotonic-native, so shift
+   * such a deadline back before comparing or it is ~56 years away and this
+   * sleep never returns. Relative sleeps and monotonic deadlines pass through
+   * unchanged. */
+  if ((flags & TIMER_ABSTIME) && clockid == CLOCK_REALTIME) {
+    uint64_t epoch_ns =
+        (RNG_REALTIME_BASE_EPOCH + rng_realtime_offset_sec) * 1000000000ull;
+    reqns = reqns > epoch_ns ? reqns - epoch_ns : 0;
+  }
   uint64_t now0 = sddf_timer_time_now(ch);
   uint64_t target = (flags & TIMER_ABSTIME) ? reqns : now0 + reqns;
   // if (target > now0 && target - now0 > 100000000ull) { /* DIAG */
@@ -718,6 +730,114 @@ static long bringup_uname(va_list ap) {
   return 0;
 }
 
+/* ---- Real entropy (issue 0.3.0-rng): getrandom / clock_gettime / openat.
+ *
+ * libc_init (posix.c) and libc_init_file (file.c) claim these three slots
+ * before bringup_register_syscalls runs, and libc_define_syscall asserts the
+ * slot is NULL, so we can't re-register them. libc_redefine_syscall (our tiny
+ * LionsOS libc patch, applied in modules/lionsos.nix's lionsos-src) instead
+ * REPLACES a
+ * claimed slot and returns the old handler, so these shims can chain to the
+ * upstream behaviour. See rng.c for the DRBG. ---- */
+
+/* Old handlers returned by libc_redefine_syscall, for chaining. */
+static muslcsys_syscall_t old_clock_gettime;
+static muslcsys_syscall_t old_openat;
+
+/* RNG_REALTIME_BASE_EPOCH (rng.h): a sane 2026 base epoch so CLOCK_REALTIME is
+ * roughly correct (future TLS cert validity, log timestamps) instead of
+ * starting near 0. The real fix (RTC/NTP) is a separate future issue; here we
+ * only need it non-zero and per-boot-varying. */
+
+/* getrandom(2): fill the caller's buffer from the DRBG. Replaces LionsOS's
+ * unseeded rand() loop (posix.c sys_getrandom, "deliberately insecure"). */
+static long bringup_getrandom(va_list ap) {
+  void *buf = va_arg(ap, void *);
+  size_t buflen = va_arg(ap, size_t);
+  (void)va_arg(ap, unsigned); /* flags: GRND_NONBLOCK/GRND_RANDOM, we never
+                               * block and never run dry, so both are moot */
+  if (buf == NULL) {
+    return -EFAULT;
+  }
+  rng_fill((uint8_t *)buf, buflen);
+  return (long)buflen;
+}
+
+/* clock_gettime: chain to the upstream sDDF-timer handler, then for
+ * CLOCK_REALTIME *only* add the base epoch plus the per-boot entropy-derived
+ * offset. This is what makes erlang:make_ref()/rand differ across boots (ERTS
+ * seeds them from gettimeofday, which LionsOS aliases to the monotonic timer
+ * that starts at ~0 every boot). CLOCK_MONOTONIC is passed through untouched.
+ *
+ * We va_copy the arg list so the old handler consumes a fresh cursor while we
+ * still read clk_id/tp ourselves to decide whether to apply the offset. */
+static long bringup_clock_gettime(va_list ap) {
+  va_list copy;
+  va_copy(copy, ap);
+  long ret = old_clock_gettime ? old_clock_gettime(copy) : -ENOSYS;
+  va_end(copy);
+  if (ret != 0) {
+    return ret;
+  }
+  clockid_t clk_id = va_arg(ap, clockid_t);
+  struct timespec *tp = va_arg(ap, struct timespec *);
+  if (clk_id == CLOCK_REALTIME && tp != NULL) {
+    tp->tv_sec += (time_t)(RNG_REALTIME_BASE_EPOCH + rng_realtime_offset_sec);
+  }
+  return ret;
+}
+
+/* read callback for the virtual /dev/urandom, /dev/random fds. Never EOFs. */
+static ssize_t urandom_read(void *data, size_t count, int fd) {
+  (void)fd;
+  rng_fill((uint8_t *)data, count);
+  return (ssize_t)count;
+}
+
+/* fstat for the RNG fds: a character device, like the real /dev/urandom. This
+ * must be set: io.c's sys_fstat calls fd_entry->fstat with NO NULL check
+ * (posix_fd_allocate zeroes the entry), so an fstat on this fd would otherwise
+ * jump to NULL and fault the PD. Not S_IFSOCK, bringup's epoll socket
+ * detection keys on that. */
+static int urandom_fstat(int fd, struct stat *st) {
+  (void)fd;
+  memset(st, 0, sizeof(*st));
+  st->st_mode = S_IFCHR | 0444;
+  st->st_nlink = 1;
+  return 0;
+}
+
+/* True for the RNG device paths ERTS / file:read may open. Matches both the
+ * absolute form and the cwd-relative form (cwd is "/", see bringup_getcwd). */
+static bool is_rng_device_path(const char *path) {
+  return strcmp(path, "/dev/urandom") == 0 ||
+         strcmp(path, "/dev/random") == 0 || strcmp(path, "dev/urandom") == 0 ||
+         strcmp(path, "dev/random") == 0;
+}
+
+/* openat: intercept /dev/urandom and /dev/random, handing back an fd whose read
+ * callback pulls from the DRBG. Everything else chains to the real libc fs path
+ * (file.c sys_openat -> the FAT fs_server). The empty ::/dev/urandom FAT file
+ * is dropped from the disk image (modules/images.nix), so without this
+ * intercept those reads would return EOF. */
+static long bringup_openat(va_list ap) {
+  va_list copy;
+  va_copy(copy, ap);
+  (void)va_arg(ap, int);                       /* dirfd */
+  const char *path = va_arg(ap, const char *); /* pathname */
+  if (path != NULL && is_rng_device_path(path)) {
+    va_end(copy);
+    int fd = bringup_alloc_fd(urandom_read, NULL, O_RDONLY);
+    if (fd >= 0) {
+      posix_fd_entry(fd)->fstat = urandom_fstat;
+    }
+    return fd;
+  }
+  long ret = old_openat ? old_openat(copy) : -ENOSYS;
+  va_end(copy);
+  return ret;
+}
+
 void bringup_register_syscalls(void) {
   /* File syscalls (openat/newfstatat/readlinkat/lseek/mkdirat/unlinkat) are
    * registered by the real libc_init_file() against the FAT fs_server, do not
@@ -756,6 +876,14 @@ void bringup_register_syscalls(void) {
   libc_define_syscall(SYS_socketpair, bringup_socketpair);
   libc_define_syscall(SYS_exit, bringup_exit);
   libc_define_syscall(SYS_exit_group, bringup_exit);
+
+  /* Real-entropy redefines: these slots are already claimed by libc_init /
+   * libc_init_file, so REPLACE them (returning the old handler for chaining)
+   * rather than define. rng_init() (main.c) seeds the DRBG right after this. */
+  old_clock_gettime =
+      libc_redefine_syscall(SYS_clock_gettime, bringup_clock_gettime);
+  libc_redefine_syscall(SYS_getrandom, bringup_getrandom);
+  old_openat = libc_redefine_syscall(SYS_openat, bringup_openat);
 
   /* Wire stdin (fd 0) to the serial RX queue. The libc fd.c initializes
    * stdin with O_RDONLY but no read callback, we provide the missing read

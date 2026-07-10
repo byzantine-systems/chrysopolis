@@ -1,5 +1,12 @@
 # CI pipeline: formatting, compilation safety, image packaging
 # and a headless QEMU boot of the synthesized system image.
+#
+# Staged pipeline (https://nixcademy.com/posts/nixos-integration-test-on-github/):
+#   1. treefmt gates everything
+#   2. The images (bring-up + ERTS-linked) and the FAT disk build ONCE.
+#   3. QEMU smoke tests, at most 3 at a time to stay within shared-runner
+#      limits. They restore the images from the cache, build only their own
+#      test derivation, and their post-run upload is a few KB of test log.
 name: "[Nix] Build & Test"
 
 on:
@@ -8,37 +15,41 @@ on:
   pull_request:
 
 jobs:
-  build:
+  format:
+    name: "[treefmt] Check formatting"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-nix
+      - run: nix build .#checks.x86_64-linux.treefmt --print-build-logs
 
-      - uses: wimpysworld/nothing-but-nix@main
-        with:
-          hatchet-protocol: 'cleave'
+  image:
+    name: "[Nix] Build images + disk"
+    needs: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-nix
+      # Everything the smoke tests boot: the ERTS-linked image, the bring-up
+      # image (socket-smoke) and the FAT disk they all attach.
+      - run: nix build .#test-image .#default .#disk --print-build-logs
 
-      # zig2nix uses bwrap which requires unprivileged user namespaces.
-      # Ubuntu's default apparmor_restrict_unprivileged_userns=1 blocks this.
-      - name: Enable unprivileged user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-
-      - uses: DeterminateSystems/nix-installer-action@v22
-
-      - name: "[treefmt] Check formatting"
-        run: nix build .#checks.x86_64-linux.treefmt --print-build-logs
-
-      - name: "[QEMU] Boot smoke test"
-        run: nix build .#checks.x86_64-linux.boot-smoke -L
-
-      - name: "[QEMU] Socket smoke test"
-        run: nix build .#checks.x86_64-linux.socket-smoke -L
-
-      - name: "[QEMU] Shell smoke test"
-        run: nix build .#checks.x86_64-linux.shell-smoke -L
-
-      - name: "[QEMU] TCP smoke test"
-        run: nix build .#checks.x86_64-linux.tcp-smoke -L
-
-      - name: "[Nix] Build the ERTS-linked image"
-        run: nix build .#test-image                          
-
+  test:
+    name: "[QEMU] ${{ matrix.check }}"
+    needs: image
+    runs-on: ubuntu-latest
+    strategy:
+      # Let independent smoke tests finish even if one fails.
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        check:
+          - boot-smoke
+          - socket-smoke
+          - shell-smoke
+          - tcp-smoke
+          - rng-smoke
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-nix
+      - run: nix build .#checks.x86_64-linux.${{ matrix.check }} --print-build-logs

@@ -13,14 +13,21 @@ const std = @import("std");
 // board include), the sDDF `util`/`util_putchar_debug` libs, and the sDDF
 // include set. Single-sourcing all of that here is the point of the merge.
 //
-// The host gen-sdf tool (tools/sdf) stays a separate package: it has a real Zig
-// dependency (sdfgen) that needs zig2nix's offline cache, whereas everything
-// here is dependency-free and only needs a custom Nix buildPhase
-// (the ERTS llvm-ar merge) the canned zig2nix builder can't do.
+// The host gen-sdf tool (tools/sdf) stays a separate package: it needs the
+// canned zig2nix builder, whereas this build needs a custom Nix buildPhase
+// (the ERTS llvm-ar merge) that builder can't do.
 //
-// Nix still fetches/locks every input (libc.a, the libmicrokitco/sDDF source
-// trees, the Microkit SDK, the ERTS archives) and passes them in as -D options;
-// Zig is only the build driver. Artifacts (all installed into one $out):
+// Dependency policy: a third-party dep goes in build.zig.zon (fetched by the
+// Zig package manager; zig2nix's deriveLockFile pre-populates the cache under
+// Nix) iff it is (a) consumed only by this zig build, (b) an unpatched
+// upstream tarball, and (c) not rev-coupled to another input. BearSSL is the
+// current example. Everything else stays a Nix-provided -D option because it
+// fails one of those: lionsos is patched and reconstructed (submodules +
+// libc_redefine_syscall), sddf/musllibc/libmicrokitco must match the lionsos
+// rev's gitlinks and are also consumed by the Nix-side musl build
+// (refstack.mk) and the gen-sdf probe, the Microkit SDK is per-platform
+// binaries, and the ERTS archives are a Nix cross build. Artifacts (all
+// installed into one $out):
 //   lib/libmicrokitco.a
 //   the enabled driver/virtualiser PD ELFs (serial_driver.elf, timer_driver.elf, ...)
 //   bin/beam_server.elf            (bring-up: console + clock + heap)
@@ -51,6 +58,8 @@ const BeamCfg = struct {
     // lib_sddf_lwip.a: the lwIP stack + sDDF glue + LionsOS socket backend
     // (tcp.c) linked into beam so the libc socket layer has an AF_INET path.
     lwip_obj: std.Build.LazyPath,
+    // libbearssl_drbg.a: the HMAC-DRBG subset backing rng.c (src/runtime/rng.c).
+    bearssl_obj: std.Build.LazyPath,
     board_dir: []const u8,
     lions_libc: []const u8,
     libc_dir: []const u8,
@@ -166,6 +175,9 @@ fn addBeamExe(
     // lib_sddf_lwip.a: the lwIP stack + socket backend. Whole-archived so
     // tcp.o's socket_config is pulled in for the lazily-linked libc.a sock.c.
     exe.root_module.addObjectFile(cfg.lwip_obj);
+    // libbearssl_drbg.a: whole-archived so rng.o's br_hmac_drbg_* / br_sha256
+    // references (pulled from the glue object linked above) resolve.
+    exe.root_module.addObjectFile(cfg.bearssl_obj);
     // lwIP routes its diagnostics through sDDF's printf (sddf_printf_/sddf_dprintf
     // -> seL4 debug putchar) and uses sDDF's _assert_fail.
     // util_putchar_debug provides both, the same lib the driver PDs link.
@@ -379,7 +391,7 @@ pub fn build(b: *std.Build) void {
     const target = crossTarget(b);
     const optimize: std.builtin.OptimizeMode = .ReleaseFast;
 
-    // Nix store paths supplied by the derivation (see flake.nix).
+    // Nix store paths supplied by the derivation (see modules/beam.nix).
     const board_dir = b.option([]const u8, "board-dir", "Microkit board dir ($MICROKIT_SDK/board/<board>/<config>)") orelse @panic("set -Dboard-dir");
     const board = b.option([]const u8, "board", "Microkit board name (selects driver classes)") orelse "qemu_virt_aarch64";
     sddf = b.option([]const u8, "sddf", "sDDF source tree") orelse @panic("set -Dsddf");
@@ -388,6 +400,12 @@ pub fn build(b: *std.Build) void {
     const lionsos_src = b.option([]const u8, "lionsos-src", "LionsOS source tree (headers)") orelse @panic("set -Dlionsos-src");
     const libc_dir = b.option([]const u8, "libc-dir", "dir holding liblionsc.a (LionsOS libc.a, aliased off the special name 'c')") orelse @panic("set -Dlibc-dir");
     const with_erts = b.option(bool, "with-erts", "also build beam_test.elf (the static ERTS link)") orelse false;
+
+    // BearSSL, a real Zig package dependency (build.zig.zon): a raw C source
+    // tree (no build.zig), consumed via .path(). Under Nix the flake symlinks
+    // zig2nix's deriveLockFile output into ZIG_GLOBAL_CACHE_DIR/p so this
+    // resolves offline from the committed build.zig.zon2json-lock.
+    const bearssl_dep = b.dependency("bearssl", .{});
 
     const cfg = boardCfg(board);
 
@@ -538,7 +556,7 @@ pub fn build(b: *std.Build) void {
     });
     glue.root_module.addCSourceFiles(.{
         .root = b.path("src/runtime"),
-        .files = &.{ "main.c", "bringup.c", "process.c" },
+        .files = &.{ "main.c", "bringup.c", "process.c", "rng.c" },
         .flags = cflags,
     });
 
@@ -556,16 +574,43 @@ pub fn build(b: *std.Build) void {
     // lwip/pbuf.h -> lwipopts.h + arch/cc.h from our vendored lwip_include.
     glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
     glue.root_module.addIncludePath(b.path("src/runtime/lwip_include"));
+    // <bearssl.h> for rng.c's HMAC-DRBG calls.
+    glue.root_module.addIncludePath(bearssl_dep.path("inc"));
 
     // Prebuilt archives are linked lazily (pulled on demand), the way the
     // Makefile's `-lmicrokit -lc` and ld --start-group did, so members are
     // extracted on demand to resolve the glue + inter-archive references.
     const lwip_lib = addLwipLib(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src);
 
+    // libbearssl_drbg.a: a five-file subset of BearSSL (HMAC_DRBG/SHA-256,
+    // NIST SP 800-90A) backing src/runtime/rng.c. We compile only what the DRBG
+    // needs, not a whole TLS stack; the deliberate choice NOT to hand-roll the
+    // CSPRNG. inner.h pulls <string.h>/<limits.h> (musl, via lions_libc),
+    // "config.h" (BearSSL's default, in src/) and "bearssl.h" (in inc/).
+    const bearssl = b.addLibrary(.{
+        .name = "bearssl_drbg",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .strip = false }),
+    });
+    bearssl.root_module.addCSourceFiles(.{
+        .root = bearssl_dep.path("."),
+        // hmac_drbg + hmac + SHA-256, plus the two big-endian codec helpers
+        // sha2small.c calls out-of-line (br_range_enc32be/br_range_dec32be).
+        .files = &.{
+            "src/rand/hmac_drbg.c", "src/mac/hmac.c",      "src/hash/sha2small.c",
+            "src/codec/enc32be.c",  "src/codec/dec32be.c",
+        },
+        .flags = &.{ "-ffreestanding", "-O2", "-g" },
+    });
+    bearssl.root_module.addIncludePath(bearssl_dep.path("inc"));
+    bearssl.root_module.addIncludePath(bearssl_dep.path("src"));
+    bearssl.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) }); // musl headers
+
     const beam_cfg = BeamCfg{
         .glue_obj = glue.getEmittedBin(),
         .microkitco_obj = microkitco.getEmittedBin(),
         .lwip_obj = lwip_lib.getEmittedBin(),
+        .bearssl_obj = bearssl.getEmittedBin(),
         .board_dir = board_dir,
         .lions_libc = lions_libc,
         .libc_dir = libc_dir,

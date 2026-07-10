@@ -91,6 +91,7 @@ extern void beam_process_external_events(microkit_channel ch)
     __attribute__((weak));
 
 extern void bringup_register_syscalls(void);
+extern void rng_init(void);
 extern void thread_init(void);
 extern void thread_notified(microkit_channel ch);
 
@@ -252,6 +253,11 @@ static void beam_run(void) {
   beam_socket_config.tcp_socket_hup = NULL;
   libc_init(&beam_socket_config, (void *)beam_heap_start, BEAM_HEAP_SIZE);
   bringup_register_syscalls();
+  /* Seed the CSPRNG (getrandom / /dev/urandom / the CLOCK_REALTIME offset) now
+   * that the syscall shims are registered and the timer client config is valid.
+   * Must precede erl_start: ERTS seeds make_ref/rand from gettimeofday at boot,
+   * and the fallback seed path reads the sDDF timer. */
+  rng_init();
   /* Stand up the cothread runtime ERTS's helper threads spawn onto. Must
    * follow libc_init (uses malloc for the cothread stacks) and precede the
    * FS_CMD_INITIALISE below (fs_command_blocking runs on the cothread runtime).
