@@ -62,18 +62,37 @@ extern timer_client_config_t timer_config;
  * the poll-callback-nulled copy main.c hands libc_init. The socket-aware epoll
  * below queries readiness through it. */
 extern libc_socket_config_t socket_config;
-/* Advances the linked lwIP stack (RX/TX). Defined in main.c, called from the
- * poll/sleep stubs so lwIP progresses while ERTS spins (notified() is dead once
- * erl_start runs). */
+/* Advances the linked lwIP stack (RX/TX). Defined in main.c, still pumped from
+ * the poll/sleep stubs as a backstop. The primary driver is now notified(),
+ * which fires again because init() returns to the Microkit event loop. */
 extern void beam_net_pump(void);
+
+/* Cothread idle plumbing (process.c). The poll/sleep stubs park on the shared
+ * idle semaphore instead of busy-yielding, so the PD idles at ~0% CPU.
+ * thread_io_wait() blocks until notified() pulses (any channel) or a waker
+ * calls thread_io_wake(). Callers re-check their predicate in a loop.
+ * thread_park_forever() blocks with no wakeup (dead reads). */
+extern void thread_io_wait(void);
+extern void thread_io_wake(void);
+extern void thread_park_forever(void);
+
+/* Timer multiplexer (main.c): arm the single sDDF timeout slot for the nearest
+ * pending absolute monotonic deadline. Timed waits use it so a wakeup pulse is
+ * guaranteed to arrive by their deadline. */
+extern void beam_timer_arm(uint64_t deadline_ns);
 
 #define SERIAL_RX_CH 1
 
 /* Discard sink / EOF source for the synthetic fds below (pipe write end,
- * timerfd, socketpair): writes are discarded, reads return EOF. */
+ * timerfd, socketpair): writes are discarded, reads return EOF. A write DOES
+ * pulse the idle waiters: ERTS wakes its pollset by writing a byte to its
+ * self-pipe, and the poller parked in epoll_pwait/ppoll must wake and return
+ * so ERTS re-evaluates its pollset/timeout (on Linux the kernel does this via
+ * the pipe becoming readable, here the pulse is the wakeup). */
 static ssize_t devnull_write(const void *data, size_t count, int fd) {
   (void)data;
   (void)fd;
+  thread_io_wake();
   return (ssize_t)count;
 }
 
@@ -98,9 +117,12 @@ static ssize_t empty_read(void *data, size_t count, int fd) {
   if (e != NULL && (e->flags & O_NONBLOCK)) {
     return -EAGAIN;
   }
-  for (;;) {
-    microkit_cothread_yield();
-  }
+  /* No data will ever arrive on this fd (ERTS's signal-dispatcher blocks here
+   * reading the signal pipe, we have no OS signals). Park forever consuming no
+   * CPU instead of yielding, so this cothread doesn't keep the PD from idling.
+   */
+  thread_park_forever();
+  return 0; /* unreachable */
 }
 
 /* Echo a keystroke back to the console. QEMU's -serial mon:stdio raw-mode host
@@ -237,11 +259,17 @@ static long bringup_zero(va_list ap) {
 }
 
 /* Cothread-aware futex. ERTS's low-level thread-event primitive (ethr_event)
- * uses futex directly and treats ENOSYS as fatal. Under cooperative
- * cothreads, FUTEX_WAIT yields (letting the waker cothread run) until the
- * word changes or a bounded number of rounds elapse (spurious return, ERTS
- * re-checks its event flag). FUTEX_WAKE is a no-op: waiters observe the word
- * when they next run. */
+ * uses futex directly and treats ENOSYS as fatal. FUTEX_WAIT parks the calling
+ * cothread on the shared idle semaphore (thread_io_wait) until the word
+ * changes. Because cothreads are cooperative (no preemption between the compare
+ * and the park), there is no lost-wakeup window. FUTEX_WAKE pulses the idle
+ * semaphore (thread_io_wake) so a parked waiter re-checks its word. Waiters may
+ * also be woken spuriously by notified() pulses, they simply re-compare and
+ * re-park, which is why the PD can idle at ~0% CPU here instead of spinning.
+ *
+ * A timed FUTEX_WAIT (timeout != NULL) keeps a bounded yield loop: the deadline
+ * must be honoured, and mapping arbitrary futex timeouts onto the sDDF timer is
+ * not worth it, timed waits are transient (active work), not the idle path. */
 #define FUTEX_WAIT_OP 0
 #define FUTEX_WAKE_OP 1
 #define FUTEX_WAIT_BITSET_OP 9
@@ -251,37 +279,33 @@ static long bringup_futex(va_list ap) {
   int *uaddr = va_arg(ap, int *);
   int op = va_arg(ap, int);
   int val = va_arg(ap, int);
+  const struct timespec *timeout = va_arg(ap, const struct timespec *);
   int cmd = op & 0x7f; /* strip FUTEX_PRIVATE_FLAG / FUTEX_CLOCK_REALTIME */
 
   if (cmd == FUTEX_WAKE_OP || cmd == FUTEX_WAKE_BITSET_OP) {
+    thread_io_wake();
     return 0;
   }
   /* FUTEX_WAIT / FUTEX_WAIT_BITSET */
   if (__atomic_load_n(uaddr, __ATOMIC_ACQUIRE) != val) {
     return -EAGAIN;
   }
-  /* DIAG wait-latency tracing (uncomment sparingly: the print itself floods
-   * the serial path and distorts the timing being measured):
-   * uint64_t f0 = sddf_timer_time_now(timer_config.driver_id); */
-  for (int i = 0; i < 4096; i++) {
-    microkit_cothread_yield();
-    if (__atomic_load_n(uaddr, __ATOMIC_ACQUIRE) != val) {
-      // uint64_t f1 = sddf_timer_time_now(timer_config.driver_id);
-      // if (f1 - f0 > 100000000ull) {
-      //   printf("DIAG|%lu|futex woke after %lums\n",
-      //          (unsigned long)(f1 / 1000000ull),
-      //          (unsigned long)((f1 - f0) / 1000000ull));
-      // }
-      return 0;
+  if (timeout != NULL) {
+    /* Timed wait: bounded yield, return spuriously so ERTS re-checks and
+     * re-arms. Not the idle path. */
+    for (int i = 0; i < 4096; i++) {
+      microkit_cothread_yield();
+      if (__atomic_load_n(uaddr, __ATOMIC_ACQUIRE) != val) {
+        return 0;
+      }
     }
+    return 0;
   }
-  // uint64_t f2 = sddf_timer_time_now(timer_config.driver_id);
-  // if (f2 - f0 > 100000000ull) {
-  //   printf("DIAG|%lu|futex spurious after %lums\n",
-  //          (unsigned long)(f2 / 1000000ull),
-  //          (unsigned long)((f2 - f0) / 1000000ull));
-  // }
-  return 0; /* spurious, the caller re-checks */
+  /* Untimed wait (the idle path): park until the word changes. */
+  while (__atomic_load_n(uaddr, __ATOMIC_ACQUIRE) == val) {
+    thread_io_wait();
+  }
+  return 0;
 }
 
 /* musl's _Exit() calls exit_group then loops on exit, neither is implemented
@@ -321,13 +345,13 @@ static long bringup_clock_getres(va_list ap) {
 }
 
 /* clock_nanosleep: a real timed sleep (musl's nanosleep/usleep/sleep all route
- * here via SYS_clock_nanosleep). The old stub returned immediately, making
- * those calls no-ops. We busy-poll the sDDF monotonic clock and yield to the
- * cothread scheduler until the deadline -- the SAME pattern process.c's
- * pthread_cond_timedwait uses. We deliberately do NOT block on a notification
- * (microkit_cothread_wait_on_channel): erl_start runs on the root cothread and
- * never returns, so notified()/recv_ntfn never fire and such a wait would hang
- * forever (the whole PD works by busy-polling shared memory). */
+ * here via SYS_clock_nanosleep). Arms the sDDF timer for the remaining interval
+ * and parks the cothread on the idle semaphore, re-checking the monotonic clock
+ * each wake. This blocks instead of busy-polling: notified(timer) pulses the
+ * idle waiters when the timeout fires, so the PD idles at ~0% CPU during a
+ * sleep. (This is now safe because init() returns to the Microkit event loop,
+ * so notified()/recv_ntfn actually fire, the reason the old stub had to
+ * busy-poll shared memory.) */
 static long bringup_clock_nanosleep(va_list ap) {
   long clockid = va_arg(ap, long);
   int flags = va_arg(ap, int);
@@ -343,7 +367,7 @@ static long bringup_clock_nanosleep(va_list ap) {
   uint64_t reqns =
       (uint64_t)req->tv_sec * 1000000000ull + (uint64_t)req->tv_nsec;
   /* An absolute CLOCK_REALTIME deadline lives on the epoch-offset timeline
-   * (see bringup_clock_gettime); the sDDF timer is monotonic-native, so shift
+   * (see bringup_clock_gettime). The sDDF timer is monotonic-native, so shift
    * such a deadline back before comparing or it is ~56 years away and this
    * sleep never returns. Relative sleeps and monotonic deadlines pass through
    * unchanged. */
@@ -359,10 +383,11 @@ static long bringup_clock_nanosleep(va_list ap) {
   //          (unsigned long)((target - now0) / 1000000ull));
   // }
   while (sddf_timer_time_now(ch) < target) {
-    /* Keep lwIP advancing during the sleep so TCP timers/RX don't stall while
-     * a scheduler cothread is parked here. */
-    beam_net_pump();
-    microkit_cothread_yield();
+    /* Arm the timer for the deadline and park until a pulse (the timer fire,
+     * or any other notification, then we re-check and re-arm). notified()
+     * pumps lwIP, so the network keeps advancing while we sleep. */
+    beam_timer_arm(target);
+    thread_io_wait();
   }
   if (rem != NULL && !(flags & TIMER_ABSTIME)) {
     rem->tv_sec = 0;
@@ -489,33 +514,10 @@ static long bringup_epoll_ctl(va_list ap) {
   return 0;
 }
 
-/* epoll_pwait: scan registered fds for readiness. fd 0 (stdin) is readable when
- * the serial RX queue has data, socket fds report readiness from tcp.c. This is
- * the scheduler's hot idle loop, so it also pumps lwIP (beam_net_pump), under
- * ERTS that is the only thing advancing the network. Return matching events
- * with the caller's registered data, yield when nothing is ready.
- *
- * When timeout > 0 and no events are ready, this stub sleeps for a fraction of
- * the requested timeout (capped at 10 ms per round) to give QEMU's main loop a
- * chance to poll slirp's hostfwd listen fds. Without this sleep, the vCPU
- * busy-spins nonstop, QEMU's main loop is starved, and host→guest TCP SYNs
- * (injected by slirp's hostfwd accept handler, which runs in QEMU's main loop)
- * never reach the virtio-net device. Guest→host traffic (DHCP, outgoing
- * connect) is unaffected because it originates in the vCPU thread and the
- * response is delivered synchronously via virtio MMIO. */
-static long bringup_epoll_pwait(va_list ap) {
-  int epfd = va_arg(ap, int);
-  struct epoll_event *events = va_arg(ap, struct epoll_event *);
-  int maxevents = va_arg(ap, int);
-  int timeout = va_arg(ap, int);
-  (void)epfd;
-
-  if (events == NULL || maxevents <= 0) {
-    return -EINVAL;
-  }
-
-  beam_net_pump();
-
+/* Scan the epoll table for ready fds: fd 0 (stdin) is readable when the serial
+ * RX queue has data, socket fds report readiness from tcp.c. Fills events with
+ * the caller's registered data verbatim (ERTS keys I/O sources off it). */
+static int epoll_scan(struct epoll_event *events, int maxevents) {
   int n = 0;
   for (int i = 0; i < EPOLL_MAX_FDS && n < maxevents; i++) {
     if (!epoll_table[i].active || !epoll_table[i].armed) {
@@ -544,10 +546,10 @@ static long bringup_epoll_pwait(va_list ap) {
     revents &= (epoll_table[i].ev.events | EPOLLERR | EPOLLHUP);
     if (revents) {
       // if (epoll_table[i].is_sock) {
-      //   printf("DIAG|%lu|epoll deliver sock=%d ev=%x to=%d\n",
+      //   printf("DIAG|%lu|epoll deliver sock=%d ev=%x\n",
       //          (unsigned long)(sddf_timer_time_now(timer_config.driver_id) /
       //                          1000000ull),
-      //          epoll_table[i].sock_handle, revents, timeout);
+      //          epoll_table[i].sock_handle, revents);
       // }
       events[n].events = revents;
       events[n].data = epoll_table[i].ev.data;
@@ -560,27 +562,43 @@ static long bringup_epoll_pwait(va_list ap) {
       }
     }
   }
+  return n;
+}
 
-  if (n == 0) {
-    /* No events ready: sleep a fraction of the requested timeout (or a
-     * minimum 100 ms if timeout <= 0) to give QEMU's main loop time to poll
-     * slirp's hostfwd listen fd. ERTS passes timeout=-1 when idle, on a
-     * real OS this blocks the thread and the CPU goes idle. Without this
-     * sleep the vCPU busy-spins nonstop, QEMU's main loop is starved, and
-     * host->guest TCP SYNs (injected by slirp's hostfwd accept handler,
-     * which runs in QEMU's main loop) never reach the virtio-net device.
-     * The sleep busy-polls the sDDF monotonic clock and pumps lwIP, so the
-     * network still progresses even while the scheduler "blocks". */
-    struct timespec ts;
-    long sleep_ms = timeout > 0 ? (timeout < 20 ? timeout : 20) : 20;
-    ts.tv_sec = 0;
-    ts.tv_nsec = sleep_ms * 1000000L;
-    unsigned ch = timer_config.driver_id;
-    uint64_t target = sddf_timer_time_now(ch) + (uint64_t)ts.tv_nsec;
-    while (sddf_timer_time_now(ch) < target) {
-      beam_net_pump();
-      microkit_cothread_yield();
+/* epoll_pwait: ERTS's kernel-poll idle wait. If nothing is ready, park on the
+ * idle semaphore (arming the timer mux for a finite timeout first) and rescan
+ * after ONE pulse, then return, possibly with 0 events before the timeout
+ * expires. Returning early-and-empty is deliberate, not sloppy: ERTS updates
+ * its pollset/timeout between calls and signals such changes by writing its
+ * wakeup pipe (devnull_write -> thread_io_wake). Looping here until the
+ * original deadline would miss e.g. a shorter timer set after we parked. ERTS
+ * treats a 0-return as a timeout and simply re-evaluates and re-calls.
+ *
+ * This used to be the scheduler's hot busy-loop (and needed a busy-sleep hack
+ * so the starved QEMU main loop could deliver slirp's hostfwd SYNs). With the
+ * PD genuinely blocking in seL4_Recv, QEMU's main loop runs freely. */
+static long bringup_epoll_pwait(va_list ap) {
+  int epfd = va_arg(ap, int);
+  struct epoll_event *events = va_arg(ap, struct epoll_event *);
+  int maxevents = va_arg(ap, int);
+  int timeout = va_arg(ap, int);
+  (void)epfd;
+
+  if (events == NULL || maxevents <= 0) {
+    return -EINVAL;
+  }
+
+  beam_net_pump();
+
+  int n = epoll_scan(events, maxevents);
+  if (n == 0 && timeout != 0) {
+    if (timeout > 0) {
+      beam_timer_arm(sddf_timer_time_now(timer_config.driver_id) +
+                     (uint64_t)timeout * 1000000ull);
     }
+    thread_io_wait();
+    beam_net_pump();
+    n = epoll_scan(events, maxevents);
   }
 
   /* Always yield so the dirty-IO scheduler cothread (which performs the
@@ -589,21 +607,9 @@ static long bringup_epoll_pwait(va_list ap) {
   return n;
 }
 
-/* ppoll: ERTS's scheduler polls for I/O when idle. Returning immediately would
- * busy-spin the scheduler cothread and starve the helper cothreads (aux, poll,
- * dirty-I/O), stalling boot. Yield first so the cothread scheduler runs the
- * others, then report no ready events. Also pumps lwIP (a backstop for the
- * epoll_pwait pump: ERTS also polls via ppoll). */
-static long bringup_poll_yield(va_list ap) {
-  struct pollfd *fds = va_arg(ap, struct pollfd *);
-  nfds_t nfds = va_arg(ap, nfds_t);
-
-  beam_net_pump();
-
-  /* Report real readiness: socket fds from tcp.c's socket_config, stdin from
-   * the serial RX queue. Returning 0 for a ready socket would leave ERTS's
-   * fallback pollset blind (and 0 on an infinite timeout is a spec violation
-   * ERTS responds to by re-calling in a hot loop). */
+/* Scan a pollfd array for real readiness: socket fds from tcp.c's
+ * socket_config, stdin from the serial RX queue. */
+static int poll_scan(struct pollfd *fds, nfds_t nfds) {
   int ready = 0;
   for (nfds_t i = 0; i < nfds && fds != NULL; i++) {
     fds[i].revents = 0;
@@ -635,6 +641,35 @@ static long bringup_poll_yield(va_list ap) {
       ready++;
     }
   }
+  return ready;
+}
+
+/* ppoll: ERTS's fallback pollset thread ppolls its wakeup pipe forever, and
+ * schedulers use it as a poll backstop. If nothing is ready, park until ONE
+ * pulse (arming the timer mux for a finite timeout), rescan and return,
+ * possibly 0 before the deadline, for the same reason as epoll_pwait above:
+ * a wakeup-pipe write (devnull_write pulses) must make this return so ERTS
+ * re-evaluates its pollset. The old stub returned 0 immediately after a
+ * yield, which kept the fallback poll thread hot-looping forever. */
+static long bringup_poll_yield(va_list ap) {
+  struct pollfd *fds = va_arg(ap, struct pollfd *);
+  nfds_t nfds = va_arg(ap, nfds_t);
+  const struct timespec *tmo = va_arg(ap, const struct timespec *);
+
+  beam_net_pump();
+
+  int ready = poll_scan(fds, nfds);
+  bool zero_timeout = tmo != NULL && tmo->tv_sec == 0 && tmo->tv_nsec == 0;
+  if (ready == 0 && !zero_timeout) {
+    if (tmo != NULL) {
+      beam_timer_arm(sddf_timer_time_now(timer_config.driver_id) +
+                     (uint64_t)tmo->tv_sec * 1000000000ull +
+                     (uint64_t)tmo->tv_nsec);
+    }
+    thread_io_wait();
+    beam_net_pump();
+    ready = poll_scan(fds, nfds);
+  }
 
   // if (ready) {
   //   printf("DIAG|%lu|ppoll ready=%d fd0=%d rev0=%x\n",
@@ -648,7 +683,9 @@ static long bringup_poll_yield(va_list ap) {
 
 /* pselect6: select()/pselect6 syscall, parse fd_sets and report which fds
  * are ready. ERTS doesn't use this for stdin (it uses epoll), but other tools
- * (e.g. the shell's select() timeout sleeps) may call it. */
+ * (e.g. the shell's select() timeout sleeps) may call it. Only stdin (fd 0)
+ * readability is supported. If nothing is ready, park until one pulse (arming
+ * the timer mux for a finite timeout) and rescan, like epoll_pwait/ppoll. */
 static long bringup_pselect6(va_list ap) {
   int nfds = va_arg(ap, int);
   fd_set *readfds = va_arg(ap, fd_set *);
@@ -657,39 +694,46 @@ static long bringup_pselect6(va_list ap) {
   const struct timespec *timeout = va_arg(ap, const struct timespec *);
   const sigset_t *sigmask = va_arg(ap, const sigset_t *);
 
-  (void)timeout;
   (void)sigmask;
 
   if (nfds < 0 || nfds > FD_SETSIZE) {
     return -EINVAL;
   }
 
-  int ready = 0;
+  bool want_stdin = readfds != NULL && FD_ISSET(0, readfds);
+  bool zero_timeout =
+      timeout != NULL && timeout->tv_sec == 0 && timeout->tv_nsec == 0;
 
-  /* Check stdin (fd 0) if it's in the readfds set */
-  if (readfds != NULL && FD_ISSET(0, readfds)) {
-    if (serial_queue_length_consumer(&serial_rx_queue_handle) > 0) {
-      /* Keep fd 0 set - data is ready */
-      ready++;
-    } else {
-      /* Clear fd 0 - no data ready */
-      FD_CLR(0, readfds);
+  int ready =
+      (want_stdin && serial_queue_length_consumer(&serial_rx_queue_handle) > 0)
+          ? 1
+          : 0;
+  if (ready == 0 && !zero_timeout) {
+    beam_net_pump();
+    if (timeout != NULL) {
+      beam_timer_arm(sddf_timer_time_now(timer_config.driver_id) +
+                     (uint64_t)timeout->tv_sec * 1000000000ull +
+                     (uint64_t)timeout->tv_nsec);
+    }
+    thread_io_wait();
+    if (want_stdin &&
+        serial_queue_length_consumer(&serial_rx_queue_handle) > 0) {
+      ready = 1;
     }
   }
 
+  if (readfds != NULL) {
+    FD_ZERO(readfds);
+    if (ready) {
+      FD_SET(0, readfds);
+    }
+  }
   /* Clear write and except sets (not implemented) */
   if (writefds != NULL) {
     FD_ZERO(writefds);
   }
   if (exceptfds != NULL) {
     FD_ZERO(exceptfds);
-  }
-
-  /* If nothing ready, pump lwIP and yield to other cothreads before returning
-   */
-  if (ready == 0) {
-    beam_net_pump();
-    microkit_cothread_yield();
   }
 
   return ready;
@@ -730,7 +774,7 @@ static long bringup_uname(va_list ap) {
   return 0;
 }
 
-/* ---- Real entropy (issue 0.3.0-rng): getrandom / clock_gettime / openat.
+/* ---- Real entropy: getrandom / clock_gettime / openat.
  *
  * libc_init (posix.c) and libc_init_file (file.c) claim these three slots
  * before bringup_register_syscalls runs, and libc_define_syscall asserts the
@@ -746,7 +790,7 @@ static muslcsys_syscall_t old_openat;
 
 /* RNG_REALTIME_BASE_EPOCH (rng.h): a sane 2026 base epoch so CLOCK_REALTIME is
  * roughly correct (future TLS cert validity, log timestamps) instead of
- * starting near 0. The real fix (RTC/NTP) is a separate future issue; here we
+ * starting near 0. The real fix (RTC/NTP) is a separate future issue. Here we
  * only need it non-zero and per-boot-varying. */
 
 /* getrandom(2): fill the caller's buffer from the DRBG. Replaces LionsOS's
@@ -862,8 +906,8 @@ void bringup_register_syscalls(void) {
   libc_define_syscall(SYS_epoll_pwait, bringup_epoll_pwait);
   libc_define_syscall(SYS_pselect6, bringup_pselect6);
   /* ppoll stays with bringup (not sock.c): main.c nulls sock.c's poll callbacks
-   * so sock.c does not claim __NR_ppoll, keeping the cothread-yielding stub
-   * that ERTS boot needs. */
+   * so sock.c does not claim __NR_ppoll, keeping the cothread-blocking stub
+   * that ERTS boot needs (sock.c's sys_ppoll neither yields nor parks). */
   libc_define_syscall(SYS_ppoll, bringup_poll_yield);
   libc_define_syscall(SYS_pipe2, bringup_pipe2);
   libc_define_syscall(SYS_timerfd_create, bringup_timerfd_create);

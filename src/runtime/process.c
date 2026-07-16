@@ -10,7 +10,7 @@
  *   - pthread_self   -> the current cothread handle
  *   - errno + pthread_key TLS -> indexed by the current cothread handle
  *     (ERTS uses pthread_key, never native __thread, so no TPIDR juggling)
- *   - locks/condvars -> yield to the cothread scheduler; ERTS wraps every
+ *   - locks/condvars -> yield to the cothread scheduler. ERTS wraps every
  *     cond_wait in a condition loop, so spurious wakeups are fine
  *
  * Cooperative scheduling: a cothread runs until it yields/blocks. ERTS's
@@ -29,6 +29,11 @@
 
 #include "rng.h" /* RNG_REALTIME_BASE_EPOCH, for the condvar deadline clock */
 
+/* Timer multiplexer (main.c): keeps the single sDDF timeout slot armed for the
+ * nearest pending deadline (absolute, monotonic ns). Timed waits arm it so a
+ * thread_io_wait() pulse is guaranteed to arrive by their deadline. */
+extern void beam_timer_arm(uint64_t deadline_ns);
+
 /* -------------------------------------------------------------------------
  * Cothread runtime
  * ------------------------------------------------------------------------- */
@@ -36,6 +41,39 @@
 
 static co_control_t co_controller;
 static int co_runtime_up;
+
+/* Idle/wakeup plumbing for the "real blocking idle" model. ERTS now runs on a
+ * spawned cothread and init() returns to the Microkit handler loop, so
+ * notified() fires and can wake cothreads that parked instead of busy-yielding.
+ *
+ *  - io_wakeup_sem: the single semaphore every idle wait blocks on
+ *    (epoll_pwait / ppoll / pselect6 / clock_nanosleep / futex / condvars).
+ *    notified() pulses it on ANY channel notification (thread_io_wake), so a
+ *    parked cothread re-checks its own readiness predicate and either proceeds
+ *    or re-parks. A cothread blocked here is NOT "ready", so when every
+ * cothread is parked the scheduler falls back to the root thread and
+ * init()/notified() returns to Microkit's seL4_Recv -> the vCPU actually blocks
+ * (~0% CPU).
+ *
+ *    A pulse must wake ALL current waiters (a serial-RX pulse must reach the
+ *    epoll waiter even if a futex waiter parked first), but
+ *    microkit_cothread_semaphore_signal wakes exactly one (the head). So
+ *    thread_io_wake bumps a generation counter and wakes the head, and each
+ *    woken waiter whose generation moved cascades the wakeup to the next
+ *    waiter before returning. Waiters that re-park during the broadcast join
+ *    at the TAIL with a fresh generation snapshot, so the cascade terminates.
+ *  - boot_idle_sem: the root thread parks here in thread_run_cothreads() to
+ *    hand control to the freshly spawned ERTS cothread. It is never signalled.
+ *    When every cothread is parked the scheduler falls back to the root
+ *    (internal_go_next's empty-queue fallback), which returns out of this wait
+ *    and lets init() return.
+ *  - park_sem: never signalled. A cothread that must block forever (ERTS's
+ *    signal-dispatcher reading a pipe that never delivers, since we have no OS
+ *    signals) parks here consuming no CPU instead of yielding forever. */
+static microkit_cothread_sem_t io_wakeup_sem;
+static microkit_cothread_sem_t boot_idle_sem;
+static microkit_cothread_sem_t park_sem;
+static unsigned io_wake_generation;
 
 /* Per-cothread pthread_key storage, indexed by cothread handle. errno is
  * left to musl (its single main-thread errno is safe here: cothreads only
@@ -68,13 +106,81 @@ void thread_init(void) {
     stacks[i] = (uintptr_t)malloc(CO_STACK_SIZE);
   }
   microkit_cothread_init(&co_controller, CO_STACK_SIZE, stacks);
+  microkit_cothread_semaphore_init(&io_wakeup_sem);
+  microkit_cothread_semaphore_init(&boot_idle_sem);
+  microkit_cothread_semaphore_init(&park_sem);
   co_runtime_up = 1;
 }
 
-/* Drive the cothread scheduler from the PD's notification handler. */
+/* Drive the cothread scheduler from the PD's notification handler: wake any
+ * cothread blocked in wait_on_channel(ch) (e.g. console_read on the serial-RX
+ * channel). Must be called from the root thread (recv_ntfn asserts this). */
 void thread_notified(microkit_channel ch) {
   if (co_runtime_up) {
     microkit_cothread_recv_ntfn(ch);
+  }
+}
+
+/* Hand control from the root thread to the spawned cothreads (ERTS + helpers)
+ * and return only once they are all parked (idle). Called from init() after
+ * spawning erl_start: the root parks on a never-signalled semaphore, so the
+ * scheduler runs the ready cothreads until every one of them blocks, at which
+ * point it falls back to the root and this returns -> init() returns to the
+ * Microkit event loop. */
+void thread_run_cothreads(void) {
+  if (co_runtime_up) {
+    microkit_cothread_semaphore_wait(&boot_idle_sem);
+  }
+}
+
+/* Park the current cothread on the shared idle semaphore until the next
+ * thread_io_wake() pulse (from notified() on any channel, or from a cothread
+ * that changed a waited-on condition). The caller MUST re-check its own
+ * predicate in a loop: pulses are broadcast, not targeted.
+ *
+ * The root thread must never park here (it must stay free to return to the
+ * Microkit event loop, and a blocked root re-queuing itself on the semaphore
+ * would corrupt its waiter list via the empty-queue root fallback), so from
+ * the root this degrades to a plain yield. */
+void thread_io_wait(void) {
+  if (!co_runtime_up || microkit_cothread_my_handle() == 0) {
+    co_yield_once();
+    return;
+  }
+  unsigned gen = io_wake_generation;
+  do {
+    microkit_cothread_semaphore_wait(&io_wakeup_sem);
+  } while (gen == io_wake_generation); /* stale latched pulse: re-park */
+  /* Broadcast cascade: wake the next parked waiter so every waiter present at
+   * the pulse re-checks. Waiters that re-parked meanwhile snapshot the new
+   * generation and simply re-park, ending the cascade. */
+  if (!microkit_cothread_semaphore_is_queue_empty(&io_wakeup_sem)) {
+    microkit_cothread_semaphore_signal(&io_wakeup_sem);
+  }
+}
+
+/* Wake every cothread parked in thread_io_wait(). Called from notified() (root)
+ * on each notification and from wakers (futex FUTEX_WAKE, cond_signal, the
+ * poll-wakeup pipe write). If nobody is waiting the pulse is latched by the
+ * semaphore. The next waiter consumes it, sees its generation unchanged and
+ * re-parks. */
+void thread_io_wake(void) {
+  if (co_runtime_up) {
+    io_wake_generation++;
+    microkit_cothread_semaphore_signal(&io_wakeup_sem);
+  }
+}
+
+/* Park the current cothread forever (never woken). For blocking reads on fds
+ * that will never deliver (ERTS's signal-dispatcher thread on the signal pipe:
+ * there are no OS signals here). Consumes no CPU, unlike a yield loop. */
+void thread_park_forever(void) {
+  for (;;) {
+    if (co_runtime_up) {
+      microkit_cothread_semaphore_wait(&park_sem);
+    } else {
+      seL4_Yield();
+    }
   }
 }
 
@@ -88,7 +194,7 @@ void thread_notified(microkit_channel ch) {
 #define FSUB(p, v) __atomic_fetch_sub((p), (v), __ATOMIC_ACQ_REL)
 
 /* -------------------------------------------------------------------------
- * pthread_mutex (cooperative spin-yield; recursive supported)
+ * pthread_mutex (cooperative spin-yield, recursive supported)
  * ------------------------------------------------------------------------- */
 int pthread_mutex_init(pthread_mutex_t *m, const pthread_mutexattr_t *attr) {
   for (int i = 0; i < 10; i++) {
@@ -162,7 +268,7 @@ int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *type) {
 }
 
 /* -------------------------------------------------------------------------
- * pthread_cond: __i[0] is a signal counter; cond_wait yields for spurious
+ * pthread_cond: __i[0] is a signal counter. cond_wait yields for spurious
  * wakeups (ERTS re-checks its predicate), letting other cothreads run.
  * ------------------------------------------------------------------------- */
 int pthread_cond_init(pthread_cond_t *c, const pthread_condattr_t *attr) {
@@ -178,24 +284,29 @@ int pthread_cond_destroy(pthread_cond_t *c) {
   return 0;
 }
 
+/* Signal/broadcast bump the counter AND pulse the idle waiters: cond waiters
+ * park in thread_io_wait() (instead of the old busy-yield loop), so without the
+ * pulse a signal from another cothread would never wake them. */
 int pthread_cond_signal(pthread_cond_t *c) {
   FADD(&c->__u.__i[0], 1);
+  thread_io_wake();
   return 0;
 }
 
 int pthread_cond_broadcast(pthread_cond_t *c) {
   FADD(&c->__u.__i[0], 1);
+  thread_io_wake();
   return 0;
 }
 
 int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
   int snapshot = LOAD(&c->__u.__i[0]);
   pthread_mutex_unlock(m);
-  /* Yield to let the signaller (another cothread) run. Bounded so a wait for
-   * an event that only arrives via a Microkit notification still returns
-   * (spurious) and ERTS re-polls. */
+  /* Park until a pulse (cond_signal pulses, so does any notification). Bounded
+   * so a wait whose signal path we somehow miss still returns spurious and
+   * ERTS re-checks its predicate (it wraps every cond_wait in a loop). */
   for (int i = 0; i < 64 && LOAD(&c->__u.__i[0]) == snapshot; i++) {
-    co_yield_once();
+    thread_io_wait();
   }
   pthread_mutex_lock(m);
   return 0;
@@ -219,9 +330,22 @@ int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
                       ? CLOCK_REALTIME
                       : CLOCK_MONOTONIC;
 
+  /* The sDDF timer lives on the monotonic timeline. Rebase a realtime deadline
+   * (epoch-offset, see rng.h) before arming, exactly like clock_nanosleep. */
+  uint64_t deadline_ns =
+      (uint64_t)abstime->tv_sec * 1000000000ull + (uint64_t)abstime->tv_nsec;
+  if (clk == CLOCK_REALTIME) {
+    uint64_t epoch_ns =
+        (RNG_REALTIME_BASE_EPOCH + rng_realtime_offset_sec) * 1000000000ull;
+    deadline_ns = deadline_ns > epoch_ns ? deadline_ns - epoch_ns : 0;
+  }
+
   struct timespec now;
   for (;;) {
-    co_yield_once();
+    /* Arm the timer so a wakeup pulse arrives by the deadline, then park
+     * until the next pulse (instead of the old busy-yield loop). */
+    beam_timer_arm(deadline_ns);
+    thread_io_wait();
     if (LOAD(&c->__u.__i[0]) != snapshot) {
       break;
     }
@@ -372,7 +496,7 @@ int pthread_once(pthread_once_t *control, void (*init_routine)(void)) {
 
 /* -------------------------------------------------------------------------
  * pthread identity, create, join (over cothreads).
- * pthread_t is `struct __pthread *`; we encode the cothread handle as
+ * pthread_t is `struct __pthread *`. We encode the cothread handle as
  * (handle + 1) so the main cothread (handle 0) is a non-NULL pthread_t.
  * ------------------------------------------------------------------------- */
 #define HANDLE_TO_PTHREAD(h) ((pthread_t)(uintptr_t)((h) + 1))
@@ -433,7 +557,7 @@ int pthread_detach(pthread_t thread) {
 
 void pthread_exit(void *retval) {
   (void)retval;
-  /* Returning from the trampoline ends the cothread; if a thread calls
+  /* Returning from the trampoline ends the cothread. If a thread calls
    * pthread_exit directly we cannot unwind its stack, so just park it by
    * yielding forever (the scheduler runs the others). */
   for (;;) {
@@ -442,7 +566,7 @@ void pthread_exit(void *retval) {
 }
 
 /* -------------------------------------------------------------------------
- * pthread_attr (stack size honoured loosely; cothread stacks are fixed)
+ * pthread_attr (stack size honoured loosely, cothread stacks are fixed)
  * ------------------------------------------------------------------------- */
 int pthread_attr_init(pthread_attr_t *attr) {
   for (int i = 0; i < 14; i++) {

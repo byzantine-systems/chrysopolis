@@ -13,13 +13,13 @@
  * new PD and no QEMU device, and works on real hardware and any hypervisor
  * (jitter is the always-present source). virtio-rng and a future ARMv8.5
  * RNDR/RNDRRS source are optional *reseed* providers that slot into the same
- * rng_provider_t interface with no structural change (see issues/0.3.0-*.md).
+ * rng_provider_t interface with no structural change.
  *
  * The hot path (rng_fill) always reads the local DRBG, so it never blocks and
- * never runs dry; providers feed reseed only, and a provider that returns no
- * bytes simply skips a reseed round. This honours the erl_start()-never-returns
- * constraint (the same one that shaped fs_blocking_wait / beam_net_pump):
- * beam_server never blocks on another PD to produce randomness.
+ * never runs dry. Providers feed reseed only, and a provider that returns no
+ * bytes simply skips a reseed round. beam_server never blocks on another PD to
+ * produce randomness (a property worth keeping even now that init() returns to
+ * the event loop and blocking waits exist).
  */
 #pragma once
 
@@ -60,7 +60,7 @@ void rng_reseed_from(const rng_provider_t *provider);
  * Small and bounded (see rng.c): enough to make erlang:make_ref()/rand differ
  * across boots without making the wall clock randomly wrong by up to a year.
  * bringup.c's clock_gettime shim adds this (over the base epoch below) to
- * CLOCK_REALTIME only; CLOCK_MONOTONIC is untouched. Zero until rng_init runs.
+ * CLOCK_REALTIME only. CLOCK_MONOTONIC is untouched. Zero until rng_init runs.
  */
 extern uint32_t rng_realtime_offset_sec;
 

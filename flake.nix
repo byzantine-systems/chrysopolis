@@ -30,7 +30,7 @@
     # the fs protocol definitions from the input's source tree.
     #
     # git+https URLs instead of the github: fetcher because this network
-    # blocks api.github.com; plain git over https to github.com works.
+    # blocks api.github.com. Plain git over https to github.com works.
     lionsos = {
       url = "git+https://github.com/au-ts/lionsos";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -66,7 +66,7 @@
     # submodules), so the reference-stack libc + drivers have no sDDF to build
     # against. We pin sDDF to the exact gitlink the locked lionsos rev
     # references and let lionsos-src populate dep/sddf from inputs.sddf. The
-    # sddf flake exposes only devShells; we use its source tree and mirror its
+    # sddf flake exposes only devShells. We use its source tree and mirror its
     # llvm/clang toolchain choice (llvmPackages_18) for the driver builds.
     sddf = {
       url = "git+https://github.com/au-ts/sddf?ref=refs/heads/main&rev=d1f5252ea64edab6087552eb4220e23c019c2fbe";
@@ -76,7 +76,7 @@
     };
 
     # libmicrokitco: the LionsOS cooperative cothread library. Another empty
-    # lionsos submodule; pinned to the gitlink the locked lionsos references.
+    # lionsos submodule, pinned to the gitlink the locked lionsos references.
     # Needed by the fat fs_server and by the ERTS threading layer.
     # - ERTS helper threads run as cothreads).
     # - lionsos-src populates dep/libmicrokitco from this input.
@@ -107,7 +107,7 @@
   };
 
   # The build pipeline lives in modules/, one flake-parts module per
-  # concern; modules share derivations through config.packages.* and
+  # concern. Modules share derivations through config.packages.* and
   # non-derivation context (board names, toolchains, the zig2nix env)
   # through the `chryso` module argument defined in toolchain.nix:
   #
