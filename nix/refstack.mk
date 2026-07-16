@@ -16,7 +16,7 @@
 #
 # Produces, in $(BUILD_DIR): libc/lib/libc.a, libc/include/, and the board DTB.
 # The sDDF driver/virtualiser PDs and libmicrokitco are built by the root
-# build.zig now; their .mk includes below remain only so their rules/vars
+# build.zig now. Their .mk includes below remain only so their rules/vars
 # parse, their targets are no longer requested by `all`.
 
 MICROKIT_CONFIG ?= debug

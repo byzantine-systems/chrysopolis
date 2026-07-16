@@ -76,9 +76,12 @@ static bool net_enabled;
 static bool lwip_up;
 static bool dhcp_ready;
 
-/* Period of the lwIP service timer (RX poll + lwIP timeouts), matching the
- * LionsOS posix_test client. */
-#define NET_TIMEOUT (1 * NS_IN_MS)
+/* Period of the lwIP service timer (lwIP timeout processing, RX is driven by
+ * the net-RX channel notification, not this tick). 100 ms is ample for lwIP's
+ * cyclic timers (DHCP fine timer 500 ms, TCP timers 250 ms) and keeps the idle
+ * wakeup rate at ~10/s so the PD sits near 0% CPU. The LionsOS posix_test
+ * client uses 1 ms, but it busy-polls RX off this tick. We do not. */
+#define NET_TIMEOUT (100 * NS_IN_MS)
 
 /* beam_heap region base, patched by the Microkit tool at synthesis time
  * (setvar_vaddr). Handed to libc_init() as the malloc arena, which
@@ -94,12 +97,36 @@ extern void bringup_register_syscalls(void);
 extern void rng_init(void);
 extern void thread_init(void);
 extern void thread_notified(microkit_channel ch);
+extern void thread_run_cothreads(void);
+extern void thread_io_wake(void);
+extern void thread_park_forever(void);
+
+/* ---- Timer multiplexer ----
+ *
+ * The PD has ONE sDDF timeout slot (a new sddf_timer_set_timeout replaces the
+ * pending one), but several consumers now want deadlines: the lwIP service
+ * tick, clock_nanosleep, timed epoll_pwait/ppoll/pselect6 and
+ * pthread_cond_timedwait. beam_timer_arm keeps the slot armed for the NEAREST
+ * pending absolute deadline (monotonic ns). When the timeout fires, notified()
+ * clears the slot and pulses the idle waiters (thread_io_wake). Each timed
+ * waiter re-checks its own deadline and re-arms if it still has time left, so
+ * a longer deadline armed "over" a shorter one is never lost. */
+static uint64_t beam_timer_deadline; /* armed absolute deadline, 0 = none */
+
+void beam_timer_arm(uint64_t deadline_ns) {
+  uint64_t now = sddf_timer_time_now(timer_config.driver_id);
+  if (deadline_ns <= now) {
+    deadline_ns = now + 1; /* already due: fire immediately */
+  }
+  if (beam_timer_deadline == 0 || deadline_ns < beam_timer_deadline) {
+    beam_timer_deadline = deadline_ns;
+    sddf_timer_set_timeout(timer_config.driver_id, deadline_ns - now);
+  }
+}
 
 /* The libc fs path spins here until fatfs records the completion of an fs
- * command. erl_start never returns to the Microkit event loop, so notified()
- * never fires and we cannot block on the fs channel (the reference clients park
- * the cothread and let notified() drain), instead we drain the completion queue
- * directly (fatfs, a higher-priority PD, fills it via seL4 preemption).
+ * command. We drain the completion queue directly (fatfs, a higher-priority PD,
+ * fills it via seL4 preemption) rather than parking on the fs channel.
  *
  * Crucially this does NOT yield to other cothreads: yielding lets an ERTS
  * helper cothread issue a reentrant fs read mid-command, and the two
@@ -132,18 +159,20 @@ static void net_init(void) {
                  netif_status_callback, NULL, NULL, NULL);
   lwip_up = true;
   sddf_lwip_maybe_notify();
-  sddf_timer_set_timeout(timer_config.driver_id, NET_TIMEOUT);
+  beam_timer_arm(sddf_timer_time_now(timer_config.driver_id) + NET_TIMEOUT);
 }
 
 /* Deliver Microkit's pending deferred notification immediately, mirroring the
  * libmicrokit handler epilogue (seL4_Send on the stashed signal cap/msg that
  * microkit_deferred_notify set). sddf_lwip_maybe_notify() defers the RX/TX
  * virtualiser signal into Microkit's single-slot pending-signal, which the
- * epilogue only flushes when the PD returns from notified()/init(). Under ERTS
- * erl_start() never returns, so without this flush the deferred signal is
- * stashed but never delivered: net_virt_tx is never woken and the TX queue
- * (DHCP DISCOVER, then TCP segments) never drains. Called from beam_net_pump
- * after sddf_lwip_maybe_notify(). */
+ * epilogue only flushes when the PD returns from notified()/init(). When
+ * beam_net_pump runs on a cothread (a syscall stub) the root may sit blocked
+ * in seL4_Recv for a while before the next handler return, so without this
+ * flush the deferred signal would be stashed but not delivered: net_virt_tx
+ * would not be woken and the TX queue (DHCP DISCOVER, then TCP segments)
+ * would not drain promptly. Called from beam_net_pump after
+ * sddf_lwip_maybe_notify(). */
 static void beam_flush_deferred_notify(void) {
   if (microkit_have_signal) {
     microkit_have_signal = seL4_False;
@@ -151,13 +180,14 @@ static void beam_flush_deferred_notify(void) {
   }
 }
 
-/* Pump the linked lwIP stack. Under ERTS, erl_start() never returns to the
- * Microkit event loop, so notified() is dead, instead the poll/sleep syscall
- * stubs ERTS spins on (epoll_pwait, ppoll, pselect6, clock_nanosleep) call this
- * to advance lwIP's RX and flush pending TX. process_timeout is decimated: it
- * costs a timer PPC per call (sys_now) and epoll_pwait is the scheduler's hot
- * idle loop, while TCP/DHCP timers need only coarse (~100 ms) granularity.
- * No-op until net_init has run (lwip_up). */
+/* Pump the linked lwIP stack. notified() is the primary driver now that
+ * init() returns to the Microkit event loop. The poll syscall stubs
+ * (epoll_pwait, ppoll, pselect6) still call this as a latency backstop so RX
+ * enqueued while cothreads are actively running (root not yet back in the
+ * handler loop) is processed before a poll verdict. process_timeout is
+ * decimated: it costs a timer PPC per call (sys_now) and the service-timer
+ * tick in notified() already drives it at the coarse (~100 ms) granularity
+ * TCP/DHCP timers need. No-op until net_init has run (lwip_up). */
 void beam_net_pump(void) {
   static unsigned pump_count;
   if (!lwip_up) {
@@ -224,6 +254,48 @@ static void socket_smoke(void) {
   close(c);
 
   printf("SOCKET_SMOKE|PASS\n");
+}
+
+/* Cothread entry for ERTS. Spawned by beam_run() so init() can return to the
+ * Microkit event loop. erl_start() runs the emulator core loop and normally
+ * never returns. If it ever does (fatal shutdown), park the cothread rather
+ * than fall off the end. */
+static void beam_erl_entry(void) {
+  /* -MIscs 256: cap the ERTS literal super carrier at 256 MiB so it fits
+   * inside the 512 MiB beam_heap region. ERTS reserves a 1024 MiB contiguous
+   * literal carrier by default (for 64-bit literal-term addressing), which the
+   * bump allocator over beam_heap cannot satisfy. 256 MiB is ample for boot +
+   * OTP + the Gleam payload's literals. NOTE: the emulator parses allocator
+   * flags in their `-M...` form. erlexec normally translates the user-facing
+   * `+M...`. We bypass erlexec (calling erl_start directly), so we pass the
+   * `-M` form.
+   * Emulator flags come first, everything after `--` is passed to `init`
+   * (erl_prim_loader reads -root/-boot from there to find the boot script).
+   * Without the `--`, the emulator treats -root as an unknown flag and prints
+   * usage.
+   * -Bd: disable the Ctrl+C break handler (its thread otherwise select()s on
+   * the console forever, which we cannot service). After `--`, the init args
+   * erlexec normally supplies: -root, -bindir (erl_prim_loader requires the
+   * command-line -bindir, distinct from the BINDIR env var), -boot (the boot
+   * script), embedded mode. */
+  static char *argv[] = {
+      "beam",
+      "-MIscs",
+      "256",
+      "-Bd",
+      "--",
+      "-root",
+      "/",
+      "-bindir",
+      "/bin",
+      "-boot",
+      "/releases/28/start",
+      "-mode",
+      "embedded",
+      NULL,
+  };
+  erl_start(13, argv);
+  thread_park_forever();
 }
 
 static void beam_run(void) {
@@ -307,41 +379,17 @@ static void beam_run(void) {
     setenv("EMU", "beam", 1);
     setenv("PROGNAME", "beam", 1);
 
-    /* -MIscs 256: cap the ERTS literal super carrier at 256 MiB so it fits
-     * inside the 512 MiB beam_heap region. ERTS reserves a 1024 MiB
-     * contiguous literal carrier by default (for 64-bit literal-term
-     * addressing), which the bump allocator over beam_heap cannot satisfy.
-     * 256 MiB is ample for boot + OTP + the Gleam payload's literals.
-     * NOTE: the emulator parses allocator flags in their `-M...` form;
-     * erlexec normally translates the user-facing `+M...`. We bypass erlexec
-     * (calling erl_start directly), so we pass the `-M` form. */
-    /* Emulator flags come first, everything after `--` is passed to `init`
-     * (erl_prim_loader reads -root/-boot from there to find the boot script).
-     * Without the `--`, the emulator treats -root as an unknown flag and
-     * prints usage. */
-    /* -Bd: disable the Ctrl+C break handler (its thread otherwise select()s
-     * on the console forever, which we cannot service).
-     * After `--`, the init args erlexec normally supplies: -root, -bindir
-     * (erl_prim_loader requires the command-line -bindir, distinct from the
-     * BINDIR env var), -boot (the boot script), embedded mode. */
-    static char *argv[] = {
-        "beam",
-        "-MIscs",
-        "256",
-        "-Bd",
-        "--",
-        "-root",
-        "/",
-        "-bindir",
-        "/bin",
-        "-boot",
-        "/releases/28/start",
-        "-mode",
-        "embedded",
-        NULL,
-    };
     printf("Handing off to ERTS core loop...\n");
-    erl_start(13, argv);
+    /* Spawn ERTS onto a cothread instead of calling erl_start inline on the
+     * root thread. The root thread must stay free to return to Microkit's
+     * handler loop so notified() fires and drives the cothread scheduler
+     * (recv_ntfn / thread_io_wake). Running erl_start inline monopolised the
+     * root forever, which is why every idle/wait path had to busy-poll.
+     * thread_run_cothreads() runs ERTS until it first parks (all cothreads
+     * blocked), then returns so init() returns and the vCPU blocks in
+     * seL4_Recv. Boot then continues from notified(). */
+    microkit_cothread_spawn(beam_erl_entry, NULL);
+    thread_run_cothreads();
   } else {
     printf("liberts.a not linked: bring-up mode (console + clock + heap).\n");
     /* Run the socket smoke test on a cothread. init() then returns to the
@@ -367,25 +415,45 @@ void init(void) {
                     serial_config.tx.data.size, serial_config.tx.data.vaddr);
 
   beam_run();
+
+  /* ERTS runs on a cothread, so init() returns and Microkit's handler loop
+   * takes over. From now on the PD blocks in seL4_Recv when idle and
+   * notified() drives the cothread wakeups. */
+  printf("Chrysopolis: init() returned; Microkit event loop live.\n");
 }
 
 void notified(microkit_channel ch) {
+  /* The armed timeout fired: clear the mux slot so the next beam_timer_arm
+   * re-arms from scratch. Timed waiters woken by the pulse below re-arm their
+   * own remaining deadlines. */
+  if (ch == timer_config.driver_id) {
+    beam_timer_deadline = 0;
+  }
   /* Pump the linked lwIP stack on the net-RX / service-timer channels before
    * waking any cothread blocked on this channel, so a woken socket cothread
    * sees fresh RX. Gated on lwip_up so we never touch an uninitialised stack.
-   * This drives lwIP in bring-up mode, under ERTS notified() never fires
-   * (erl_start monopolises the loop) and beam_net_pump() does the pumping. */
+   * With init() returning to the event loop this now drives lwIP in BOTH
+   * modes. beam_net_pump() from the syscall stubs is only a latency backstop
+   * while cothreads are actively running. */
   if (lwip_up) {
     if (ch == timer_config.driver_id) {
       sddf_lwip_process_rx();
       sddf_lwip_process_timeout();
-      sddf_timer_set_timeout(timer_config.driver_id, NET_TIMEOUT);
+      /* Keep the service tick alive (the mux slot was cleared above, so this
+       * always arms). Sleepers with nearer deadlines shorten it. */
+      beam_timer_arm(sddf_timer_time_now(timer_config.driver_id) + NET_TIMEOUT);
     } else if (ch == net_config.rx.id) {
       sddf_lwip_process_rx();
     }
   }
-  /* Wake any cothread blocked on this channel (fs/serial/net completions). */
+  /* Wake any cothread blocked on this specific channel via wait_on_channel
+   * (e.g. console_read parked on the serial-RX channel). */
   thread_notified(ch);
+  /* Pulse the shared idle semaphore so cothreads parked in thread_io_wait()
+   * (epoll_pwait / ppoll / pselect6 / clock_nanosleep / futex) re-check their
+   * readiness. Any notification may have changed something they care about
+   * (serial input, a fired timer, socket state). */
+  thread_io_wake();
   if (lwip_up) {
     sddf_lwip_maybe_notify();
   }

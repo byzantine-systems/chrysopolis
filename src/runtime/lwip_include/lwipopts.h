@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Vendored from LionsOS examples/posix_test/lwip_include/lwipopts.h. This is
- * the per-client lwIP build configuration for beam_server's linked lwIP stack;
- * each LionsOS lwIP client keeps its own copy (the lib_sddf_lwip build picks it
+ * the per-client lwIP build configuration for beam_server's linked lwIP stack.
+ * Each LionsOS lwIP client keeps its own copy (the lib_sddf_lwip build picks it
  * up via the include path). Keep it in sync with the reference stack.
  */
 

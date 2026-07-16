@@ -76,7 +76,7 @@ static inline uint64_t read_cntpct(void) {
 
 /* FNV-1a mixing constants (64-bit): a cheap, dependency-free accumulator that
  * folds the raw timing samples into the seed pool. HMAC-DRBG does the real
- * conditioning; this just packs the samples. */
+ * conditioning. This just packs the samples. */
 #define FNV64_OFFSET 0xcbf29ce484222325ull
 #define FNV64_PRIME 0x100000001b3ull
 
@@ -147,7 +147,7 @@ static size_t jitter_collect(uint8_t *buf, size_t len) {
 /*
  * Documented fallback when jitter fails its health check: a build-time constant
  * XOR the initial CNTPCT reading XOR the sDDF monotonic timer. Under normal
- * QEMU the counter/timer still advance per boot, so the seed varies; under
+ * QEMU the counter/timer still advance per boot, so the seed varies. Under
  * strict determinism it is at least defined rather than a fixed pattern.
  * Returns 32 bytes.
  */
