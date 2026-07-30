@@ -30,6 +30,8 @@ const std = @import("std");
 // installed into one $out):
 //   lib/libmicrokitco.a
 //   the enabled driver/virtualiser PD ELFs (serial_driver.elf, timer_driver.elf, ...)
+//   bin/root.elf                   (fault handler / process manager for the driver PDs)
+//   bin/crasher.elf                (with -Dwith-crasher: test-only faulting child of root)
 //   bin/beam_server.elf            (bring-up: console + clock + heap)
 //   bin/beam_test.elf              (with -Dwith-erts: the same glue + static ERTS)
 
@@ -415,6 +417,14 @@ pub fn build(b: *std.Build) void {
     const with_blk = b.option(bool, "with-blk", "build the block driver + virtualiser") orelse false;
     const with_fs = b.option(bool, "with-fs", "build the FAT fs_server (fat.elf)") orelse false;
     const with_net = b.option(bool, "with-net", "build the network driver + virtualisers") orelse false;
+    // crasher.elf is the test-only faulting child of root. The default is false
+    // for a bare `zig build`; it is NOT the production gate. modules/beam.nix
+    // passes -Dwith-crasher=true unconditionally because there is one shared
+    // beam-zig derivation and modules/images.nix stages crasher.elf from it for
+    // the restart image only. The real gate is the SDF (--with-crasher in
+    // tools/sdf/system.zig): an ELF the system description never references is
+    // inert, so production images carry no crasher PD.
+    const with_crasher = b.option(bool, "with-crasher", "build crasher.elf (test-only faulting child of root)") orelse false;
 
     libmicrokit = .{ .cwd_relative = b.fmt("{s}/lib/libmicrokit.a", .{board_dir}) };
     libmicrokit_include = .{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) };
@@ -537,6 +547,33 @@ pub fn build(b: *std.Build) void {
         component(b, target, optimize, "net_virt_rx.elf", &.{"network/components/virt_rx.c"}, &.{}, &.{});
         component(b, target, optimize, "net_virt_tx.elf", &.{"network/components/virt_tx.c"}, &.{}, &.{});
         component(b, target, optimize, "net_copy.elf", &.{"network/components/copy.c"}, &.{}, &.{});
+    }
+
+    // === Root fault handler and its test-only faulting child.
+    // Neither is an sDDF component: root.c and crasher.c include only
+    // <microkit.h> and print only via microkit_dbg_puts (supplied by
+    // libmicrokit.a, which addPd already links), so they need none of the sDDF
+    // include set nor the util/util_putchar_debug libs that component() adds.
+    // Plain addPd is the whole recipe.
+    //
+    // root.elf is in EVERY topology (production included: it is the fault
+    // handler for the four driver PDs), so it is not behind a toggle. It reads
+    // its restart entry point from the .restart_config section that
+    // modules/images.nix objcopies in per board, falling back to the 0x200000
+    // literal compiled in here for a bare `zig build`.
+    const root_pd = addPd(b, "root.elf", target, optimize);
+    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/root.c") });
+    // Same reason the beam exe and fat.elf disable it: modules/images.nix patches
+    // the per-board child entry point into .restart_config with
+    // objcopy --update-section, which fails outright if the linker garbage
+    // collected the section.
+    root_pd.link_gc_sections = false;
+    b.installArtifact(root_pd);
+
+    if (with_crasher) {
+        const crasher_pd = addPd(b, "crasher.elf", target, optimize);
+        crasher_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/crasher.c") });
+        b.installArtifact(crasher_pd);
     }
 
     // === beam_server PD glue. Compile main/bringup/process into ONE object

@@ -23,6 +23,18 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - run: nix build .#checks.x86_64-linux.treefmt --print-build-logs
 
+  # Cheap, pure gate: no QEMU, so it runs alongside the image build rather than
+  # behind it. Asserts the test-only restart affordances (the crasher PD and the
+  # beam_server -> root debug channels) stay out of the production topology.
+  sdf-gate:
+    name: "[Nix] Production SDF gate"
+    needs: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-nix
+      - run: nix build .#checks.x86_64-linux.production-sdf-gate --print-build-logs
+
   image:
     name: "[Nix] Build images + disk"
     needs: format
@@ -31,8 +43,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
       # Everything the smoke tests boot: the ERTS-linked image, the bring-up
-      # image (socket-smoke) and the FAT disk they all attach.
-      - run: nix build .#test-image .#default .#disk --print-build-logs
+      # image (socket-smoke), the restart image (the *-restart-smoke checks) and
+      # the FAT disk they all attach. Built once here so the fanned-out test jobs
+      # restore them from the cache instead of each rebuilding them.
+      - run: nix build .#test-image .#default .#disk .#restart-image --print-build-logs
 
   test:
     name: "[QEMU] ${{ matrix.check }}"
@@ -49,6 +63,18 @@ jobs:
           - shell-smoke
           - tcp-smoke
           - rng-smoke
+          # Fault detection: root catches a deliberately faulting child, restarts
+          # it until the budget is spent, then gives up.
+          - restart-smoke
+          # Per-class recovery: a HEALTHY driver is restarted on request and the
+          # subsystem must keep working.
+          - serial-restart-smoke
+          - timer-restart-smoke
+          - blk-restart-smoke
+          - net-restart-smoke
+          # End of the ladder: the restart budget is spent, root stops the
+          # driver for good, and the system must degrade rather than wedge.
+          - blk-giveup-smoke
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix

@@ -38,7 +38,21 @@
       # copied in as beam_server.elf (the name the generated SDF uses), so
       # the same topology serves both the bring-up and ERTS-linked PDs.
       mkSel4Image =
-        imgName: beamElf:
+        {
+          imgName,
+          beamElf,
+          # Which generated SDF to synthesise against (default topology, or the
+          # --with-crasher variant for the restart test).
+          sdf ? config.packages.sdf,
+          # Extra PD ELFs to stage into the search path (e.g. crasher.elf).
+          # These carry no per-PD config blobs, so they are just copied in.
+          extraElfs ? [ ],
+          # Enable the test-only /dev/pd-restart trigger by patching the
+          # beam_server -> root debug channel ids into beam_server.elf. Only
+          # meaningful alongside an sdf generated with --with-restart-debug, and
+          # left false everywhere else so production images cannot notify root.
+          restartDebug ? false,
+        }:
         pkgs.stdenvNoCC.mkDerivation {
           name = imgName;
           dontUnpack = true;
@@ -47,9 +61,11 @@
             set -ex  # Exit on error, print commands
             mkdir -p $out build
             cp ${beamElf} build/beam_server.elf
+            ${pkgs.lib.concatMapStringsSep "\n" (e: "cp ${e} build/") extraElfs}
             # Driver/virtualiser PDs from the root build.zig (beamZig), the
             # serial/timer client PDs (beam_server) come from beamElf above.
-            cp ${config.packages.beam-zig}/bin/serial_driver.elf \
+            cp ${config.packages.beam-zig}/bin/root.elf \
+               ${config.packages.beam-zig}/bin/serial_driver.elf \
                ${config.packages.beam-zig}/bin/timer_driver.elf \
                ${config.packages.beam-zig}/bin/serial_virt_tx.elf \
                ${config.packages.beam-zig}/bin/serial_virt_rx.elf \
@@ -62,8 +78,57 @@
                ${config.packages.beam-zig}/bin/fat.elf build/
             chmod -R u+w build
 
-            cfg=${config.packages.sdf}
+            cfg=${sdf}
             oc() { llvm-objcopy --update-section "$1"="$cfg/$2" "build/$3"; }
+
+            # Restart entry point for the Root PD: the child ELF's e_entry
+            # (== _start) is a property of the board's microkit.ld, not a
+            # universal constant, so derive it from the linked child ELFs rather
+            # than hardcoding it. Assert it is uniform across the restartable
+            # children (they share microkit.ld, so it must be), then patch it
+            # into root.elf's .restart_config section (root.c reads it there).
+            # Every child of root is checked, not just a representative pair:
+            # root restarts them all to the same address, so a divergent entry
+            # anywhere means a silent restart into garbage. Any extra staged PD
+            # ELFs (the crasher) are included, since they are children too.
+            entry_of() { llvm-readelf -h "build/$1" | sed -n 's/.*Entry point address: *//p'; }
+            ref_elf=serial_driver.elf
+            se=$(entry_of "$ref_elf")
+            for child in timer_driver.elf blk_driver.elf eth_driver.elf \
+                         ${pkgs.lib.concatMapStringsSep " " (e: builtins.baseNameOf e) extraElfs}; do
+              ce=$(entry_of "$child")
+              if [ "$se" != "$ce" ]; then
+                echo "restart-entry: child ELF entry points differ" \
+                     "($ref_elf=$se $child=$ce); the Root PD assumes a uniform" \
+                     "per-board entry" >&2
+                exit 1
+              fi
+            done
+            # Emit the value as an 8-byte little-endian blob and objcopy it in.
+            : > restart_entry.bin
+            v=$((se))
+            for i in 0 1 2 3 4 5 6 7; do
+              byte=$(( (v >> (i * 8)) & 0xff ))
+              printf "\\$(printf '%03o' "$byte")" >> restart_entry.bin
+            done
+            llvm-objcopy --update-section .restart_config=restart_entry.bin build/root.elf
+
+            ${pkgs.lib.optionalString restartDebug ''
+              # Test-only /dev/pd-restart trigger: patch the beam_server-side
+              # channel ids of the beam_server -> root debug-restart channels
+              # into beam_server.elf's .pd_restart_config (src/runtime/bringup.c
+              # reads them there). One byte per driver class, in the order
+              # serial, timer, blk, eth, matching BOTH the pinned ids in
+              # tools/sdf/system.zig and the pd_restart_channels[] array.
+              #
+              # The shim is compiled into every beam_server (production images
+              # reuse the same ELF), so this patch is what ENABLES it: without
+              # it the array keeps its 0xff "not wired" initialiser and
+              # /dev/pd-restart reports ENOENT. That is why the ids live in data
+              # rather than behind a build flag.
+              printf '\072\073\074\075' > pd_restart_channels.bin  # 58 59 60 61
+              llvm-objcopy --update-section .pd_restart_config=pd_restart_channels.bin build/beam_server.elf
+            ''}
             oc .device_resources     serial_driver_device_resources.data serial_driver.elf
             oc .serial_driver_config serial_driver_config.data           serial_driver.elf
             oc .serial_virt_tx_config serial_virt_tx.data                serial_virt_tx.elf
@@ -118,6 +183,22 @@
             ${config.packages.lions-stack}/${chryso.microkitBoard}.dtb \
             ${config.packages.lionsos-src}/dep/sddf \
             $out
+        '';
+
+        # Same topology plus the test-only restart scaffolding:
+        #   --with-crasher       the faulting child of root (fault DETECTION),
+        #   --with-restart-debug the beam_server -> root channels that let a test
+        #                        restart a HEALTHY driver (fault RECOVERY).
+        # Both live in this one variant so the restart tests need a single extra
+        # image rather than one per concern.
+        sdf-restart = pkgs.runCommand "chrysopolis-system-sdf-restart" { } ''
+          mkdir -p $out
+          ${zigSdfTool}/bin/gen-sdf \
+            ${config.packages.lions-stack}/${chryso.microkitBoard}.dtb \
+            ${config.packages.lionsos-src}/dep/sddf \
+            $out \
+            --with-crasher \
+            --with-restart-debug
         '';
 
         # FAT disk image the fat fs_server serves to beam_server. Carries a
@@ -185,11 +266,28 @@
             '';
 
         # Bring-up image (console + clock + heap, no ERTS).
-        default = mkSel4Image "sel4-beam-image" "${config.packages.beam-zig}/bin/beam_server.elf";
+        default = mkSel4Image {
+          imgName = "sel4-beam-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_server.elf";
+        };
 
         # ERTS-linked image: the same PD topology with liberts.a linked in,
         # so beam_server's init() hands off to erl_start.
-        test-image = mkSel4Image "sel4-beam-test-image" "${config.packages.beam-zig}/bin/beam_test.elf";
+        test-image = mkSel4Image {
+          imgName = "sel4-beam-test-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+        };
+
+        # ERTS image plus the crasher child of root: used only by the
+        # restart-smoke test to exercise fault -> restart -> give-up while the
+        # system boots through to the Eshell.
+        restart-image = mkSel4Image {
+          imgName = "sel4-beam-restart-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+          sdf = config.packages.sdf-restart;
+          extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
+          restartDebug = true;
+        };
       };
     };
 }

@@ -1,0 +1,52 @@
+--- a/drivers/serial/arm/uart.c	2026-07-27 12:18:51.104361123 -0400
++++ b/drivers/serial/arm/uart.c	2026-07-27 12:19:21.704640267 -0400
+@@ -165,6 +165,49 @@
+         serial_queue_init(&rx_queue_handle, config.rx.queue.vaddr, config.rx.data.size, config.rx.data.vaddr);
+     }
+     serial_queue_init(&tx_queue_handle, config.tx.queue.vaddr, config.tx.data.size, config.tx.data.vaddr);
++
++    /*
++     * Chrysopolis (driver restart): drain the queues once here, rather than
++     * waiting for the next notification or interrupt.
++     *
++     * serial_queue_init only re-points the LOCAL handle; the ring head/tail live
++     * in shared memory and survive a warm restart. So after a restart the TX ring
++     * can already hold bytes the virtualiser enqueued before this driver
++     * crashed. Nothing would drain them: the virtualiser signals the driver only
++     * when it transitions the ring from empty to non-empty, so if it already
++     * signalled before the crash it will not signal again, and the console would
++     * stay silent until some unrelated later write happened to wake us. Draining
++     * here is what makes the restart transparent to clients.
++     *
++     * tx_provide() also fixes up the TX interrupt mask, which uart_setup()
++     * unconditionally enables above even when there is nothing to send.
++     *
++     * On first boot both rings are empty, so this is a no-op beyond that mask
++     * fix-up: the call is safe in both paths, not restart-only.
++     *
++     * Upstream candidate.
++     */
++    tx_provide();
++    if (config.rx_enabled) {
++        rx_return();
++    }
++
++    /*
++     * Chrysopolis (driver restart): re-arm the IRQ.
++     *
++     * If the previous instance died between receiving its IRQ notification and
++     * acking it (a real possibility, since handle_irq() is where the driver does
++     * most of its work), the interrupt stays masked in the kernel and NO further
++     * serial interrupt is ever delivered: console input dies permanently and TX
++     * loses its FIFO-drained wakeups. Acking unconditionally at init clears that
++     * state. Acking when nothing is pending is harmless.
++     *
++     * The virtio net driver already does exactly this at the end of its init();
++     * the serial driver simply never needed it before it became restartable.
++     *
++     * Upstream candidate.
++     */
++    sddf_irq_ack(device_resources.irqs[0].id);
+ }
+ 
+ void notified(sddf_channel ch)

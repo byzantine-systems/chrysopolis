@@ -1,0 +1,153 @@
+--- a/drivers/network/virtio/common/ethernet.c
++++ b/drivers/network/virtio/common/ethernet.c
+@@ -315,6 +315,11 @@
+ {
+     assert(virtio_transport_probe(&device_resources, &dev, VIRTIO_DEVICE_ID_NET));
+ 
++    /* Chrysopolis (driver restart): the virtqueue cursor resets, the descriptor
++     * allocators and the virtqueue zeroing all now happen further down, after the
++     * in-flight buffer reclaim, because the reclaim depends on all three still
++     * holding their pre-crash values. See the reclaim block below. */
++
+     // Do normal device initialisation (section 3.2)
+ 
+     // First reset the device
+@@ -384,6 +389,125 @@
+ 
+     assert(virtq_size + tx_headers_size + rx_headers_size <= HW_RING_SIZE);
+ 
++    /*
++     * Chrysopolis (driver restart): hand back the buffers the dead instance was
++     * still holding, then reset the allocators, cursors and rings.
++     *
++     * This whole block is ordered the way it is out of necessity. The reclaim must
++     * run AFTER the virtq pointers above are assigned (it reads descriptors
++     * through them) but BEFORE ialloc_init, the cursor resets and the ring
++     * zeroing, all three of which destroy the very state that says which buffers
++     * were in flight. That is why those three moved down here from where they
++     * naturally sat.
++     *
++     * Why reclaim at all: every buffer referenced by a live descriptor was
++     * dequeued from the sDDF free queue and is, as far as the virtualiser is
++     * concerned, checked out to this driver. rx_provide() spends TWO descriptors
++     * per buffer and the in-flight cap is virtio_avail_full_rx(), i.e.
++     * rx_last_desc_idx >= rx_virtq.num, so up to RX_COUNT / 2 = 256 buffers can be
++     * outstanding against a 512-buffer pool. Dropping them on the floor loses half
++     * the pool per restart: the second restart exhausts it and RX stops for good,
++     * well inside the fault handler's restart budget. So this is a correctness
++     * requirement, not an optimisation.
++     *
++     * Why the walk is driven by the ALLOCATOR and not by scanning descriptor
++     * flags: a freed descriptor keeps its stale contents, so a flag scan would
++     * re-enqueue buffers rx_return() had already handed back, putting the same
++     * address into the free pool twice. Two descriptors pointing at one buffer is
++     * silent packet corruption, which is strictly worse than the leak this fixes.
++     * ialloc's state lives in .bss and therefore survives, so it is the only
++     * trustworthy record of what was live.
++     *
++     * Cold boot needs no special case: before ialloc_init the allocator's size is
++     * still .bss zero, and ialloc_in_use() returns false immediately for every id
++     * when id >= ia->size + ia->offset, so the loops below do nothing.
++     */
++    unsigned int reclaimed_rx = 0;
++    unsigned int reclaimed_tx = 0;
++    for (int dir = 0; dir < 2; dir++) {
++        ialloc_t *ia = (dir == 0) ? &rx_ialloc_desc : &tx_ialloc_desc;
++        struct virtq *vq = (dir == 0) ? &rx_virtq : &tx_virtq;
++        net_queue_handle_t *q = (dir == 0) ? &rx_queue : &tx_queue;
++        unsigned int *count = (dir == 0) ? &reclaimed_rx : &reclaimed_tx;
++        uint32_t n = (dir == 0) ? RX_COUNT : TX_COUNT;
++
++        for (uint32_t id = 0; id < n; id++) {
++            if (!ialloc_in_use(ia, id)) {
++                continue;
++            }
++            /* ialloc_in_use() reports the free list's tail as in use even though
++             * it is free: the predicate is "idxlist[id] == -1", and both
++             * ialloc_init and ialloc_free leave the tail's own slot at -1. Acting
++             * on it would enqueue an already-returned buffer a second time, the
++             * duplicate-address case described above. (The same false positive is
++             * handled in the blk virtualiser's restart sweep; the real fix belongs
++             * upstream in ialloc.h as an unambiguous in-use predicate.) */
++            if (!ialloc_full(ia) && id == ia->tail + ia->offset) {
++                continue;
++            }
++            /* Act only on HEADER descriptors. Each buffer owns two descriptor
++             * ids, header and packet, allocated separately, and the header is the
++             * one that names the packet through .next. Skipping non-headers is
++             * what stops each buffer being counted twice. The length check is the
++             * same signature handle_response() relies on, and it also bounds the
++             * torn-pair case: a crash inside rx_provide() can leave a header
++             * written with its packet half not yet filled in, and such a pair is
++             * skipped here, leaking at most one buffer per crash. */
++            if (!(vq->desc[id].flags & VIRTQ_DESC_F_NEXT)) {
++                continue;
++            }
++            if (vq->desc[id].len != sizeof(virtio_net_hdr_t)) {
++                continue;
++            }
++            uint16_t pkt_idx = vq->desc[id].next % vq->num;
++            net_buff_desc_t buffer = { vq->desc[pkt_idx].addr, 0 };
++            /* Both directions return to the FREE queue: rx buffers came from the
++             * rx free queue, and tx_return() is what would ordinarily have put the
++             * tx buffer back on the tx free queue. */
++            if (net_enqueue_free(q, buffer) == 0) {
++                (*count)++;
++            }
++        }
++    }
++    sddf_dprintf("ETH|restart|reclaimed|rx=%u|tx=%u\n", reclaimed_rx, reclaimed_tx);
++
++    /* Descriptor allocators. Moved here from init() so the reclaim above still
++     * sees the dead instance's allocations; nothing between the two positions
++     * touches either allocator or either virtqueue. */
++    ialloc_init(&rx_ialloc_desc, rx_descriptors, RX_COUNT);
++    ialloc_init(&tx_ialloc_desc, tx_descriptors, TX_COUNT);
++
++    /* Virtqueue cursors. A warm restart does not re-zero .bss, so without this
++     * they hold their pre-crash values while the device reset above rewound the
++     * device to index 0: *_last_seen_used would scan from the middle of the used
++     * ring and treat never-completed descriptors as complete, and the
++     * *_last_desc_idx high-water marks would claim the rings are partly full, so
++     * rx_provide()/tx_provide() would refuse descriptors the device has actually
++     * made available. The "-= 2" paths also assert(>= 0), so the desync becomes a
++     * fault rather than mere misbehaviour. */
++    rx_last_seen_used = 0;
++    tx_last_seen_used = 0;
++    rx_last_desc_idx = 0;
++    tx_last_desc_idx = 0;
++
++    /* Zero the virtqueue metadata, for the same reason the virtio block driver
++     * does. The descriptor tables and avail/used rings live in the shared
++     * hw_ring_buffer region and survive a restart, while the device reset above
++     * rewound the device's own cursors. rx_provide()/tx_provide() just below
++     * publish buffers by writing avail->ring[avail->idx % num] and incrementing
++     * avail->idx, so a stale avail->idx would make the freshly reset device
++     * believe a full ring of buffers is already available and consume descriptors
++     * describing buffers that no longer belong to this instance.
++     *
++     * On a cold boot the region arrives zeroed from the Microkit loader, which is
++     * why this only bites on restart. Exactly the ring span [0, virtq_size) is
++     * cleared; the packet headers that follow are rewritten per descriptor by
++     * rx_provide()/tx_provide(). Done before queue_setup, so the device is handed
++     * clean rings. Upstream candidate. */
++    for (size_t i = 0; i < virtq_size; i++) {
++        ((volatile uint8_t *)hw_ring_buffer_vaddr)[i] = 0;
++    }
++
+     rx_provide();
+     tx_provide();
+ 
+@@ -428,8 +552,10 @@
+     hw_ring_buffer_paddr = device_resources.regions[1].io_addr;
+ #endif
+ 
+-    ialloc_init(&rx_ialloc_desc, rx_descriptors, RX_COUNT);
+-    ialloc_init(&tx_ialloc_desc, tx_descriptors, TX_COUNT);
++    /* The two ialloc_init calls that were here now live in eth_setup(), after the
++     * in-flight buffer reclaim that depends on the dead instance's allocator state.
++     * net_queue_init must still run BEFORE eth_setup, because the reclaim enqueues
++     * onto these queues. */
+ 
+     net_queue_init(&rx_queue, config.virt_rx.free_queue.vaddr, config.virt_rx.active_queue.vaddr,
+                    config.virt_rx.num_buffers);

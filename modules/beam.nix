@@ -111,6 +111,7 @@
               -Dwith-blk=true \
               -Dwith-fs=true \
               -Dwith-net=true \
+              -Dwith-crasher=true \
               -Derts-archive-dir="$PWD"
 
             # Headers a downstream consumer of libmicrokitco.a would need, the

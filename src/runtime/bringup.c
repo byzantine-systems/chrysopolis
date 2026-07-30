@@ -859,6 +859,124 @@ static bool is_rng_device_path(const char *path) {
          strcmp(path, "dev/random") == 0;
 }
 
+/* ---- Test-only driver-restart trigger: /dev/pd-restart.
+ *
+ * Writing a driver class name to this virtual device asks the Root PD to
+ * restart that driver, letting an integration test exercise the RECOVERY path
+ * from the Eshell (`file:write_file("/dev/pd-restart", "serial")`). Fault
+ * DETECTION is already covered by the crasher PD, so this deliberately does not
+ * involve a fault: the target driver is healthy when it is restarted.
+ *
+ * Gating: this code is compiled into every beam_server (production images reuse
+ * the same ELF, only the SDF differs), so it is disabled by DATA rather than by
+ * a build flag. The channel ids live in the .pd_restart_config section below,
+ * which modules/images.nix objcopies with real ids ONLY for the restart image.
+ * Production images keep the PD_RESTART_CH_NONE initialiser, so the shim
+ * reports the path as nonexistent and can never notify a channel the SDF did
+ * not wire (which would fault the PD on an unbound capability). ---- */
+
+#define PD_RESTART_CH_NONE 0xff
+
+/* One entry per restartable driver class, in the order tools/sdf/system.zig
+ * wires the beam_server -> root debug channels. Values are Microkit channel
+ * ids; PD_RESTART_CH_NONE means "not wired in this image". Its own section,
+ * volatile and used, so the compiler cannot fold the initialiser away and
+ * objcopy can overwrite it: the same mechanism as root.c's .restart_config and
+ * sDDF's per-PD config blobs. */
+__attribute__((__section__(".pd_restart_config"),
+               used)) volatile uint8_t pd_restart_channels[4] = {
+    PD_RESTART_CH_NONE, /* serial */
+    PD_RESTART_CH_NONE, /* timer */
+    PD_RESTART_CH_NONE, /* blk */
+    PD_RESTART_CH_NONE, /* eth */
+};
+
+/* Class names accepted as the write payload, indexed to match
+ * pd_restart_channels above. */
+static const char *const pd_restart_names[4] = {"serial", "timer", "blk",
+                                                "eth"};
+
+/* True when the SDF wired at least one debug-restart channel, i.e. this is the
+ * restart image. Used to decide whether /dev/pd-restart exists at all, so a
+ * production image behaves exactly as if the shim were not compiled in. */
+static bool pd_restart_enabled(void) {
+  for (size_t i = 0; i < 4; i++) {
+    if (pd_restart_channels[i] != PD_RESTART_CH_NONE) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* write callback for the /dev/pd-restart fd. The payload is a driver class name
+ * ("serial", "timer", "blk", "eth"); trailing whitespace/newline is ignored so
+ * both `file:write_file/2` and an echo-style write work. */
+static ssize_t pd_restart_write(const void *data, size_t count, int fd) {
+  (void)fd;
+  const char *buf = (const char *)data;
+  /* Preserved before trimming: the value reported back as bytes written. See
+   * the return below for why it must be the original length, not the trimmed
+   * one. */
+  const size_t written = count;
+
+  /* Trim trailing whitespace so "serial\n" matches "serial". Erlang's
+   * file:write_file/2 writes exactly the iodata given, but a console-driven
+   * test is easy to write with a trailing newline, and silently failing to
+   * match would look like the restart mechanism itself was broken. */
+  while (count > 0 && (buf[count - 1] == '\n' || buf[count - 1] == '\r' ||
+                       buf[count - 1] == ' ' || buf[count - 1] == '\t')) {
+    count--;
+  }
+
+  for (size_t i = 0; i < 4; i++) {
+    const char *name = pd_restart_names[i];
+    size_t len = strlen(name);
+    if (count != len || strncmp(buf, name, len) != 0) {
+      continue;
+    }
+    /* Name matched, but the class still needs a channel in THIS image. A
+     * missing channel here means the SDF was generated without
+     * --with-restart-debug for this class; notifying anyway would invoke an
+     * unbound capability and fault beam_server. */
+    uint8_t ch = pd_restart_channels[i];
+    if (ch == PD_RESTART_CH_NONE) {
+      return -ENODEV;
+    }
+    /* Hand the request to root, which owns the restart policy and the child
+     * TCB caps. Report the full original count as written, not the trimmed
+     * length: the trimmed bytes were genuinely consumed, and returning fewer
+     * bytes than were passed in is a short write, which makes a caller like
+     * file:write/2 retry with the remainder and trigger a second restart. */
+    printf("PD_RESTART|request|class=%s|ch=%u\n", name, (unsigned)ch);
+    microkit_notify(ch);
+    return (ssize_t)written;
+  }
+
+  /* Not a class we know. EINVAL rather than a silent success, so a typo in a
+   * test surfaces as a failed write instead of a restart that never happened.
+   */
+  return -EINVAL;
+}
+
+/* fstat for the /dev/pd-restart fd. Must be set: io.c's sys_fstat calls
+ * fd_entry->fstat with NO NULL check, so an fstat on this fd would otherwise
+ * jump through NULL and fault the PD (see urandom_fstat). Write-only character
+ * device, and NOT S_IFSOCK, which bringup's epoll socket detection keys on. */
+static int pd_restart_fstat(int fd, struct stat *st) {
+  (void)fd;
+  memset(st, 0, sizeof(*st));
+  st->st_mode = S_IFCHR | 0222;
+  st->st_nlink = 1;
+  return 0;
+}
+
+/* True for the restart-trigger device path. Matches the absolute and the
+ * cwd-relative form, same as is_rng_device_path (cwd is "/"). */
+static bool is_pd_restart_path(const char *path) {
+  return strcmp(path, "/dev/pd-restart") == 0 ||
+         strcmp(path, "dev/pd-restart") == 0;
+}
+
 /* openat: intercept /dev/urandom and /dev/random, handing back an fd whose read
  * callback pulls from the DRBG. Everything else chains to the real libc fs path
  * (file.c sys_openat -> the FAT fs_server). The empty ::/dev/urandom FAT file
@@ -869,6 +987,10 @@ static long bringup_openat(va_list ap) {
   va_copy(copy, ap);
   (void)va_arg(ap, int);                       /* dirfd */
   const char *path = va_arg(ap, const char *); /* pathname */
+
+  /* /dev/urandom, /dev/random: hand back an fd whose read pulls from the DRBG.
+   * The empty ::/dev/urandom FAT file is deliberately absent from the disk
+   * image, so without this these reads would hit the fs_server and EOF. */
   if (path != NULL && is_rng_device_path(path)) {
     va_end(copy);
     int fd = bringup_alloc_fd(urandom_read, NULL, O_RDONLY);
@@ -877,6 +999,22 @@ static long bringup_openat(va_list ap) {
     }
     return fd;
   }
+
+  /* /dev/pd-restart: the test-only driver-restart trigger. Gated on the image
+   * actually having the debug channels wired, so in a production image the
+   * path falls through to the real fs path below and reports ENOENT exactly as
+   * if this shim did not exist. */
+  if (path != NULL && is_pd_restart_path(path) && pd_restart_enabled()) {
+    va_end(copy);
+    int fd = bringup_alloc_fd(NULL, pd_restart_write, O_WRONLY);
+    if (fd >= 0) {
+      posix_fd_entry(fd)->fstat = pd_restart_fstat;
+    }
+    return fd;
+  }
+
+  /* Everything else is a real file: chain to the libc fs path (file.c
+   * sys_openat -> the FAT fs_server). */
   long ret = old_openat ? old_openat(copy) : -ENOSYS;
   va_end(copy);
   return ret;
