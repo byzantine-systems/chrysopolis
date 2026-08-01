@@ -11,8 +11,6 @@
 *.ilk
 *.map
 *.exp
-# ...but our QEMU test harnesses are expect scripts, not MSVC export files.
-!/tools/*.exp
 
 # Precompiled Headers
 *.gch
@@ -61,9 +59,17 @@ dkms.conf
 zig-out/
 *.o
 
-# Project artifacts
+# BEAM Project artifacts
 /build/
+# rebar3's output tree for tests/ (see rebar.config). /ebin is where
+# `rebar3 bare compile` lands, which is the form the Nix build uses.
+/_build/
+/ebin/
+
+# Misc.
 /result*
 .devenv*
 .direnv/
 .env
+## QEMU stuff
+*.img

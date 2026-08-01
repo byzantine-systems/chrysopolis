@@ -11,6 +11,13 @@
     { pkgs, config, ... }:
     {
       checks = {
+        # Compile gate for the console-driving probes in tests/. Exposed as a
+        # named check, not left as a transitive dependency of .#disk, so that a
+        # typo in an .erl file fails in seconds instead of behind a multi-minute
+        # cross build, and so it gates on darwin too, where the QEMU checks are
+        # skipped. rebar.config sets warnings_as_errors, so a warning fails here.
+        test-modules = config.packages.test-modules;
+
         # Regression guard for the restart-test gating, kept separate from the
         # QEMU checks because it is a pure grep over the generated system
         # description: seconds to run, and it gates on every platform.

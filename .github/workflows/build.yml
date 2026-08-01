@@ -3,6 +3,8 @@
 #
 # Staged pipeline (https://nixcademy.com/posts/nixos-integration-test-on-github/):
 #   1. treefmt gates everything
+#   1b. The pure gates (production SDF, tests/*.erl compile) run in parallel
+#      with the image build: seconds each, no QEMU, no cross build to wait on.
 #   2. The images (bring-up + ERTS-linked) and the FAT disk build ONCE.
 #   3. QEMU smoke tests, at most 3 at a time to stay within shared-runner
 #      limits. They restore the images from the cache, build only their own
@@ -34,6 +36,18 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
       - run: nix build .#checks.x86_64-linux.production-sdf-gate --print-build-logs
+
+  # The other cheap pure gate: compile tests/*.erl. It is a transitive
+  # dependency of .#disk anyway, but named here so an Erlang typo fails in
+  # under a minute instead of behind the cross build in the image job.
+  test-modules:
+    name: "[Nix] Compile test probes"
+    needs: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-nix
+      - run: nix build .#checks.x86_64-linux.test-modules --print-build-logs
 
   image:
     name: "[Nix] Build images + disk"

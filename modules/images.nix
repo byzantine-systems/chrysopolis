@@ -245,6 +245,25 @@
                 mcopy -i $part "$dir"/*.beam "::/lib/$app/ebin/" 2>/dev/null || true
               done
 
+              # The console-driving test probes (tests/*.erl, built by rebar3 in
+              # modules/beam.nix). Nothing ever starts this application: ERTS
+              # boots -mode embedded and start_clean's path covers only kernel
+              # and stdlib, so these beams are inert unless a test script asks
+              # for them by name (see tests.nix's loader preamble). They ride
+              # the one shared disk rather than a test-only variant because,
+              # unlike the debug-restart channels and crasher PD that
+              # production-sdf-gate keeps out of the shipped topology, bytecode
+              # nothing loads grants no capability to anything.
+              #
+              # Landed UNVERSIONED even though buildRebar3 emits the usual
+              # <app>-<vsn> directory: the guest path is hard-coded in the
+              # loader (code:add_patha) and in chryso_test itself, and a version
+              # bump should not have to be chased through both.
+              mmd -i $part ::/lib/chryso_test ::/lib/chryso_test/ebin
+              mcopy -i $part \
+                ${config.packages.test-modules}/lib/erlang/lib/chryso_test-*/ebin/* \
+                ::/lib/chryso_test/ebin/
+
               # Boot script: the clean boot (kernel + stdlib) as start.boot.
               cp "$otp/releases/$rel/start_clean.boot" start.boot
               mcopy -i $part start.boot "::/releases/$rel/start.boot"

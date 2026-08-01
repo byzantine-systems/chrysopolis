@@ -1,0 +1,14 @@
+%% Application resource for the probe modules. Required by rebar3 to build an
+%% app at all; nothing ever starts it. The guest loads these modules by name
+%% (see load_test_modules in tests.nix), never through application:start/1,
+%% because ERTS boots -mode embedded with only kernel and stdlib in the boot
+%% script. The applications list below is therefore documentation of what the
+%% probes may call, not a startup dependency: those two are the only OTP
+%% applications on the FAT disk.
+{application, chryso_test, [
+    {description, "Console-driving probes for the QEMU integration tests"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {env, []}
+]}.

@@ -338,6 +338,7 @@ fn addLwipLib(
     lionsos_src: []const u8,
     lions_libc: []const u8,
     libmicrokitco_src: []const u8,
+    tcp_debug: bool,
 ) *std.Build.Step.Compile {
     const lwip_src = b.fmt("{s}/network/ipstacks/lwip/src", .{sddf});
     // lwIP is noisy under -Wall, match posix_test's warning suppressions.
@@ -383,7 +384,13 @@ fn addLwipLib(
     // buffered data after the peer closes the connection (closed_by_peer state).
     lib.root_module.addCSourceFile(.{
         .file = b.path("src/runtime/tcp.c"),
-        .flags = flags,
+        // -std=gnu23 only for our own file: the vendored lwIP sources above
+        // keep the default, since nothing here is worth risking a warning in
+        // upstream code we do not maintain.
+        .flags = if (tcp_debug)
+            flags ++ &[_][]const u8{ "-std=gnu23", "-DTCP_DEBUG=1" }
+        else
+            flags ++ &[_][]const u8{"-std=gnu23"},
     });
     addLwipIncludes(b, lib.root_module, lionsos_src, lions_libc, libmicrokitco_src);
     return lib;
@@ -425,6 +432,12 @@ pub fn build(b: *std.Build) void {
     // tools/sdf/system.zig): an ELF the system description never references is
     // inert, so production images carry no crasher PD.
     const with_crasher = b.option(bool, "with-crasher", "build crasher.elf (test-only faulting child of root)") orelse false;
+    // Socket-state tracing in src/runtime/tcp.c (TCP_DEBUG). Off by default and
+    // never set by the images: it prints a line per socket event through
+    // microkit_dbg_puts, which is far too chatty for a normal boot but is the
+    // only way to see the ERTS/lwIP state races this layer produces. Turn it on
+    // for an investigation with `zig build -Dtcp-debug=true`.
+    const tcp_debug = b.option(bool, "tcp-debug", "trace socket state transitions in tcp.c (TCP_DEBUG)") orelse false;
 
     libmicrokit = .{ .cwd_relative = b.fmt("{s}/lib/libmicrokit.a", .{board_dir}) };
     libmicrokit_include = .{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) };
@@ -617,7 +630,7 @@ pub fn build(b: *std.Build) void {
     // Prebuilt archives are linked lazily (pulled on demand), the way the
     // Makefile's `-lmicrokit -lc` and ld --start-group did, so members are
     // extracted on demand to resolve the glue + inter-archive references.
-    const lwip_lib = addLwipLib(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src);
+    const lwip_lib = addLwipLib(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src, tcp_debug);
 
     // libbearssl_drbg.a: a five-file subset of BearSSL (HMAC_DRBG/SHA-256,
     // NIST SP 800-90A) backing src/runtime/rng.c. We compile only what the DRBG
