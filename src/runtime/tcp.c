@@ -111,6 +111,66 @@ socket_t sockets[MAX_SOCKETS] = { 0 };
 
 static int socket_id(socket_t *socket) { return (int)(socket - sockets); }
 
+/*
+ * Socket-state tracing, compiled out unless built with `-Dtcp-debug=true`,
+ * which is what makes build.zig define TCP_DEBUG for this file.
+ *
+ * It exists because the failures this layer produces are races between ERTS's
+ * non-blocking socket usage and lwIP's connection state, and those are
+ * invisible from the console: the guest reports a successful send while the
+ * wire carries nothing. Tracing every state transition here is what turns that
+ * into a readable sequence. Kept compiled-in-able rather than commented out so
+ * the next investigation starts from a flag rather than from re-deriving which
+ * prints were useful.
+ *
+ * microkit_dbg_puts, NEVER printf: printf goes through the serial driver at
+ * about a second per write under TCG, which rewrites the timing of the very
+ * race being traced. dbg_puts is a direct kernel putchar.
+ *
+ * Format is one line per event, `TCP|<event>|sock=<n>|state=<n>|v=<n>`, with
+ * `v` an event-specific number (a port, a length, an errno). state is the
+ * socket_state_t ordinal.
+ */
+#ifndef TCP_DEBUG
+#define TCP_DEBUG 0
+#endif
+
+#if TCP_DEBUG
+static void tcp_trace_dec(long v) {
+    char buf[24];
+    unsigned int i = sizeof(buf);
+    unsigned long mag = (v < 0) ? (unsigned long)-v : (unsigned long)v;
+    buf[--i] = '\0';
+    do {
+        buf[--i] = (char)('0' + (mag % 10));
+        mag /= 10;
+    } while (mag);
+    if (v < 0) {
+        buf[--i] = '-';
+    }
+    microkit_dbg_puts(&buf[i]);
+}
+
+static void tcp_trace(const char *event, int index, socket_state_t state, long value) {
+    microkit_dbg_puts("TCP|");
+    microkit_dbg_puts(event);
+    microkit_dbg_puts("|sock=");
+    tcp_trace_dec(index);
+    microkit_dbg_puts("|state=");
+    tcp_trace_dec((long)state);
+    microkit_dbg_puts("|v=");
+    tcp_trace_dec(value);
+    microkit_dbg_puts("\n");
+}
+#else
+/* Empty in a non-debug build, NOT a macro: the call sites stay type-checked
+ * whichever way TCP_DEBUG is set, so a trace that has gone stale fails the
+ * ordinary build rather than only the rare debug one. Every argument here is a
+ * plain value, so the compiler drops the call entirely at -O1 and above. */
+static inline void tcp_trace([[maybe_unused]] const char *event, [[maybe_unused]] int index,
+                             [[maybe_unused]] socket_state_t state, [[maybe_unused]] long value) {}
+#endif
+
 /* DIAG: wall-clock ms since boot for latency tracing. Kept (with the
  * commented-out DIAG printfs below) for future debugging, uncomment as
  * needed. */
@@ -124,6 +184,7 @@ static void socket_err_func(void *arg, err_t err) {
         dlog("error %d with closed socket", err);
     } else {
         dlog("error %d with socket %d which is in state %d", err, socket_id(socket), socket->state);
+        tcp_trace("err", socket_id(socket), socket->state, (long)err);
 
         socket_state_t prev_state = socket->state;
         socket->state = socket_state_error;
@@ -222,6 +283,7 @@ static err_t socket_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
     assert(socket->state == socket_state_connecting);
 
     socket->state = socket_state_connected;
+    tcp_trace("connected", socket_id(socket), socket->state, (long)err);
 
     tcp_sent(tpcb, socket_sent_callback);
     tcp_recv(tpcb, socket_recv_callback);
@@ -305,6 +367,7 @@ static int tcp_socket_connect(int index, uint32_t addr, uint16_t port, int flags
     ip_addr_t ipaddr;
     ip4_addr_set_u32(&ipaddr, addr);
 
+    tcp_trace("connect", index, sock->state, port);
     sock->state = socket_state_connecting;
 
     err_t err = tcp_connect(sock->sock_tpcb, &ipaddr, port, socket_connected);
@@ -314,6 +377,9 @@ static int tcp_socket_connect(int index, uint32_t addr, uint16_t port, int flags
     }
 
     if (flags & O_NONBLOCK) {
+        /* The caller now learns the outcome only by polling, which is where
+         * tcp_socket_writable has to be honest about the connection state. */
+        tcp_trace("connect-inprogress", index, sock->state, port);
         return -EINPROGRESS;
     }
 
@@ -322,6 +388,7 @@ static int tcp_socket_connect(int index, uint32_t addr, uint16_t port, int flags
         microkit_cothread_semaphore_wait(&sock->connect_sem);
     }
 
+    tcp_trace("connect-done", index, sock->state, 0);
     if (sock->state == socket_state_connected) {
         return SOCK_SUCC;
     } else {
@@ -332,6 +399,7 @@ static int tcp_socket_connect(int index, uint32_t addr, uint16_t port, int flags
 static int tcp_socket_close_int(int index) {
     socket_t *socket = &sockets[index];
 
+    tcp_trace("close", index, socket->state, 0);
     switch (socket->state) {
     case socket_state_listening:
     case socket_state_connected: {
@@ -415,6 +483,7 @@ static ssize_t tcp_socket_write(int index, const char *buf, size_t len, int flag
     // printf("DIAG|%lu|write sock=%d len=%zu\n", diag_ms(), index, len);
     // Handle write during connection establishment - nonblocking mode
     if (sock->state == socket_state_connecting && flags & O_NONBLOCK) {
+        tcp_trace("write-eagain", index, sock->state, (long)len);
         return -EAGAIN;
     }
 
@@ -422,6 +491,7 @@ static ssize_t tcp_socket_write(int index, const char *buf, size_t len, int flag
      * direction is still open, so writes must go through. */
     if (sock->state != socket_state_connected &&
         sock->state != socket_state_closed_by_peer) {
+        tcp_trace("write-notconn", index, sock->state, (long)len);
         // Connection failed or socket in invalid state
         if (sock->state == socket_state_error) {
             return -sock->last_error ? -sock->last_error : -ENOTCONN;
@@ -454,6 +524,7 @@ static ssize_t tcp_socket_write(int index, const char *buf, size_t len, int flag
         dlog("tcp_output failed (%d)", err);
         return -lwip_err_to_errno[-err];
     }
+    tcp_trace("write-out", index, sock->state, (long)to_write);
     return to_write;
 }
 
@@ -507,7 +578,49 @@ static int tcp_socket_readable(int index) {
     return socket->rx_len;
 }
 
-static int tcp_socket_writable(int index) { return !net_queue_empty_free(&net_tx_handle); }
+/*
+ * Whether a poll/select should report the socket ready for writing.
+ *
+ * The socket's STATE decides this, not just the transmit pool. A connecting
+ * socket is the case that matters: POSIX makes it writable exactly when the
+ * connect resolves, and that transition is how a non-blocking client learns
+ * the connection is up. ERTS's inet_drv is such a client, so reporting a
+ * connecting socket as writable told it the connect had succeeded while lwIP
+ * was still in SYN_SENT. It then wrote into a socket that could only answer
+ * EAGAIN, queued the payload internally, and never re-issued it once the
+ * connection actually came up: gen_tcp:send returned ok, the bytes never
+ * reached the wire, and because the port stayed open holding them, not even
+ * the FIN did. That was a rare race (the connect usually completes first),
+ * which is exactly why it surfaced as a CI-only flake in net-restart-smoke.
+ *
+ * A socket in the error state IS reported writable, deliberately: that is how
+ * the caller is told to collect the pending error (a failed connect included)
+ * rather than waiting on a socket that will never make progress.
+ */
+static int tcp_socket_writable(int index) {
+    socket_t *sock = &sockets[index];
+    int writable;
+
+    switch (sock->state) {
+    case socket_state_connected:
+    /* Half-close: the peer is done sending, our send direction is still
+     * open, so writes (and therefore writability) still apply. */
+    case socket_state_closed_by_peer:
+        /* Only now does the transmit pool matter: with no free sDDF buffer a
+         * write would fail, so the socket is not ready. */
+        writable = !net_queue_empty_free(&net_tx_handle);
+        break;
+    case socket_state_error:
+        writable = 1;
+        break;
+    default:
+        writable = 0;
+        break;
+    }
+
+    tcp_trace("writable", index, sock->state, writable);
+    return writable;
+}
 
 static int tcp_socket_hup(int index) { return sockets[index].state == socket_state_closed_by_peer; }
 

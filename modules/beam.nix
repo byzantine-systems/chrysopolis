@@ -1,6 +1,9 @@
 # The BEAM-side artifacts:
 #   packages.app
 #     - The Gleam application compiled to BEAM bytecode.
+#   packages.test-modules
+#     - tests/*.erl, the console-driving probes the QEMU checks call, built to
+#       BEAM bytecode by rebar3 on the host.
 #   packages.beam-zig
 #     - Every aarch64 cross artifact from the root build.zig (drivers, libmicrokitco,
 #       beam_server/beam_test ELFs), plus the elf/beam-test/sddf-drivers/libmicrokitco
@@ -32,6 +35,46 @@
         # Compile the Gleam app to platform-independent BEAM bytecode.
         app = inputs'.nix-gleam.packages.buildGleamApplication {
           src = ../.;
+        };
+
+        # The console-driving test probes (tests/*.erl), built on the HOST.
+        # BEAM bytecode is platform-independent, the same reason the FAT disk
+        # carries host kernel/stdlib beams (see modules/images.nix), so these
+        # load unchanged on the cross-built aarch64 ERTS. buildRebar3 compiles
+        # with pkgs.beamPackages.erlang, which is not merely convenient:
+        # modules/erts.nix builds the guest emulator from that same package's
+        # version and src, so compiler, runtime and OTP libs move together.
+        #
+        # This derivation exists for the COMPILE GATE as much as for the
+        # bytecode. The guest runs ERTS -mode embedded with no compiler
+        # application on the disk, so guest-side compilation is not available
+        # and a typo used to surface as a wait_console timeout minutes into a
+        # QEMU boot. Here it is a build error in seconds.
+        #
+        # rebar3 rather than a bare erlc call so that ONE file describes the
+        # compile: rebar.config carries the flags (see its header for each) and
+        # is also the project model ELP discovers natively in the dev shell, so
+        # `rebar3 compile` locally and this build agree by construction. An
+        # erlc invocation here would need a second, ELP-specific description of
+        # the same thing, and the two would drift.
+        #
+        # buildRebar3 rather than driving rebar3 by hand: it supplies the
+        # standard beam hooks (source copy, `rebar3 bare compile`, and the
+        # lib/erlang/lib/<app>-<vsn> install layout every other nixpkgs BEAM
+        # package uses) and injects `deterministic` via ERL_COMPILER_OPTIONS.
+        # beamDeps is empty because the probes use only kernel and stdlib,
+        # which is also why this needs no network in the sandbox.
+        test-modules = pkgs.beamPackages.buildRebar3 {
+          name = "chryso_test";
+          version = "0.1.0";
+          src = pkgs.lib.fileset.toSource {
+            root = ../.;
+            fileset = pkgs.lib.fileset.unions [
+              ../rebar.config
+              ../tests
+            ];
+          };
+          beamDeps = [ ];
         };
 
         # Every aarch64 cross artifact, built by the one root build.zig:
@@ -111,6 +154,7 @@
               -Dwith-blk=true \
               -Dwith-fs=true \
               -Dwith-net=true \
+              -Dwith-crasher=true \
               -Derts-archive-dir="$PWD"
 
             # Headers a downstream consumer of libmicrokitco.a would need, the

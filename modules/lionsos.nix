@@ -62,6 +62,24 @@
 
           cat ${libcRedefineC} >> $out/lib/libc/posix/posix.c
           cat ${libcRedefineH} >> $out/include/lions/posix/posix.h
+
+          # Driver-restart patches against sDDF. Unlike the libc patch above,
+          # these edit the INSIDE of existing function bodies, so appending
+          # cannot express them and they are real patches.
+          #
+          # A warm restart (microkit_pd_restart) only rewrites PC and resumes; it
+          # does NOT re-zero .bss, so any driver global that is merely
+          # zero-initialised still holds its pre-crash value when init() re-runs.
+          # These make the virtio drivers reset the cursors they rely on being
+          # zero, which is what lets them come back from a restart against a
+          # freshly reset device instead of desyncing from it.
+          #
+          # Applied with -p1 and no fuzz: if an sddf bump moves this code, the
+          # build fails loudly here rather than silently dropping the fix.
+          for p in ${./../nix/patches}/sddf-*.patch; do
+            echo "applying $p"
+            patch -p1 -d $out/dep/sddf -F0 < "$p"
+          done
         '';
 
         # The LionsOS reference stack: the POSIX libc.a + headers and the

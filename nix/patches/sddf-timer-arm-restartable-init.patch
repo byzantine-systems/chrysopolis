@@ -1,0 +1,145 @@
+--- a/drivers/timer/arm/timer.c
++++ b/drivers/timer/arm/timer.c
+@@ -128,6 +128,11 @@
+ 
+ static uint64_t timeouts[MAX_TIMEOUTS];
+ 
++/* Chrysopolis (driver restart): false only on a COLD boot. A warm restart does
++ * not re-zero .bss, so this stays true and lets init() tell cold boot apart
++ * from a restart. See the lost-timeout notification in init(). */
++static bool initialised;
++
+ static void process_timeouts(uint64_t curr_time)
+ {
+     for (int i = 0; i < MAX_TIMEOUTS; i++) {
+@@ -152,10 +157,55 @@
+ 
+ void init()
+ {
++    /* Chrysopolis (driver restart) DIAGNOSTIC, kept commented out. Proved that
++     * this PD DOES fully re-execute init() after microkit_pd_restart (both this
++     * and the matching |done print at the end of init appeared after every
++     * restart), ruling out "the restart never brought the PD back". Re-enable
++     * when investigating restart behaviour. */
++    /* sddf_dprintf("TIMER|init|enter\n"); */
++
+     assert(device_resources_check_magic(&device_resources));
+     assert(device_resources.num_irqs == 1);
+     assert(device_resources.num_regions == 0);
+ 
++    /*
++     * Chrysopolis (driver restart): tell clients their timeouts were lost.
++     *
++     * The loop below discards every armed timeout, and the notification each
++     * client is waiting for will therefore never fire. Clients cannot detect
++     * this on their own: from their side a lost timeout is indistinguishable
++     * from one that has not fired yet, so they wait forever. Worse, a client
++     * whose periodic tick re-arms itself from its own timeout handler (as the
++     * lwIP service tick in beam_server does) loses the very thing that would
++     * have re-armed it, so it can never recover no matter how long it waits.
++     *
++     * We can identify exactly who to tell because a warm restart does NOT
++     * re-zero .bss: timeouts[] still holds the previous instance's entries at
++     * this point, and its index IS the client's channel id (see protected(),
++     * which stores timeouts[ch], and process_timeouts(), which notifies by the
++     * same index). So notify precisely the channels that had a timeout armed.
++     *
++     * The `initialised` guard is essential rather than cosmetic: on a COLD boot
++     * timeouts[] is .bss-zeroed, and 0 != UINT64_MAX, so every one of the 64
++     * slots would look armed and we would signal channels that are not wired to
++     * anything, faulting the driver at boot. `initialised` is itself .bss, so it
++     * is false exactly once (cold boot) and true on every warm restart, which is
++     * the distinction we need.
++     *
++     * Clients need no new code: this arrives on the same channel a fired
++     * timeout would, so an existing "my timeout fired" handler re-arms
++     * naturally. Upstream candidate.
++     */
++    if (initialised) {
++        for (int i = 0; i < MAX_TIMEOUTS; i++) {
++            if (timeouts[i] != UINT64_MAX) {
++                sddf_dprintf("TIMER|init|lost-timeout|ch=%d\n", i);
++                sddf_notify(i);
++            }
++        }
++    }
++    initialised = true;
++
+     for (int i = 0; i < MAX_TIMEOUTS; i++) {
+         timeouts[i] = UINT64_MAX;
+     }
+@@ -163,11 +213,59 @@
+     generic_timer_set_compare(UINT64_MAX);
+     generic_timer_enable();
+     timer_freq = generic_timer_get_freq();
++
++    /*
++     * Chrysopolis (driver restart): re-arm the IRQ.
++     *
++     * This driver acks its interrupt ONLY in notified() (sddf_deferred_irq_ack).
++     * If an instance dies between the kernel delivering the timer IRQ and that
++     * ack, the interrupt stays masked and seL4 never delivers timer IRQ again.
++     *
++     * That is fatal rather than merely degraded, because the IRQ is the ONLY way
++     * a timeout is ever delivered: protected()/SDDF_TIMER_SET_TIMEOUT just
++     * programs CNTP_CVAL, and it is the resulting interrupt that runs
++     * process_timeouts() and notifies the client. So a lost ack means no timeout
++     * EVER fires again, no matter how correctly clients re-arm. Clients that
++     * block on a timeout then hang forever, which takes the whole system down,
++     * not just the clock.
++     *
++     * Ordering: generic_timer_set_compare(UINT64_MAX) above pushes the compare
++     * out of reach, so the level-triggered line is deasserted before we ack.
++     * Acking when nothing is pending is harmless.
++     *
++     * The virtio net driver already acks at the end of its init(); the serial
++     * driver needed the same fix for the same reason once it became restartable.
++     *
++     * Upstream candidate.
++     */
++    sddf_irq_ack(device_resources.irqs[0].id);
++
++    /* Chrysopolis (driver restart) DIAGNOSTIC, kept commented out. Reaching
++     * here means init() completed and libmicrokit is about to enter its
++     * seL4_Recv loop, i.e. the PD is ready to serve PPCs again. Observed after
++     * every restart, with the frequency re-read correctly. */
++    /* sddf_dprintf("TIMER|init|done|freq=%lu\n", (unsigned long)timer_freq); */
+ }
+ 
+ void notified(sddf_channel ch)
+ {
+-    assert(ch == device_resources.irqs[0].id);
++    /* Chrysopolis (driver restart): tolerate an unexpected channel instead of
++     * asserting. The upstream assert turns any stray notification into a PD
++     * fault, which for a RESTARTABLE driver is a restart loop rather than a
++     * clean failure: root restarts it, it faults again on the next stray
++     * notification, and the budget burns down until root stops the timer
++     * permanently. Logging and ignoring keeps a spurious signal survivable.
++     * Upstream candidate. */
++    if (ch != device_resources.irqs[0].id) {
++        sddf_dprintf("TIMER|notified|unexpected-channel=%u\n", (unsigned)ch);
++        return;
++    }
++
++    /* Chrysopolis (driver restart) DIAGNOSTIC, kept commented out. Measured
++     * 1298 IRQs before a restart and 1819 after, i.e. the interrupt path is
++     * fully alive across a restart. Re-enable to re-measure. */
++    /* sddf_dprintf("TIMER|irq\n"); */
++
+     sddf_deferred_irq_ack(ch);
+ 
+     generic_timer_set_compare(UINT64_MAX);
+@@ -177,6 +275,13 @@
+ 
+ seL4_MessageInfo_t protected(sddf_channel ch, seL4_MessageInfo_t msginfo)
+ {
++    /* Chrysopolis (driver restart) DIAGNOSTIC, kept commented out. Proved that
++     * client PPCs ARE delivered to and served by the restarted driver: both
++     * label=0 (GET_TIME) and label=1 (SET_TIMEOUT) flow freely afterwards. That
++     * ruled out a broken endpoint/reply path, which a hung seL4_Call on the
++     * client side otherwise looks exactly like. */
++    /* sddf_dprintf("TIMER|ppc|label=%lu\n", (unsigned long)seL4_MessageInfo_get_label(msginfo)); */
++
+     switch (seL4_MessageInfo_get_label(msginfo)) {
+     case SDDF_TIMER_GET_TIME: {
+         uint64_t time_ns = freq_cycles_and_hz_to_ns(get_ticks(), timer_freq);

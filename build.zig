@@ -30,6 +30,8 @@ const std = @import("std");
 // installed into one $out):
 //   lib/libmicrokitco.a
 //   the enabled driver/virtualiser PD ELFs (serial_driver.elf, timer_driver.elf, ...)
+//   bin/root.elf                   (fault handler / process manager for the driver PDs)
+//   bin/crasher.elf                (with -Dwith-crasher: test-only faulting child of root)
 //   bin/beam_server.elf            (bring-up: console + clock + heap)
 //   bin/beam_test.elf              (with -Dwith-erts: the same glue + static ERTS)
 
@@ -336,6 +338,7 @@ fn addLwipLib(
     lionsos_src: []const u8,
     lions_libc: []const u8,
     libmicrokitco_src: []const u8,
+    tcp_debug: bool,
 ) *std.Build.Step.Compile {
     const lwip_src = b.fmt("{s}/network/ipstacks/lwip/src", .{sddf});
     // lwIP is noisy under -Wall, match posix_test's warning suppressions.
@@ -381,7 +384,13 @@ fn addLwipLib(
     // buffered data after the peer closes the connection (closed_by_peer state).
     lib.root_module.addCSourceFile(.{
         .file = b.path("src/runtime/tcp.c"),
-        .flags = flags,
+        // -std=gnu23 only for our own file: the vendored lwIP sources above
+        // keep the default, since nothing here is worth risking a warning in
+        // upstream code we do not maintain.
+        .flags = if (tcp_debug)
+            flags ++ &[_][]const u8{ "-std=gnu23", "-DTCP_DEBUG=1" }
+        else
+            flags ++ &[_][]const u8{"-std=gnu23"},
     });
     addLwipIncludes(b, lib.root_module, lionsos_src, lions_libc, libmicrokitco_src);
     return lib;
@@ -415,6 +424,20 @@ pub fn build(b: *std.Build) void {
     const with_blk = b.option(bool, "with-blk", "build the block driver + virtualiser") orelse false;
     const with_fs = b.option(bool, "with-fs", "build the FAT fs_server (fat.elf)") orelse false;
     const with_net = b.option(bool, "with-net", "build the network driver + virtualisers") orelse false;
+    // crasher.elf is the test-only faulting child of root. The default is false
+    // for a bare `zig build`; it is NOT the production gate. modules/beam.nix
+    // passes -Dwith-crasher=true unconditionally because there is one shared
+    // beam-zig derivation and modules/images.nix stages crasher.elf from it for
+    // the restart image only. The real gate is the SDF (--with-crasher in
+    // tools/sdf/system.zig): an ELF the system description never references is
+    // inert, so production images carry no crasher PD.
+    const with_crasher = b.option(bool, "with-crasher", "build crasher.elf (test-only faulting child of root)") orelse false;
+    // Socket-state tracing in src/runtime/tcp.c (TCP_DEBUG). Off by default and
+    // never set by the images: it prints a line per socket event through
+    // microkit_dbg_puts, which is far too chatty for a normal boot but is the
+    // only way to see the ERTS/lwIP state races this layer produces. Turn it on
+    // for an investigation with `zig build -Dtcp-debug=true`.
+    const tcp_debug = b.option(bool, "tcp-debug", "trace socket state transitions in tcp.c (TCP_DEBUG)") orelse false;
 
     libmicrokit = .{ .cwd_relative = b.fmt("{s}/lib/libmicrokit.a", .{board_dir}) };
     libmicrokit_include = .{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) };
@@ -539,6 +562,33 @@ pub fn build(b: *std.Build) void {
         component(b, target, optimize, "net_copy.elf", &.{"network/components/copy.c"}, &.{}, &.{});
     }
 
+    // === Root fault handler and its test-only faulting child.
+    // Neither is an sDDF component: root.c and crasher.c include only
+    // <microkit.h> and print only via microkit_dbg_puts (supplied by
+    // libmicrokit.a, which addPd already links), so they need none of the sDDF
+    // include set nor the util/util_putchar_debug libs that component() adds.
+    // Plain addPd is the whole recipe.
+    //
+    // root.elf is in EVERY topology (production included: it is the fault
+    // handler for the four driver PDs), so it is not behind a toggle. It reads
+    // its restart entry point from the .restart_config section that
+    // modules/images.nix objcopies in per board, falling back to the 0x200000
+    // literal compiled in here for a bare `zig build`.
+    const root_pd = addPd(b, "root.elf", target, optimize);
+    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/root.c") });
+    // Same reason the beam exe and fat.elf disable it: modules/images.nix patches
+    // the per-board child entry point into .restart_config with
+    // objcopy --update-section, which fails outright if the linker garbage
+    // collected the section.
+    root_pd.link_gc_sections = false;
+    b.installArtifact(root_pd);
+
+    if (with_crasher) {
+        const crasher_pd = addPd(b, "crasher.elf", target, optimize);
+        crasher_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/crasher.c") });
+        b.installArtifact(crasher_pd);
+    }
+
     // === beam_server PD glue. Compile main/bringup/process into ONE object
     // (see addBeamExe for why the object, not module C). -O2 is pinned via
     // cflags, ReleaseFast keeps Zig from adding safety/UBSan instrumentation to
@@ -580,7 +630,7 @@ pub fn build(b: *std.Build) void {
     // Prebuilt archives are linked lazily (pulled on demand), the way the
     // Makefile's `-lmicrokit -lc` and ld --start-group did, so members are
     // extracted on demand to resolve the glue + inter-archive references.
-    const lwip_lib = addLwipLib(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src);
+    const lwip_lib = addLwipLib(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src, tcp_debug);
 
     // libbearssl_drbg.a: a five-file subset of BearSSL (HMAC_DRBG/SHA-256,
     // NIST SP 800-90A) backing src/runtime/rng.c. We compile only what the DRBG

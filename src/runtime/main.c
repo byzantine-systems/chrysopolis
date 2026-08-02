@@ -118,6 +118,21 @@ void beam_timer_arm(uint64_t deadline_ns) {
   if (deadline_ns <= now) {
     deadline_ns = now + 1; /* already due: fire immediately */
   }
+
+  /* NOTE (driver restart): an earlier attempt here cleared the slot whenever
+   * the armed deadline had already passed, to recover a timeout lost to a timer
+   * restart. That is both unnecessary and harmful now:
+   *
+   *   - Unnecessary, because the restarted driver itself notifies the clients
+   *     whose timeouts it discarded (see the lost-timeout notification in the
+   *     sddf-timer-arm-restartable-init patch). That arrives on this channel
+   *     exactly like a fired timeout, so notified() clears the slot through the
+   *     normal path and the next arm re-issues it.
+   *   - Harmful, because "deadline passed but slot still armed" is ALSO the
+   *     ordinary window between the timeout firing and notified() running. In
+   *     that window the clear let a later deadline overwrite the imminent one,
+   *     pushing the driver's timeout OUT rather than recovering anything. */
+
   if (beam_timer_deadline == 0 || deadline_ns < beam_timer_deadline) {
     beam_timer_deadline = deadline_ns;
     sddf_timer_set_timeout(timer_config.driver_id, deadline_ns - now);
@@ -427,6 +442,15 @@ void notified(microkit_channel ch) {
    * re-arms from scratch. Timed waiters woken by the pulse below re-arm their
    * own remaining deadlines. */
   if (ch == timer_config.driver_id) {
+    /* DIAGNOSTIC (driver restart), left in place commented out: counts timer
+     * notifications actually RECEIVED here. Used to prove the wakeup chain
+     * survives a timer restart -- measured 1298 before / 1820 after a restart,
+     * exactly matching the driver's own IRQ count, i.e. not one notification is
+     * lost. Re-enable when investigating the outstanding timer:sleep gap.
+     * Must be microkit_dbg_puts, NOT printf: the debug
+     * console is a direct kernel putchar, whereas printf goes through the
+     * serial driver at ~1s per write under TCG and would destroy the timing
+     * measured. microkit_dbg_puts("BEAM|timer-ntfn\n"); */
     beam_timer_deadline = 0;
   }
   /* Pump the linked lwIP stack on the net-RX / service-timer channels before
