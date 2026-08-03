@@ -57,7 +57,7 @@
             exit 1
           fi
 
-          # The give-up channel is load-bearing in production: without it a
+          # The give-up channel is important in production: without it a
           # permanently stopped blk_driver leaves blk_virt holding every
           # outstanding request forever. Asserted positively so a refactor cannot
           # quietly drop it and leave only the negative checks passing.

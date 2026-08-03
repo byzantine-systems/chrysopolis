@@ -198,9 +198,10 @@ let
           """Wait for the Eshell, then load tests/*.erl off the FAT disk.
 
           Every check that drives the shell calls this ONCE, before asking the
-          guest for anything else, and the ordering is load-bearing rather than
-          tidy: blk-giveup-smoke deliberately stops the block device for good,
-          and a probe not already in memory by then could never be loaded.
+          guest for anything else, and the ordering is important: blk-giveup-smoke 
+          deliberately stops the block device for good, and a probe not already 
+          in memory by then could never be loaded.
+
           Loaded probes keep working afterwards, which is what lets them report
           the failure the test is there to observe.
 
@@ -636,12 +637,12 @@ in
       # guest is very likely wedged, and both crash() and release() need QEMU's
       # main loop that a wedged guest starves. See serial-restart-smoke.
       try:
-          # Loading the probes HERE, before the budget is spent, is load-bearing
-          # rather than tidy: this test ends with the block device stopped for
-          # good, and a probe not already in memory by then could never be
-          # loaded. Once loaded they keep reporting, which is exactly what lets
-          # them observe the failure below. code:which/1 only resolves a path
-          # string, so the reads stay genuine disk round trips either way.
+          # Loading the probes HERE, before the budget is spent, this test ends 
+          # with the block device stopped for good, and a probe not already in
+          # memory by then could never be loaded. 
+          # Once loaded they keep reporting, which is exactly what lets them
+          # observe the failure below. code:which/1 only resolves a path string,
+          # so the reads stay genuine disk round trips either way.
           load_test_modules(chryso)
 
           def read_module(machine, tag, module, timeout):
