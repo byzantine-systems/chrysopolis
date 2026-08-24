@@ -25,6 +25,12 @@
  *     current board), NOT a universal constant, so it is never hardcoded: it
  *     arrives in the .restart_config section below, patched per-board at image
  *     assembly time. See that section's comment for the mechanism.
+ *   - beam_server is the exception, and it is resumed at its own _reset symbol
+ *     instead. "init() must be idempotent" is achievable for a driver holding a
+ *     few .bss words; beam_server holds ~28 MiB of ERTS, libc and cothread
+ *     state, so it resets that memory itself before re-entering the normal boot
+ *     path. Root's part is only knowing which of the two entry points to use;
+ *     the mechanism lives in src/runtime/restart.c.
  */
 #include <microkit.h>
 
@@ -38,17 +44,35 @@
 #define MICROKIT_RESTART_ENTRY 0x200000
 #endif
 
-/* The child ELF entry point (== _start) to resume on restart. It is a property
- * of the board's microkit.ld (ENTRY(_start)), NOT a universal constant, so it
- * is patched per-board at image assembly: modules/images.nix reads e_entry from
- * the linked child ELFs, asserts it is uniform across them, and objcopies the
- * value into this section (--update-section .restart_config). The initializer
- * is the fallback for an un-patched build. `volatile` + `used` + its own
- * section keep the compiler from folding it and let objcopy overwrite it, the
- * same mechanism sDDF uses for its per-PD config blobs. */
+/* Entry points to resume children at, patched per-board at image assembly.
+ * `volatile` + `used` + its own section keep the compiler from folding them and
+ * let objcopy overwrite the pair, the same mechanism sDDF uses for its per-PD
+ * config blobs.
+ *
+ * [0] restart_entry: the shared child ELF entry point (== _start). It is a
+ *     property of the board's microkit.ld (ENTRY(_start)), NOT a universal
+ *     constant, so modules/images.nix reads e_entry from the linked child ELFs,
+ *     asserts it is uniform across them, and objcopies the value in.
+ *
+ * [1] beam_reset_entry: beam_server's _reset symbol, which is NOT its ELF entry
+ *     point. Unlike a driver, beam_server cannot be resumed at _start: nothing
+ *     in a Microkit restart re-zeroes .bss or reloads .data, and beam_server
+ *     carries ~28 MiB of ERTS and libc state that has to be pristine before the
+ *     emulator can boot again. _reset is the trampoline that restores that
+ *     memory and then enters the normal boot (see src/runtime/restart.c).
+ *     modules/images.nix resolves that symbol with llvm-nm and patches it in.
+ *
+ * The initializers are the fallback for an un-patched build. A zero
+ * beam_reset_entry means "not patched", which root treats as "beam_server is
+ * not restartable in this image" rather than jumping to address 0. */
 __attribute__((__section__(".restart_config"),
-               used)) volatile seL4_Uint64 restart_entry =
-    MICROKIT_RESTART_ENTRY;
+               used)) volatile seL4_Uint64 restart_config[2] = {
+    MICROKIT_RESTART_ENTRY,
+    0,
+};
+
+#define restart_entry (restart_config[0])
+#define beam_reset_entry (restart_config[1])
 
 /* Microkit child ids are small; size the table to the channel-id space. */
 #define ROOT_MAX_CHILDREN 64
@@ -80,6 +104,7 @@ __attribute__((__section__(".restart_config"),
 #define ROOT_CHILD_TIMER 1
 #define ROOT_CHILD_BLK 2
 #define ROOT_CHILD_ETH 3
+#define ROOT_CHILD_BEAM 5
 
 /*
  * Give-up notification channels, pinned in tools/sdf/system.zig.
@@ -124,6 +149,11 @@ static const microkit_child debug_restart_child[ROOT_DEBUG_CH_MAX + 1] = {
  * default: a designated initialiser array would leave every unlisted child at
  * 0, which is a perfectly valid channel id, and signalling an unwired one is a
  * cap fault in the PD that is supposed to be handling faults.
+ *
+ * beam_server is deliberately absent. Nothing in the system depends on it the
+ * way fatfs depends on blk, so there is no dependent to inform; when root gives
+ * up on beam_server the giveup log line is the system's obituary, because the
+ * component that would have reported anything is the one that just stopped.
  */
 static microkit_channel root_gone_channel(microkit_child child) {
   switch (child) {
@@ -134,11 +164,47 @@ static microkit_channel root_gone_channel(microkit_child child) {
   }
 }
 
-/* Per-child restart budget. After this many restarts we stop the child rather
- * than spin forever (the reliability talk's "giving up" decision). A time-
- * windowed budget (reset the count after the child stays up for a while) is a
- * future refinement: it needs a timer channel wired into the Root PD. */
+/* Restart budget for a driver PD. After this many restarts we stop the child
+ * rather than spin forever (the reliability talk's "giving up" decision). A
+ * time-windowed budget (reset the count after the child stays up for a while)
+ * is a future refinement: it needs a timer channel wired into the Root PD. */
 #define ROOT_RESTART_BUDGET 8
+
+/* beam_server's budget is larger because its restarts are not all failures. A
+ * driver restart always means a driver went wrong, but a BEAM PD restart is
+ * also what an ordinary `init:stop()` at the shell produces, and eight of those
+ * should not permanently stop the system. The budget still exists: an ERTS that
+ * faults on every boot is exactly the runaway this bounds. */
+#define ROOT_BEAM_RESTART_BUDGET 64
+
+/*
+ * A switch rather than a table, for the same reason root_gone_channel above is
+ * one: with a designated-initialiser array every unlisted child would default
+ * to a budget of 0, which does not read as "unlisted", it reads as "give up on
+ * the first fault". The default has to be the driver budget, and only a switch
+ * makes that the default.
+ */
+static unsigned int root_restart_budget(microkit_child child) {
+  switch (child) {
+  case ROOT_CHILD_BEAM:
+    return ROOT_BEAM_RESTART_BUDGET;
+  default:
+    return ROOT_RESTART_BUDGET;
+  }
+}
+
+/*
+ * Where to resume a given child. Drivers re-enter at the shared ELF entry point
+ * and re-run their idempotent init(); beam_server re-enters at its _reset
+ * trampoline, which restores its memory image first. Returns 0 when the child
+ * has no usable entry, which the caller treats as "cannot restart this one".
+ */
+static seL4_Word root_restart_entry(microkit_child child) {
+  if (child == ROOT_CHILD_BEAM) {
+    return (seL4_Word)beam_reset_entry;
+  }
+  return (seL4_Word)restart_entry;
+}
 
 static unsigned int restart_count[ROOT_MAX_CHILDREN];
 
@@ -180,8 +246,12 @@ void init(void) {
   }
   microkit_dbg_puts("ROOT|init|budget=");
   put_dec(ROOT_RESTART_BUDGET);
+  microkit_dbg_puts("|beam-budget=");
+  put_dec(ROOT_BEAM_RESTART_BUDGET);
   microkit_dbg_puts("|entry=");
   put_hex((seL4_Word)restart_entry);
+  microkit_dbg_puts("|beam-entry=");
+  put_hex((seL4_Word)beam_reset_entry);
   microkit_dbg_puts("\n");
 }
 
@@ -246,14 +316,24 @@ static void root_restart_child(microkit_child child, const char *tag) {
     return;
   }
 
-  /* Budget exhausted: this child has already been restarted
-   * ROOT_RESTART_BUDGET times and is evidently not recovering. Stop it rather
-   * than restart it forever. This is the reliability talk's "giving up"
-   * decision, and it is what keeps one sick driver from livelocking the
-   * system: a stopped driver degrades the service it provides, an endlessly
-   * restarting one burns CPU at a priority above every client. */
-  if (restart_count[child] >= ROOT_RESTART_BUDGET) {
+  /* Budget exhausted: this child has already spent its whole allowance and is
+   * evidently not recovering. Stop it rather than restart it forever. This is
+   * the reliability talk's "giving up" decision, and it is what keeps one sick
+   * driver from livelocking the system: a stopped driver degrades the service
+   * it provides, an endlessly restarting one burns CPU at a priority above
+   * every client. */
+  if (restart_count[child] >= root_restart_budget(child)) {
     root_giveup(child, "budget-exhausted");
+    return;
+  }
+
+  /* No entry point for this child means the image was assembled without one
+   * (an un-patched .restart_config, so beam_reset_entry is still 0). Resuming
+   * at address 0 would fault instantly and burn the whole budget doing it, so
+   * stop the child instead and say why. */
+  seL4_Word entry = root_restart_entry(child);
+  if (entry == 0) {
+    root_giveup(child, "no-restart-entry");
     return;
   }
 
@@ -262,7 +342,7 @@ static void root_restart_child(microkit_child child, const char *tag) {
    * does exactly this, re-faulting inside init()), the re-entrant fault()
    * observes the already-charged count and the budget still converges. */
   restart_count[child]++;
-  microkit_pd_restart(child, (seL4_Word)restart_entry);
+  microkit_pd_restart(child, entry);
   microkit_dbg_puts(tag);
   microkit_dbg_puts("|child=");
   put_dec(child);

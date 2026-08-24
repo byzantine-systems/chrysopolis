@@ -1,0 +1,42 @@
+--- a/components/fs/fat/op.c	2026-08-24 15:43:40.293099645 -0400
++++ b/components/fs/fat/op.c	2026-08-24 15:45:44.704812832 -0400
+@@ -97,8 +97,37 @@
+     LOG_FATFS("Mounting file system!\n");
+     co_data_t *args = microkit_cothread_my_arg();
+     if (fs_initialised) {
+-        args->status = FS_STATUS_ERROR;
+-        return;
++        /*
++         * Chrysopolis (client restart): a second INITIALISE means the client
++         * has restarted, not that it is confused.
++         *
++         * Upstream treats the volume as already mounted and returns an error,
++         * which was right while a client lived exactly as long as the system.
++         * Once a client PD can be restarted by a fault handler that assumption
++         * breaks: the new instance issues INITIALISE exactly as a cold boot
++         * does, gets FS_STATUS_ERROR, and cannot tell "the server is broken"
++         * from "the server still holds my dead predecessor's mount".
++         *
++         * The dead instance's handles are also still allocated here. Nothing
++         * will ever close them, because the only component that knew about
++         * them no longer exists, so every restart leaks whatever the client
++         * had open and MAX_OPEN_FILES quietly becomes a restart budget.
++         *
++         * So take the second INITIALISE at face value and start the volume
++         * over: drop every handle and unmount, then fall through to the
++         * ordinary mount below. Unmounting also clears FatFs's own FF_FS_LOCK
++         * table, which clearing the used flags alone would leave populated.
++         * Data buffered in a crashed client's open files is discarded, which
++         * is the correct reading of a crash.
++         *
++         * Upstream candidate.
++         */
++        for (int i = 0; i < MAX_OPEN_FILES; i++) {
++            file_used[i] = false;
++            dir_used[i] = false;
++        }
++        f_unmount("");
++        fs_initialised = false;
+     }
+     fs_initialised = true;
+     FRESULT RET = f_mount(&fatfs, "", 1);

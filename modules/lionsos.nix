@@ -80,6 +80,22 @@
             echo "applying $p"
             patch -p1 -d $out/dep/sddf -F0 < "$p"
           done
+
+          # The same idea one level up, against LionsOS's own components rather
+          # than sDDF's. The fs protocol has no notion of a client that can
+          # restart: fatfs answers a second FS_CMD_INITIALISE with an error and
+          # keeps the dead client's file handles allocated forever. A restarted
+          # beam_server issues that command exactly as a cold boot does, so
+          # without this it cannot tell a broken server from a stale mount, and
+          # each restart leaks handles until MAX_OPEN_FILES runs out.
+          #
+          # Separate loop because the tree root differs ($out, not $out/dep/sddf);
+          # same -p1 -F0 policy, so a lionsos bump that moves this code fails the
+          # build instead of silently dropping the fix.
+          for p in ${./../nix/patches}/lions-*.patch; do
+            echo "applying $p"
+            patch -p1 -d $out -F0 < "$p"
+          done
         '';
 
         # The LionsOS reference stack: the POSIX libc.a + headers and the

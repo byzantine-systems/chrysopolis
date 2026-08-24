@@ -120,6 +120,37 @@ let
                   time.sleep(1)
           raise Exception(f"timed out waiting for {regex!r} on console")
 
+      def wait_console_count(machine, regex, count, timeout):
+          """Wait until `regex` has matched `count` separate times in the log.
+
+          wait_console searches the ACCUMULATED log, so it is satisfied the
+          moment a pattern has ever appeared. That is the right behaviour
+          everywhere except across a PD restart, where the interesting event is
+          the SECOND Eshell banner and the first one would satisfy the wait
+          instantly. Counting occurrences is the only way to tell "the guest
+          came back" from "the guest booted once, ages ago".
+          """
+          with machine.nested(f"waiting for {count}x {regex!r} on console"):
+              deadline = time.time() + timeout
+              while time.time() < deadline:
+                  if len(re.findall(regex, machine.get_console_log())) >= count:
+                      return
+                  time.sleep(1)
+          seen = len(re.findall(regex, machine.get_console_log()))
+          raise Exception(
+              f"timed out waiting for {count}x {regex!r} on console (saw {seen})"
+          )
+
+      def assert_no_beam_fault(machine):
+          """beam_server is a child of root, so ITS faults are reported by root
+          and never reach the monitor. assert_no_pd_fault greps MON|ERROR and
+          therefore no longer covers it: without this a beam_server crash during
+          an ordinary boot would leave every check green."""
+          log = machine.get_console_log()
+          assert not re.search(r"ROOT\|fault\|child=5", log), \
+              "beam_server faulted (ROOT|fault|child=5 in serial log): " + \
+              (re.findall(r"ROOT\|fault\|child=5.*", log) or ["(no detail)"])[-1]
+
       def assert_no_pd_fault(machine):
           """MON|ERROR on serial means a protection domain faulted."""
           assert "MON|ERROR" not in machine.get_console_log(), \
@@ -280,6 +311,7 @@ in
       ]:
           assert milestone in log, f"missing boot milestone: {milestone}"
       assert_no_pd_fault(chryso)
+      assert_no_beam_fault(chryso)
       chryso.crash()
     '';
   };
@@ -318,7 +350,107 @@ in
       wait_console(chryso, r"SHELL_EVAL\|2", 60)
       wait_console(chryso, r"(?m)2\x1b\[0m|^2$", 60)
       assert_no_pd_fault(chryso)
+      assert_no_beam_fault(chryso)
       chryso.crash()
+    '';
+  };
+
+  # BEAM PD restart: an ERTS exit must land the system back at a fresh 1>, not
+  # wedge it. Runs against the PRODUCTION image, because nothing here is a test
+  # affordance: beam_server is a child of root in every topology, and the exit
+  # path is the ordinary exit/exit_group shim.
+  #
+  # Three things have to be true, and they fail in different ways, so each is
+  # asserted separately:
+  #
+  #   1. The exit REACHES root. bringup_exit faults deliberately at a reserved
+  #      unmapped address whose low byte is the exit code, so root's fault log
+  #      carries the code in mr1. If this fails the PD is simply gone and every
+  #      later wait times out.
+  #   2. The PD comes BACK. The second Eshell banner, counted rather than
+  #      matched, since the first one is still in the accumulated log.
+  #   3. It comes back CLEAN. Two independent witnesses: bss-counter=1 on the
+  #      console (a .bss counter inside the range restart.c restores, versus a
+  #      generation counter outside it that climbs), and BEAM_MARK_AFTER|absent
+  #      from inside the VM, where a registered process and a persistent_term
+  #      planted before the restart must both be gone.
+  #
+  # Witness 3 is the one with teeth. A PD that restarted without resetting its
+  # memory can still reach an Eshell, and every other assertion here would pass.
+  beam-restart-smoke = mkSel4Test {
+    name = "beam-restart-smoke";
+    image = sel4TestImage;
+    testScript = ''
+      # try/finally + power_off, not crash(): a restart that goes wrong leaves
+      # the guest wedged, and both crash() and release() need QEMU's main loop
+      # to answer, which a wedged guest starves. Same reasoning as the driver
+      # restart tests.
+      try:
+          load_test_modules(chryso)
+
+          # Baseline: plant VM-level state and prove it is observable, so its
+          # later absence means "the VM restarted" rather than "the probe never
+          # worked".
+          chryso.send_console("chryso_beam:mark().\r")
+          wait_console(chryso, r"BEAM_MARK\|set", 60)
+          chryso.send_console("chryso_beam:check('before').\r")
+          wait_console(chryso, r"BEAM_MARK_BEFORE\|present", 60)
+
+          # An ordinary operator shutdown. init:stop/0 ends in erlang:halt(0),
+          # which reaches the exit shim.
+          chryso.send_console("chryso_beam:stop_vm().\r")
+          wait_console(chryso, r"BEAM\|exit\|code=0\|requesting-restart", 120)
+
+          # Root saw it as a fault on child 5 and spent one restart. The
+          # ROOT|restart tag distinguishes this from a debug-restart request,
+          # and child=5 from any driver.
+          wait_console(chryso, r"ROOT\|fault\|child=5", 60)
+          wait_console(chryso, r"ROOT\|restart\|child=5\|count=1", 60)
+
+          # It came back. Counted, because the first banner is still in the log.
+          wait_console_count(chryso, r"Eshell", 2, 300)
+
+          # ...and came back CLEAN. generation climbs (that counter lives in the
+          # snapshot region, outside the restored range); bss-counter must not
+          # (it lives inside it). A bss-counter above 1 means the PD re-entered
+          # without resetting its memory, which is the failure this whole issue
+          # exists to prevent.
+          wait_console(chryso, r"BEAM\|boot\|generation=2\|bss-counter=1", 120)
+
+          # The FAT volume re-mounted, so the restarted VM really did re-read
+          # its bytecode through fatfs rather than running on leftovers.
+          log = chryso.get_console_log()
+          assert log.count("FAT filesystem mounted via fs_server.") >= 2, \
+              "the restarted beam_server did not re-mount the FAT volume"
+
+          # The VM-level marks are gone. load_test_modules again first: the new
+          # VM has an empty code path, which is itself part of the claim.
+          load_test_modules(chryso)
+          chryso.send_console("chryso_beam:check('after').\r")
+          wait_console(chryso, r"BEAM_MARK_AFTER\|absent", 120)
+
+          # The shell is a working shell, not just a banner.
+          chryso.send_console("chryso_test:eval_check().\r")
+          wait_console(chryso, r"SHELL_EVAL\|2", 60)
+
+          # Now the crash path with a NON-ZERO code, which is what proves the
+          # code travels to the error kernel: the shim faults at
+          # BEAM_EXIT_FAULT_BASE + code, and for a VM fault mr1 is the faulting
+          # address, so root logs 0xbea00003 for halt(3).
+          chryso.send_console("chryso_beam:halt_vm(3).\r")
+          wait_console(chryso, r"BEAM\|exit\|code=3\|requesting-restart", 120)
+          wait_console(chryso, r"ROOT\|fault\|child=5\|.*mr1=0x0*bea00003", 60)
+          wait_console(chryso, r"ROOT\|restart\|child=5\|count=2", 60)
+          wait_console_count(chryso, r"Eshell", 3, 300)
+          wait_console(chryso, r"BEAM\|boot\|generation=3\|bss-counter=1", 120)
+
+          # Root absorbed both faults: the monitor never saw one, and no driver
+          # was disturbed by the BEAM PD dying twice.
+          assert_no_pd_fault(chryso)
+          assert not re.search(r"ROOT\|giveup", chryso.get_console_log()), \
+              "root gave up on a child during the restart test"
+      finally:
+          power_off(chryso)
     '';
   };
 

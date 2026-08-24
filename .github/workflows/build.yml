@@ -80,6 +80,9 @@ jobs:
           # Fault detection: root catches a deliberately faulting child, restarts
           # it until the budget is spent, then gives up.
           - restart-smoke
+          # BEAM PD recovery: an ERTS exit restarts beam_server to a fresh 1>
+          # with none of the previous VM's state.
+          - beam-restart-smoke
           # Per-class recovery: a HEALTHY driver is restarted on request and the
           # subsystem must keep working.
           - serial-restart-smoke

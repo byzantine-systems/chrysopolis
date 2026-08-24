@@ -101,6 +101,14 @@ extern void thread_run_cothreads(void);
 extern void thread_io_wake(void);
 extern void thread_park_forever(void);
 
+/* Warm-restart support (restart.c). beam_warm_start() is true once this PD has
+ * been restarted at least once, which is what the shared-ring reconciles below
+ * are gated on; beam_boot_generation() counts entries into main() and lives
+ * OUTSIDE the memory the reset restores, so it climbs across restarts. */
+extern bool beam_warm_start(void);
+extern void beam_boot_banner(void);
+extern _Noreturn void beam_request_restart(int status);
+
 /* ---- Timer multiplexer ----
  *
  * The PD has ONE sDDF timeout slot (a new sddf_timer_set_timeout replaces the
@@ -168,7 +176,30 @@ static void net_init(void) {
                  net_config.rx.active_queue.vaddr, net_config.rx.num_buffers);
   net_queue_init(&net_tx_handle, net_config.tx.free_queue.vaddr,
                  net_config.tx.active_queue.vaddr, net_config.tx.num_buffers);
-  net_buffers_init(&net_tx_handle, 0);
+
+  /* net_queue_init only re-points the LOCAL handle, so it is safe to re-run
+   * after a restart. net_buffers_init is not: it enqueues num_buffers
+   * descriptors into the TX free ring and assert(!err)s, and that ring lives in
+   * shared memory where the previous instance's buffers are still sitting.
+   * Re-running it on a warm start overflows the ring and faults the PD inside
+   * its own recovery.
+   *
+   * Skipping it is the whole reconcile. The TX free ring already holds the
+   * buffers we can use, and net_virt_tx returns the ones still in flight as it
+   * drains the active ring. The RX side needs nothing: leftover entries in the
+   * RX active ring are consumed by the first sddf_lwip_process_rx and returned
+   * to the free ring through the ordinary path.
+   *
+   * What is lost is the buffers lwIP held as pbufs when the PD died: nobody
+   * returns those, and the count of missing TX descriptors is reported below so
+   * a leak that grows across restarts is visible rather than inferred. */
+  if (beam_warm_start()) {
+    uint16_t have = net_queue_length(net_tx_handle.free);
+    printf("BEAM|restart|net-tx-free=%u/%u\n", (unsigned)have,
+           (unsigned)net_config.tx.num_buffers);
+  } else {
+    net_buffers_init(&net_tx_handle, 0);
+  }
   sddf_lwip_init(&lib_sddf_lwip_config, &net_config, &timer_config,
                  net_rx_handle, net_tx_handle, NULL, printf,
                  netif_status_callback, NULL, NULL, NULL);
@@ -273,8 +304,9 @@ static void socket_smoke(void) {
 
 /* Cothread entry for ERTS. Spawned by beam_run() so init() can return to the
  * Microkit event loop. erl_start() runs the emulator core loop and normally
- * never returns. If it ever does (fatal shutdown), park the cothread rather
- * than fall off the end. */
+ * never returns. If it ever does, the emulator has shut down and there is no
+ * BEAM left to serve, so ask root for a restart exactly as an ERTS exit does
+ * rather than parking a dead cothread. */
 static void beam_erl_entry(void) {
   /* -MIscs 256: cap the ERTS literal super carrier at 256 MiB so it fits
    * inside the 512 MiB beam_heap region. ERTS reserves a 1024 MiB contiguous
@@ -310,7 +342,42 @@ static void beam_erl_entry(void) {
       NULL,
   };
   erl_start(13, argv);
-  thread_park_forever();
+  beam_request_restart(0);
+}
+
+/*
+ * Discard what the previous instance of this PD left in the fs queues.
+ *
+ * Only the LOCAL fs client bookkeeping (lib/fs/helpers/helpers.c's
+ * request_metadata[]/buffer_metadata[]) lives in our .bss and so comes back
+ * pristine. The queues themselves are shared memory: their head/tail survive,
+ * fatfs kept running, and it will happily complete commands the dead instance
+ * issued.
+ *
+ * There is a narrow window where that corrupts the mount. Request ids are
+ * allocated lowest-free-first, so the new instance's first command
+ * (FS_CMD_INITIALISE) takes id 0. If a stale completion carrying id 0 lands in
+ * that window it sets request_metadata[0].complete, and fs_command_blocking
+ * reads the dead instance's status as its own mount result.
+ *
+ * So: wait for fatfs to finish consuming whatever commands are still queued
+ * (after which no further stale completion can be produced), then discard every
+ * completion sitting in the queue. Order matters, draining first would leave a
+ * command still in flight behind us.
+ *
+ * Called before the FS_CMD_INITIALISE in beam_run, and only on a warm start:
+ * on a cold boot both queues are empty and this would be a no-op with a
+ * misleading name.
+ */
+static void fs_discard_stale(void) {
+  while (__atomic_load_n(&fs_command_queue->head, __ATOMIC_ACQUIRE) !=
+         fs_command_queue->tail) {
+    microkit_cothread_yield();
+  }
+
+  uint64_t stale = fs_queue_length_consumer(fs_completion_queue);
+  fs_queue_publish_consumption(fs_completion_queue, stale);
+  printf("BEAM|restart|fs-discarded=%llu\n", (unsigned long long)stale);
 }
 
 static void beam_run(void) {
@@ -350,6 +417,14 @@ static void beam_run(void) {
    * FS_CMD_INITIALISE below (fs_command_blocking runs on the cothread runtime).
    */
   thread_init();
+
+  /* On a warm start, clear out what the previous instance left in the fs queues
+   * before issuing any command of our own. Must follow thread_init (it yields
+   * to the cothread runtime) and precede FS_CMD_INITIALISE (which is the
+   * command a stale id-0 completion would corrupt). */
+  if (beam_warm_start()) {
+    fs_discard_stale();
+  }
 
   /* Mount the FAT volume. The libc fs path issues per-op commands but never the
    * one-time FS_CMD_INITIALISE that fatfs's f_mount() hangs off, the client
@@ -428,6 +503,16 @@ void init(void) {
   }
   serial_queue_init(&serial_tx_queue_handle, serial_config.tx.queue.vaddr,
                     serial_config.tx.data.size, serial_config.tx.data.vaddr);
+  /* serial needs no restart reconcile: serial_queue_init above only re-points
+   * the local handle, and the ring head/tail live in shared memory where the
+   * virtualiser's view and ours stay consistent across a restart. Stated here
+   * because its absence next to the fs and net reconciles below would otherwise
+   * read as an oversight. */
+
+  /* First console line of every boot, and the one the restart test keys on.
+   * Cold boots additionally report which .bss runs the snapshot decided must
+   * survive a reset, so the discovery rule stays auditable (see restart.c). */
+  beam_boot_banner();
 
   beam_run();
 

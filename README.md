@@ -76,13 +76,26 @@ nix flake check -L
 nix build .#checks.x86_64-linux.boot-smoke -L
 ```
 
-Five QEMU checks gate the build (each boots an image under emulation and asserts on the serial trace):
+All QEMU checks gate the build (each boots an image under emulation and asserts on the serial trace), plus two pure checks that run on every platform.
+
+Core function:
 
 - **`boot-smoke`**: Headless boot of the ERTS image, asserts `beam_server` init, the sDDF monotonic clock, ERTS handoff, the FAT `MBR partitioning detected`, `Eshell`, and no PD faults.
 - **`socket-smoke`**: Boots the bring-up image (no ERTS) and asserts the linked lwIP stack gets a DHCP lease and `socket()/bind()/listen()/connect()` succeed from C.
-- **`shell-smoke`**: Drives the interactive Erlang shell under a pty (the Eshell only starts on a tty) and asserts that `> 1 + 1.` evaluates to `> 2.`.
+- **`shell-smoke`**: Drives the interactive Erlang shell over the serial console and asserts that arithmetic evaluates.
 - **`tcp-smoke`**: Drives the shell to prove `gen_tcp` both directions: a host client echoes off a guest listener, and the guest connects out to a host listener.
 - **`rng-smoke`**: Boots the ERTS image twice and asserts the RNG fingerprint, `rand:bytes/1` and `erlang:make_ref/0` all differ across boots (see *Entropy* below).
+
+Crash and restart:
+
+- **`restart-smoke`**: Root catches a deliberately faulting child, restarts it until the budget is spent, then gives up.
+- **`beam-restart-smoke`**: An ERTS exit (`init:stop()`, then `erlang:halt(3)`) restarts `beam_server` to a fresh `1>`, carrying the exit code to Root, with none of the previous VM's state surviving.
+- **`serial-restart-smoke`**, **`timer-restart-smoke`**, **`blk-restart-smoke`**, **`net-restart-smoke`**: A healthy driver of each class is restarted on request and its subsystem must keep working.
+- **`blk-giveup-smoke`**: The restart budget is spent, Root stops the block driver for good, and the system must degrade rather than wedge.
+
+Pure (non-QEMU): 
+- **`production-sdf-gate`** asserts the test-only restart affordances stay out of the shipped topology.
+- **`test-modules`** compiles the guest-side probes in `tests/`.
 
 ### Running the BEAM shell
 
@@ -100,7 +113,6 @@ run-sel4
 After seL4 boots, you'll see the `beam_server` PD come up, the sDDF timer report a monotonic clock, ERTS hand off, and then the Erlang shell:
 
 ```text
-warning: Git tree '/home/leto/Code/Personal/byzantine-systems/chrysopolis' is dirty
 LDR|INFO: Setting all interrupts to Group 1
 LDR|INFO: GICv2 ITLinesNumber: 0x00000008
 LDR|INFO|CPU0: CurrentEL=EL2
@@ -111,15 +123,15 @@ LDR|INFO: altloader for seL4 starting
 LDR|INFO: flags:
              seL4 configured as hypervisor
 LDR|INFO: kernel:      entry:   0x0000008060000000
-LDR|INFO: root server: physmem: 0x0000000060246000 -- 0x0000000062713000
-LDR|INFO:              virtmem: 0x0000000000200000 -- 0x00000000026cd000
+LDR|INFO: root server: physmem: 0x0000000060246000 -- 0x0000000062722000
+LDR|INFO:              virtmem: 0x0000000000200000 -- 0x00000000026dc000
 LDR|INFO:              entry  : 0x0000000000221904
 LDR|INFO: region: 0x00000000   addr: 0x0000000060000000   size: 0x0000000000246000   offset: 0x0000000000000000   type: 0x0000000000000001
 LDR|INFO: region: 0x00000001   addr: 0x0000000060246000   size: 0x000000000000a304   offset: 0x0000000000246000   type: 0x0000000000000001
 LDR|INFO: region: 0x00000002   addr: 0x0000000060260308   size: 0x0000000000013a08   offset: 0x0000000000250304   type: 0x0000000000000001
 LDR|INFO: region: 0x00000003   addr: 0x0000000060283d10   size: 0x00000000000100b0   offset: 0x0000000000263d0c   type: 0x0000000000000001
-LDR|INFO: region: 0x00000004   addr: 0x0000000060294000   size: 0x00000000001c8c1c   offset: 0x0000000000273dbc   type: 0x0000000000000001
-LDR|INFO: region: 0x00000005   addr: 0x000000006045d000   size: 0x00000000022b6000   offset: 0x000000000043c9d8   type: 0x0000000000000001
+LDR|INFO: region: 0x00000004   addr: 0x0000000060294000   size: 0x00000000001ce214   offset: 0x0000000000273dbc   type: 0x0000000000000001
+LDR|INFO: region: 0x00000005   addr: 0x0000000060463000   size: 0x00000000022bf000   offset: 0x0000000000441fd0   type: 0x0000000000000001
 LDR|INFO: copying region 0x00000000
 LDR|INFO: copying region 0x00000001
 LDR|INFO: copying region 0x00000002
@@ -138,27 +150,38 @@ available phys memory regions: 1
   [60000000..c0000000)
 reserved virt address space regions: 2
   [8060000000..8060246000)
-  [8060246000..8062713000)
+  [8060246000..8062722000)
 Booting all finished, dropped to user space
 INFO  [sel4_capdl_initializer::initialize] Starting CapDL initializer
 INFO  [sel4_capdl_initializer::initialize] Starting threads
 MON|INFO: Microkit Monitor started!
+ROOT|init|budget=8|beam-budget=64|entry=0x0000000000200000|beam-entry=0x00000000002057e4
 BLK_VIRT|INFO: sending MBR request
 BLK_VIRT|INFO: initialising partitions
 BLK_VIRT|INFO: MBR partitioning detected
-MON|INFO: PD 'timer_driver' is now passive!
 Begin input
 'beam_server' is client 0
+ETH|restart|reclaimed|rx=0|tx=0
+BEAM|boot|generation=1|bss-counter=1
+BEAM|snapshot|data=192640|survivor-bytes=80|bss=29524288
+BEAM|snapshot|survivor|vaddr=0x00000000006e5108|len=8
+BEAM|snapshot|survivor|vaddr=0x00000000006ea7d0|len=8
+BEAM|snapshot|survivor|vaddr=0x0000000001efd2b0|len=16
+BEAM|snapshot|survivor|vaddr=0x0000000001efd318|len=16
+RNG|source=jitter|fp=52c41b59
 FAT filesystem mounted via fs_server.
 Chrysopolis: beam_server up on the LionsOS reference stack.
-monotonic clock via sDDF timer: 1.260051280 s
+monotonic clock via sDDF timer: 1.123627312 s
 Handing off to ERTS core loop...
 POSIX|ERROR: Unimplemented syscall number: 220
 SOCKET_SMOKE|DHCP: 10.0.2.15
+Chrysopolis: init() returned; Microkit event loop live.
 POSIX|ERROR: Unimplemented syscall number: 48
 POSIX|ERROR: Unimplemented syscall number: 48
 POSIX|ERROR: Unimplemented syscall number: 48
 POSIX|ERROR: Unimplemented syscall number: 48
+Erlang/OTP 28 [erts-16.4.0.4] [source] [64-bit] [smp:1:1] [ds:1:1:10] [async-threads:1]
+(...)
 ```
 
 > [!NOTE]
