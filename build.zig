@@ -606,7 +606,12 @@ pub fn build(b: *std.Build) void {
     });
     glue.root_module.addCSourceFiles(.{
         .root = b.path("src/runtime"),
-        .files = &.{ "main.c", "bringup.c", "process.c", "rng.c" },
+        // restart.c defines _start, replacing libmicrokit.a's crt0.o. That
+        // object defines only _start and references only main, so with _start
+        // already defined by this object the lazily-linked libmicrokit archive
+        // never extracts it and there is no duplicate symbol. It also defines
+        // _reset, the entry root resumes this PD at.
+        .files = &.{ "main.c", "bringup.c", "process.c", "rng.c", "restart.c" },
         .flags = cflags,
     });
 

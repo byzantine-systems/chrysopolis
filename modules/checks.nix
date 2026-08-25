@@ -75,7 +75,39 @@
             exit 1
           fi
 
-          # Sanity: fail loudly if the SDF is empty or unparseable, so the two
+          # beam_server must be a CHILD of root, asserted positively for the
+          # same reason as the give-up channel above. Its whole restart path
+          # depends on this one structural fact: Microkit delivers a PD's fault
+          # to its PARENT, so a top-level beam_server sends its faults to the
+          # monitor, root never sees them, and an ERTS crash goes back to being
+          # terminal. Nothing else in the build would notice, because every
+          # other check passes on a system that simply never restarts.
+          #
+          # Matched on the nesting rather than on a name: the child element sits
+          # inside root's, so the test is that beam_server's tag appears at a
+          # greater depth than root's. Real depth counting, not "any close tag
+          # ends root": root has several children, and the first of THEM to
+          # close would otherwise end the search before beam_server was reached
+          # if it were ever reordered later in the list.
+          awk '
+            /<protection_domain / {
+              depth++
+              if ($0 ~ /name="root"/) { root_depth = depth }
+              else if (root_depth && depth > root_depth && $0 ~ /name="beam_server"/) { found = 1 }
+              next
+            }
+            /<\/protection_domain>/ {
+              if (depth == root_depth) { root_depth = 0 }
+              depth--
+            }
+            END { exit(found ? 0 : 1) }
+          ' "$sdf" || {
+            echo "production SDF does not nest beam_server inside root:" \
+                 "its faults would go to the monitor and it would never be restarted" >&2
+            exit 1
+          }
+
+          # Sanity: fail loudly if the SDF is empty or unparseable, so the
           # greps above cannot pass vacuously.
           grep -q '<protection_domain name="beam_server"' "$sdf" \
             || { echo "production SDF looks malformed (no beam_server PD)" >&2; exit 1; }

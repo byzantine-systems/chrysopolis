@@ -11,6 +11,13 @@
 //! The boot heap is kept as a dedicated memory region mapped into beam_server
 //! with setvar_vaddr="beam_heap_start": the C runtime hands that region to
 //! libc_init() as the malloc arena rather than baking a BSS array into the ELF.
+//! A second region, beam_snapshot, holds the pristine copy of beam_server's own
+//! writable segment that makes the PD restartable.
+//!
+//! Every restartable PD (the four driver classes and beam_server) is a CHILD of
+//! the root fault handler, so its faults are delivered to root rather than the
+//! monitor. The virtualisers, the copier and fatfs stay top-level: they hold the
+//! client-facing state a restart must not lose.
 //!
 //! Invoked at build time:
 //!   gen-sdf <board.dtb> <sddf-source-path> <output-dir>
@@ -71,33 +78,18 @@ pub fn main() !void {
     // pages downward from, matching the LionsOS sdfgen examples.
     var sdf = SystemDescription.create(allocator, .aarch64, 0xa0000000);
 
-    // The BEAM server PD and its malloc arena. The map carries the
-    // setvar_vaddr symbol the Microkit tool patches into beam_server.elf, so
-    // the C runtime reads the heap base from beam_heap_start.
-    var beam_server = Pd.create(allocator, "beam_server", "beam_server.elf", .{ .priority = 1 });
-    // The default Microkit PD stack is a single page, printf's formatting
-    // frames overflow it, and ERTS's main scheduler runs on this stack
-    // (pthread_create is unavailable, so it cannot move to its own). Give
-    // beam_server generous room.
-    beam_server.stack_size = 0x200000;
-    const beam_heap = Mr.create(allocator, "beam_heap", 0x20000000, .{ .page_size = .large });
-    sdf.addMemoryRegion(beam_heap);
-    beam_server.addMap(Map.create(beam_heap, 0x40000000, .rw, .{ .setvar_vaddr = "beam_heap_start" }));
-    sdf.addProtectionDomain(&beam_server);
-
-    // Root fault-handler / process-manager PD. It is the PARENT of the
-    // restartable driver PDs: Microkit routes a child PD's fault to its
-    // parent's fault() callback (root.c), which restarts the child to a clean
-    // entry (microkit_pd_restart). Priority is above every child so root can
-    // preempt and handle a fault. Children are attached via root.addChild()
-    // below (NOT sdf.addProtectionDomain, which would render them top-level and
-    // route their faults to the monitor instead). beam_server stays top-level
-    // for now; its restart is a separate issue.
+    // Root fault-handler / process-manager PD. It is the PARENT of every
+    // restartable PD: Microkit routes a child PD's fault to its parent's
+    // fault() callback (root.c), which restarts the child to a clean entry
+    // (microkit_pd_restart). Priority is above every child so root can preempt
+    // and handle a fault. Children are attached via root.addChild() below (NOT
+    // sdf.addProtectionDomain, which would render them top-level and route
+    // their faults to the monitor instead).
     var root = Pd.create(allocator, "root", "root.elf", .{ .priority = 254 });
     sdf.addProtectionDomain(&root);
 
     // Child ids are PINNED rather than auto-allocated. The id is what root's
-    // fault()/notified() receive to identify which driver to restart, so it is
+    // fault()/notified() receive to identify which child to restart, so it is
     // an ABI between this file and src/runtime/root.c (ROOT_CHILD_*): letting
     // sdfgen allocate them would silently renumber every child whenever one is
     // added or reordered. Child ids and channel ids are SEPARATE Microkit id
@@ -108,6 +100,51 @@ pub fn main() !void {
     const CHILD_BLK = 2;
     const CHILD_ETH = 3;
     const CHILD_CRASHER = 4; // test-only
+    const CHILD_BEAM = 5;
+
+    // The BEAM server PD, its malloc arena and its restart snapshot. Both maps
+    // carry the setvar_vaddr symbol the Microkit tool patches into
+    // beam_server.elf, so the C runtime reads each region's base from a global.
+    //
+    // beam_server is a CHILD of root, so an ERTS crash (or a deliberate
+    // init:stop(), which src/runtime/bringup.c turns into a fault carrying the
+    // exit code) reaches root's fault() and is restarted rather than wedging
+    // the PD forever.
+    var beam_server = Pd.create(allocator, "beam_server", "beam_server.elf", .{ .priority = 1 });
+    // The default Microkit PD stack is a single page, printf's formatting
+    // frames overflow it, and ERTS's main scheduler runs on this stack
+    // (pthread_create is unavailable, so it cannot move to its own). Give
+    // beam_server generous room.
+    beam_server.stack_size = 0x200000;
+    const beam_heap = Mr.create(allocator, "beam_heap", 0x20000000, .{ .page_size = .large });
+    sdf.addMemoryRegion(beam_heap);
+    beam_server.addMap(Map.create(beam_heap, 0x40000000, .rw, .{ .setvar_vaddr = "beam_heap_start" }));
+
+    // Restart snapshot region. beam_server takes a pristine copy of its own
+    // writable segment here at first boot and restores from it when root
+    // restarts the PD, because a Microkit restart re-zeroes nothing (see
+    // src/runtime/restart.c for the whole mechanism and why the copy has to be
+    // taken at runtime rather than embedded in the ELF).
+    //
+    // It is a SEPARATE memory region precisely so that it is not part of what
+    // gets restored; that is the role rust-sel4's sel4-reset gives its
+    // .persistent section.
+    //
+    // Size is duplicated as BEAM_SNAPSHOT_SIZE in restart.c rather than being
+    // threaded through, matching beam_heap/BEAM_HEAP_SIZE above: the pinned
+    // sdfgen's Map supports setvar_vaddr but not setvar_size. modules/images.nix
+    // asserts at build time that the region is large enough for the ELF that
+    // was actually linked, so the duplication cannot go silently wrong.
+    //
+    // Placed BELOW beam_heap and mapped immediately after it. sdfgen's
+    // auto-allocator (getMapVaddr) hands out addresses above the highest map
+    // already present, so with beam_heap ending at 0x60000000 every later
+    // subsystem mapping lands above that and none can collide with this one.
+    const beam_snapshot = Mr.create(allocator, "beam_snapshot", 0x80000, .{});
+    sdf.addMemoryRegion(beam_snapshot);
+    beam_server.addMap(Map.create(beam_snapshot, 0x30000000, .rw, .{ .setvar_vaddr = "beam_snapshot_start" }));
+
+    _ = try root.addChild(&beam_server, .{ .id = CHILD_BEAM });
 
     // Serial subsystem: PL011 driver + TX/RX virtualisers. beam_server is the
     // sole client, its console writes flow through the TX virtualiser to the
@@ -338,6 +375,37 @@ pub fn main() !void {
                 // client could have seen for itself.
                 .pd_a_notify = false,
             }));
+        }
+    }
+
+    // beam_server asks root to restart it by faulting deliberately at
+    // BEAM_EXIT_FAULT_BASE + the exit code, so root's fault() reports the code
+    // in mr1 (src/runtime/restart.c: beam_request_restart). That only works
+    // while the address is UNMAPPED in beam_server's VSpace, and nothing else
+    // would notice if a future memory region quietly landed on top of it: the
+    // store would simply succeed and ERTS would carry on with the emulator
+    // half torn down.
+    //
+    // So assert it here, where the maps and their sizes are in hand. Checked
+    // against the generated SDF rather than the Microkit tool's report.txt,
+    // because the manual states the report "may change between versions. It is
+    // not intended to be machine readable", whereas this is our own data.
+    //
+    // The one page from the base covers every encodable exit code (the code is
+    // masked to a byte).
+    const BEAM_EXIT_FAULT_BASE = 0xBEA00000;
+    const BEAM_EXIT_FAULT_SIZE = 0x1000;
+    for (beam_server.maps.items) |map| {
+        const lo = map.vaddr;
+        const hi = map.vaddr + map.mr.size;
+        if (lo < BEAM_EXIT_FAULT_BASE + BEAM_EXIT_FAULT_SIZE and BEAM_EXIT_FAULT_BASE < hi) {
+            std.debug.print(
+                "beam_server map '{s}' at 0x{x}..0x{x} covers the restart-request " ++
+                    "fault address 0x{x}; move the mapping or change " ++
+                    "BEAM_EXIT_FAULT_BASE in src/runtime/restart.c (and here)\n",
+                .{ map.mr.name, lo, hi, BEAM_EXIT_FAULT_BASE },
+            );
+            std.process.exit(1);
         }
     }
 

@@ -76,6 +76,10 @@ extern void thread_io_wait(void);
 extern void thread_io_wake(void);
 extern void thread_park_forever(void);
 
+/* Hand this PD to the Root fault handler for a restart, carrying the exit code
+ * (restart.c). Used by the exit/exit_group shim below. */
+extern _Noreturn void beam_request_restart(int status);
+
 /* Timer multiplexer (main.c): arm the single sDDF timeout slot for the nearest
  * pending absolute monotonic deadline. Timed waits use it so a wakeup pulse is
  * guaranteed to arrive by their deadline. */
@@ -308,16 +312,24 @@ static long bringup_futex(va_list ap) {
   return 0;
 }
 
-/* musl's _Exit() calls exit_group then loops on exit, neither is implemented
- * by the libc, so an ERTS abort spins forever flooding the console. A Microkit
- * PD cannot truly exit, so we announce the code once and park the PD quietly
- * (the monitor reports the fault context if needed). */
+/*
+ * musl's _Exit() calls exit_group then loops on exit, neither is implemented by
+ * the libc, so an ERTS abort spins forever flooding the console unless we
+ * handle it.
+ *
+ * This used to announce the code and then park the PD forever, on the grounds
+ * that a Microkit PD cannot truly exit. True, but the conclusion was wrong: it
+ * made an `init:stop()` or an ERTS abort wedge the PD permanently, which is the
+ * opposite of "let it crash, then recover". Now the exit is handed to the Root
+ * fault handler as a restart request (src/runtime/restart.c explains how the
+ * exit code reaches root), which resets this PD's memory and re-enters it at a
+ * clean boot. The shell comes back at a fresh 1>.
+ *
+ * Does not return, so ERTS never gets the chance to spin on exit.
+ */
 static long bringup_exit(va_list ap) {
-  (void)va_arg(ap, int); /* status */
-  microkit_dbg_puts("beam_server: ERTS requested exit; parking PD.\n");
-  for (;;) {
-    seL4_Yield();
-  }
+  int status = va_arg(ap, int);
+  beam_request_restart(status);
 }
 
 /* ERTS reads the CPU affinity mask to size its scheduler pool, report a

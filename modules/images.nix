@@ -81,7 +81,7 @@
             cfg=${sdf}
             oc() { llvm-objcopy --update-section "$1"="$cfg/$2" "build/$3"; }
 
-            # Restart entry point for the Root PD: the child ELF's e_entry
+            # Restart entry points for the Root PD: the child ELF's e_entry
             # (== _start) is a property of the board's microkit.ld, not a
             # universal constant, so derive it from the linked child ELFs rather
             # than hardcoding it. Assert it is uniform across the restartable
@@ -89,12 +89,29 @@
             # into root.elf's .restart_config section (root.c reads it there).
             # Every child of root is checked, not just a representative pair:
             # root restarts them all to the same address, so a divergent entry
-            # anywhere means a silent restart into garbage. Any extra staged PD
-            # ELFs (the crasher) are included, since they are children too.
+            # anywhere means a silent restart into garbage. beam_server is
+            # included because it is a child of root too, and any extra staged
+            # PD ELFs (the crasher) are children as well.
             entry_of() { llvm-readelf -h "build/$1" | sed -n 's/.*Entry point address: *//p'; }
+            # First match only: a second line would turn the caller's $(( ))
+            # into a syntax error rather than an obvious "ambiguous symbol".
+            sym_of() {
+              llvm-nm "build/$1" \
+                | awk -v s="$2" '$3 == s && !found { print "0x" $1; found = 1 }
+                                 END { exit(found ? 0 : 1) }'
+            }
+            # Emit a value as an 8-byte little-endian blob, appended to $1.
+            emit_u64() {
+              local out=$1 v=$(( $2 )) i byte
+              for i in 0 1 2 3 4 5 6 7; do
+                byte=$(( (v >> (i * 8)) & 0xff ))
+                printf "\\$(printf '%03o' "$byte")" >> "$out"
+              done
+            }
+
             ref_elf=serial_driver.elf
             se=$(entry_of "$ref_elf")
-            for child in timer_driver.elf blk_driver.elf eth_driver.elf \
+            for child in timer_driver.elf blk_driver.elf eth_driver.elf beam_server.elf \
                          ${pkgs.lib.concatMapStringsSep " " (e: builtins.baseNameOf e) extraElfs}; do
               ce=$(entry_of "$child")
               if [ "$se" != "$ce" ]; then
@@ -104,13 +121,57 @@
                 exit 1
               fi
             done
-            # Emit the value as an 8-byte little-endian blob and objcopy it in.
-            : > restart_entry.bin
-            v=$((se))
-            for i in 0 1 2 3 4 5 6 7; do
-              byte=$(( (v >> (i * 8)) & 0xff ))
-              printf "\\$(printf '%03o' "$byte")" >> restart_entry.bin
+
+            # beam_server is resumed at its own _reset symbol, NOT at e_entry.
+            # A Microkit restart re-zeroes no memory, and beam_server carries
+            # tens of megabytes of ERTS/libc state that has to be pristine
+            # before the emulator can boot again, so _reset restores its
+            # writable segment first and only then enters the normal boot (see
+            # src/runtime/restart.c). Resolve the symbol rather than hardcoding
+            # it: unlike _start it has no fixed address.
+            if ! beam_reset=$(sym_of beam_server.elf _reset); then
+              echo "restart-entry: beam_server.elf exports no _reset symbol;" \
+                   "src/runtime/restart.c must be linked into the beam glue" >&2
+              exit 1
+            fi
+
+            # Capacity gate for the restart snapshot. restart.c copies
+            # [__init_array_start, _bss) into the beam_snapshot region at first
+            # boot; the region and the offsets within it are fixed constants
+            # shared with tools/sdf/system.zig, so assert HERE that the ELF
+            # actually linked still fits. Growing ERTS or libc past the region
+            # then fails the build instead of corrupting memory at runtime.
+            # Offsets mirror BEAM_DATA_OFF / BEAM_SNAPSHOT_SIZE in restart.c.
+            snapshot_size=$((0x80000))
+            data_off=$((0x6000))
+            data_capacity=$((snapshot_size - data_off))
+            # Checked explicitly rather than left to fail inside the $(( ))
+            # below: an unresolved symbol yields an empty string there, and
+            # "syntax error in expression" says nothing about which linker
+            # symbol microkit.ld stopped providing.
+            for sym in __init_array_start _bss; do
+              sym_of beam_server.elf "$sym" > /dev/null || {
+                echo "restart-snapshot: beam_server.elf has no $sym symbol;" \
+                     "src/runtime/restart.c reads the writable-segment bounds" \
+                     "from the board's microkit.ld" >&2
+                exit 1
+              }
             done
+            seg_start=$(sym_of beam_server.elf __init_array_start)
+            bss_start=$(sym_of beam_server.elf _bss)
+            data_len=$(( bss_start - seg_start ))
+            if [ "$data_len" -gt "$data_capacity" ]; then
+              echo "restart-snapshot: beam_server's writable data is $data_len bytes," \
+                   "which exceeds the $data_capacity byte snapshot data area;" \
+                   "raise BEAM_SNAPSHOT_SIZE in src/runtime/restart.c AND the" \
+                   "beam_snapshot region size in tools/sdf/system.zig" >&2
+              exit 1
+            fi
+            echo "restart-snapshot: data=$data_len/$data_capacity bytes"
+
+            : > restart_entry.bin
+            emit_u64 restart_entry.bin "$se"          # shared child _start
+            emit_u64 restart_entry.bin "$beam_reset"  # beam_server _reset
             llvm-objcopy --update-section .restart_config=restart_entry.bin build/root.elf
 
             ${pkgs.lib.optionalString restartDebug ''
