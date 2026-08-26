@@ -1,8 +1,8 @@
 {
-  "sdfgen-0.0.0-kupG3yryBwDhOJWuex-WQ-VfCr5l_4EdVYYXqItOype_": {
+  "sdfgen-0.0.0-kupG39SDCABayDhvJq4agLW1KCPZdpNqEeo7FvayQPfC": {
     "name": "sdfgen",
-    "url": "https://github.com/au-ts/microkit_sdf_gen/archive/13686a373b9189c7b1d778cd749d7d8bbd8a63f6.tar.gz",
-    "hash": "sha256-NKH/ggmxPkrCmmbJ5ZTvCAZ+9p6/PIhY0YeeflfMME8="
+    "url": "https://github.com/au-ts/microkit_sdf_gen/archive/0fdbd7429d2e8eceb599b6b4bca67cbccfaf1001.tar.gz",
+    "hash": "sha256-h2c5FWCKjO5Vcthd/QcQuqgfScLa057YweSyrrjtJTs="
   },
   "dtb-0.0.0-gULdmT8JAgAO49xxrRGA_0_0v4nPL7D91Ev2x7NnNbmy": {
     "name": "dtb",

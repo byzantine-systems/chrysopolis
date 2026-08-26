@@ -1,5 +1,5 @@
 {
-  description = "Chrysopolis: Erlang/BEAM (and Gleam) on seL4 Microkit + LionsOS";
+  description = "Chrysopolis: Erlang/BEAM on seL4 Microkit + LionsOS";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
@@ -32,7 +32,7 @@
     # git+https URLs instead of the github: fetcher because this network
     # blocks api.github.com. Plain git over https to github.com works.
     lionsos = {
-      url = "git+https://github.com/au-ts/lionsos";
+      url = "git+https://github.com/au-ts/lionsos?ref=refs/tags/0.4.0";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.zig-overlay.follows = "zig-overlay";
       inputs.sdfgen.follows = "sdfgen";
@@ -56,7 +56,7 @@
     };
 
     sdfgen = {
-      url = "git+https://github.com/au-ts/microkit_sdf_gen?ref=refs/tags/0.28.1";
+      url = "git+https://github.com/au-ts/microkit_sdf_gen?ref=refs/tags/0.35.0";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.zig-overlay.follows = "zig-overlay";
     };
@@ -65,18 +65,24 @@
     # flake input ships an EMPTY dep/sddf submodule (Nix does not recurse
     # submodules), so the reference-stack libc + drivers have no sDDF to build
     # against. We pin sDDF to the exact gitlink the locked lionsos rev
-    # references and let lionsos-src populate dep/sddf from inputs.sddf. The
+    # references and let lionsos-src populate dep/sddf from inputs.sddf. At
+    # lionsos 0.4.0 that gitlink (650ace5d) IS sddf tag 0.7.0, so the rev
+    # coupling this comment describes holds exactly at the two tags. The
     # sddf flake exposes only devShells. We use its source tree and mirror its
     # llvm/clang toolchain choice (llvmPackages_18) for the driver builds.
     sddf = {
-      url = "git+https://github.com/au-ts/sddf?ref=refs/heads/main&rev=d1f5252ea64edab6087552eb4220e23c019c2fbe";
+      url = "git+https://github.com/au-ts/sddf?ref=refs/tags/0.7.0&rev=650ace5dba984f5d9c7dd1a005648ff7b40655f7";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.zig-overlay.follows = "zig-overlay";
+      # No zig-overlay follows: sddf 0.7.0 dropped that input, and overriding a
+      # non-existent input is a warning now and an error in future nix.
       inputs.sdfgen.follows = "sdfgen";
     };
 
     # libmicrokitco: the LionsOS cooperative cothread library. Another empty
     # lionsos submodule, pinned to the gitlink the locked lionsos references.
+    # Re-checked at lionsos 0.4.0 (`git ls-tree ad4c35e dep/`): the gitlink is
+    # still this rev, so the bump to 0.4.0 deliberately left this pin alone
+    # rather than carrying it over untested.
     # Needed by the fat fs_server and by the ERTS threading layer.
     # - ERTS helper threads run as cothreads).
     # - lionsos-src populates dep/libmicrokitco from this input.
@@ -88,8 +94,9 @@
     # au-ts musl fork (the "musl for seL4"), the libc that LionsOS's
     # lib/libc/libc.mk builds and the POSIX layer links ERTS against. Pinned to
     # the exact rev the locked lionsos input references as its dep/musllibc
-    # gitlink so libc.mk's configure/build matches upstream. lionsos-src
-    # populates dep/musllibc from this input.
+    # gitlink so libc.mk's configure/build matches upstream. Re-checked at
+    # lionsos 0.4.0: the gitlink is still this rev. lionsos-src populates
+    # dep/musllibc from this input.
     musllibc = {
       url = "git+https://github.com/au-ts/musllibc?ref=sel4&rev=ee77eeceaeabe97b5a1aed454683e9d39ee6c591";
       flake = false;

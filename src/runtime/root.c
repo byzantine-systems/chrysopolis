@@ -287,6 +287,22 @@ void init(void) {
  * is a debug-kernel affordance, and on a release build microkit_dbg_puts
  * compiles away entirely. The notification is what the running system acts on,
  * so it must not sit behind anything that can disappear.
+ *
+ * microkit_pd_stop() is TERMINAL here: nothing in this image brings the child
+ * back afterwards, which is the behaviour blk-giveup-smoke pins. Microkit 2.3.0
+ * adds microkit_pd_resume(), the primitive an operator-triggered revive would
+ * be built on, and that is the concrete thing the 2.3.0 bump unblocks. Wiring
+ * it is deliberately follow-up work rather than part of the version bump.
+ *
+ * The notify below is the IMMEDIATE microkit_notify rather than the deferred
+ * form, and that is deliberate. microkit_deferred_notify has a single pending
+ * slot (microkit_have_signal / microkit_signal_cap) shared by the whole PD, and
+ * the signal only leaves on the reply that ends the current event. Since
+ * root_giveup runs from the fault handler, switching to it would mean reasoning
+ * about that reply path and about what else might already be holding the slot.
+ * Note this is NOT a Microkit version question: the deferred machinery is
+ * byte-identical between the 2.2.0 and 2.3.0 SDK headers, so a bump neither
+ * enables nor blocks the change.
  */
 static void root_giveup(microkit_child child, const char *reason) {
   microkit_pd_stop(child);

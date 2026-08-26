@@ -494,8 +494,32 @@ static void beam_run(void) {
 }
 
 void init(void) {
+  /* Magic checks on the config blobs the Microkit tool patched into our
+   * sections. The magic is written by sdfgen and compared against the
+   * sDDF/LionsOS header this file compiles against, so a mismatched
+   * generator/consumer pair is caught before anything reads the struct.
+   *
+   * fs joins serial and timer here because it was the one config main.c bound
+   * without ever checking, even though LionsOS ships fs_config_check_magic.
+   * net is deliberately absent: the network subsystem is optional, and
+   * net_config_check_magic doubles as the "is the net client wired" probe
+   * below, where invalid magic is a valid answer rather than a fault.
+   *
+   * NOTE these three are currently NO-OPS at runtime. build.zig pins
+   * optimize = .ReleaseFast, which makes Zig pass -DNDEBUG to clang, so
+   * assert() expands to nothing in every src/runtime C file. They are kept
+   * because they state the invariant and become live the moment the PD is
+   * built at a lower optimisation level, but do not read this block as
+   * evidence that a bad blob would be caught at boot: it would not.
+   *
+   * Nothing else checks these blobs either. objcopy rejects one that is too
+   * LARGE for its section, which is what a version skew usually looks like,
+   * but a smaller or merely reordered blob is silent. What actually keeps the
+   * layouts in agreement is that sdfgen, sDDF and LionsOS pin each other
+   * (0.35.0 / 0.7.0 / 0.4.0), so bump those three as a set. */
   assert(serial_config_check_magic(&serial_config));
   assert(timer_config_check_magic(&timer_config));
+  assert(fs_config_check_magic(&fs_config));
 
   if (serial_config.rx.queue.vaddr != NULL) {
     serial_queue_init(&serial_rx_queue_handle, serial_config.rx.queue.vaddr,

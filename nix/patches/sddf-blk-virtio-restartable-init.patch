@@ -1,8 +1,8 @@
 --- a/drivers/blk/virtio/block.c
 +++ b/drivers/blk/virtio/block.c
-@@ -273,6 +273,29 @@
+@@ -271,6 +271,29 @@
+ {
      assert(virtio_transport_probe(&device_resources, &dev, VIRTIO_DEVICE_ID_BLK));
-     ialloc_init(&ialloc_desc, descriptors, QUEUE_SIZE);
  
 +    /*
 +     * Chrysopolis (driver restart): reset the used-ring scan cursor.
@@ -30,30 +30,7 @@
      /* First reset the device */
      virtio_transport_set_status(&dev, 0);
      /* Set the ACKNOWLEDGE bit to say we have noticed the device */
-@@ -293,7 +316,7 @@
-     }
- 
-     /* This driver does not support Read-Only devices, so we always leave this as false */
--    blk_storage_info_t *storage_info = config.virt.storage_info.vaddr;
-+    blk_storage_info_t *storage_info = (blk_storage_info_t *)config.virt.storage_info.vaddr;
-     storage_info->read_only = false;
-     storage_info->capacity = (virtio_config->capacity * VIRTIO_BLK_SECTOR_SIZE) / BLK_TRANSFER_SIZE;
-     storage_info->cylinders = virtio_config->geometry.cylinders;
-@@ -302,8 +325,11 @@
-     storage_info->block_size = 1;
-     storage_info->sector_size = VIRTIO_BLK_SECTOR_SIZE;
- 
--    /* Finished populating configuration */
--    blk_storage_set_ready(storage_info, true);
-+    /*
-+     * Chrysopolis (driver restart): the generation bump and the ready flag are
-+     * NOT published here, where upstream sets ready. They now happen at the very
-+     * end of this function; see the comment there for why.
-+     */
- 
- #ifdef DEBUG_DRIVER
-     uint32_t features_low = virtio_transport_get_driver_features(&dev, 0);
-@@ -337,6 +363,32 @@
+@@ -336,6 +359,36 @@
      assert(size <= device_resources.regions[2].region.size);
  #endif
  
@@ -61,7 +38,7 @@
 +     * Chrysopolis (driver restart): zero the virtqueue metadata region.
 +     *
 +     * The descriptor table and the avail/used rings live in a shared memory
-+     * region, so they SURVIVE a warm restart with their pre-crash contents --
++     * region, so they SURVIVE a warm restart with their pre-crash contents,
 +     * but the device reset above (set_status 0) rewinds the DEVICE's internal
 +     * cursors to zero. The two then disagree from the very first request:
 +     *   - avail->idx still reads (say) 500, so the freshly reset device
@@ -77,46 +54,25 @@
 +     * restart start from the same state a cold boot does.
 +     *
 +     * Done before the pointers are published and before queue_setup, so the
-+     * device is told about rings that are already clean. Upstream candidate.
++     * device is told about rings that are already clean. No barrier is needed
++     * after the loop the way the net driver needs one: virtio_metadata is an
++     * uncached mapping here (drivers/blk/virtio/config.json marks no region
++     * cached), so these stores are not sitting in a cache when the device is
++     * handed the rings. Upstream candidate.
 +     */
 +    for (size_t i = 0; i < size; i++) {
 +        ((volatile uint8_t *)requests_vaddr)[i] = 0;
 +    }
 +
-     virtq.num = VIRTQ_NUM_REQUESTS;
+     virtq.num = driver_q_capacity;
      virtq.desc = (struct virtq_desc *)(requests_vaddr + desc_off);
      virtq.avail = (struct virtq_avail *)(requests_vaddr + avail_off);
-@@ -348,6 +400,27 @@
-     /* Finish initialisation */
-     virtio_transport_set_status(&dev, VIRTIO_DEVICE_STATUS_DRIVER_OK);
-     virtio_transport_write_isr(&dev, VIRTIO_IRQ_VQUEUE);
-+
-+    /*
-+     * Chrysopolis (driver restart): publish readiness LAST, once the device is
-+     * genuinely able to serve requests.
-+     *
-+     * Upstream sets ready as soon as the storage_info fields are filled in, well
-+     * before the virtqueue is zeroed and handed to the device by queue_setup
-+     * above. That ordering is harmless on a cold boot, where nobody is watching
-+     * yet, but on a restart the virtualiser is already running and is waiting for
-+     * exactly this signal: it would then be free to submit against a queue this
-+     * instance has not configured.
-+     *
-+     * The generation is advanced before the ready store, and the ready store has
-+     * release semantics, so a virtualiser that observes ready is guaranteed to
-+     * also observe the new generation and every field written above it. That
-+     * pairing is what lets the virtualiser detect "the driver restarted" rather
-+     * than merely "the driver is ready", since across a restart it only ever
-+     * sees ready move from true to true.
-+     */
-+    blk_storage_next_generation(storage_info);
-+    blk_storage_set_ready(storage_info, true);
- }
- 
- void init(void)
-@@ -387,9 +460,71 @@
+@@ -386,13 +439,90 @@
      dev.pci_vendor_id = VIRTIO_PCI_VEN_ID;
      dev.pci_device_id = VIRTIO_BLK_PCI_DEV_ID;
+ 
+-    virtio_blk_init();
++    blk_storage_info_t *storage_info = config.virt.storage_info.vaddr;
  
 +    /*
 +     * Chrysopolis (driver restart): the queue handle is set up BEFORE the device
@@ -124,8 +80,10 @@
 +     * blk_queue_init only stores pointers from config, it does not touch the
 +     * device, so moving it earlier is safe.
 +     */
-+    blk_queue_init(&blk_queue, config.virt.req_queue.vaddr, config.virt.resp_queue.vaddr, config.virt.num_buffers);
-+
+     blk_queue_init(&blk_queue, config.virt.req_queue.vaddr, config.virt.resp_queue.vaddr, config.virt.num_buffers);
+ 
+-    /* Driver ready */
+-    blk_storage_info_t *storage_info = config.virt.storage_info.vaddr;
 +    /*
 +     * Chrysopolis (driver restart): take the device offline for the duration of
 +     * init, and DISCARD any requests left in the shared ring.
@@ -141,14 +99,14 @@
 +     * none of them will ALSO be completed for real later. Without this, a
 +     * request still sitting in the ring would be processed normally by this new
 +     * instance, arriving as a second completion for an id the virtualiser had
-+     * already failed and freed -- a double free of its ialloc slot and a
-+     * response delivered against a recycled id.
++     * already failed and freed, a double free of its ialloc slot and a response
++     * delivered against a recycled id.
 +     *
 +     * Dropping work rather than replaying it is the sDDF/seL4 convention here:
 +     * "Pending jobs are discarded, clients will reissue" (Shen & Elkaduwe, seL4
 +     * Summit 2025). The client sees an error, not a lost completion.
 +     */
-+    blk_storage_set_ready((blk_storage_info_t *)config.virt.storage_info.vaddr, false);
++    blk_storage_set_ready(storage_info, false);
 +
 +    while (!blk_queue_empty_req(&blk_queue)) {
 +        blk_req_code_t code;
@@ -159,9 +117,8 @@
 +        blk_dequeue_req(&blk_queue, &code, &addr, &block_number, &count, &id);
 +    }
 +
-     virtio_blk_init();
- 
--    blk_queue_init(&blk_queue, config.virt.req_queue.vaddr, config.virt.resp_queue.vaddr, config.virt.num_buffers);
++    virtio_blk_init();
++
 +    /*
 +     * Chrysopolis (driver restart): re-arm the IRQ. If the previous instance
 +     * died between the kernel delivering the completion interrupt and acking it,
@@ -172,6 +129,23 @@
 +     * init() for the same reason. Harmless when nothing is pending.
 +     */
 +    sddf_irq_ack(device_resources.irqs[0].id);
++
++    /*
++     * Driver ready.
++     *
++     * Chrysopolis (driver restart): the generation is advanced immediately
++     * before the ready store, which has release semantics, so a virtualiser that
++     * observes ready is guaranteed to also observe the new generation and every
++     * field written above it. That pairing is what lets the virtualiser detect
++     * "the driver restarted" rather than merely "the driver is ready", since
++     * across a restart it only ever sees ready move from true to true.
++     *
++     * sDDF 0.7.0 moved the ready store itself down here from the middle of
++     * virtio_blk_init(); this patch used to perform that move and now only adds
++     * the generation bump in front of it.
++     */
++    blk_storage_next_generation(storage_info);
+     blk_storage_set_ready(storage_info, true);
 +
 +    /*
 +     * Chrysopolis (driver restart): tell the virtualiser the device came back.

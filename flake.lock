@@ -237,15 +237,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1784074800,
-        "narHash": "sha256-XTajCNFRNrgbfmFJ8xDY7PlvxvwbC6p9bxEoda8Dsl4=",
-        "ref": "refs/heads/main",
-        "rev": "4a5656a32574049817f62054832abeae85861ff5",
-        "revCount": 753,
+        "lastModified": 1787279221,
+        "narHash": "sha256-RlyoCQdp8a0+w6r+eUEYSfiKNM6SvLbFYb02jMLuTQU=",
+        "ref": "refs/tags/0.4.0",
+        "rev": "ad4c35ea7ae657d2f450e45c821035e746cfa48a",
+        "revCount": 764,
         "type": "git",
         "url": "https://github.com/au-ts/lionsos"
       },
       "original": {
+        "ref": "refs/tags/0.4.0",
         "type": "git",
         "url": "https://github.com/au-ts/lionsos"
       }
@@ -501,23 +502,20 @@
         "sdfgen": [
           "sdfgen"
         ],
-        "systems-ci": "systems-ci",
-        "zig-overlay": [
-          "zig-overlay"
-        ]
+        "systems-ci": "systems-ci"
       },
       "locked": {
-        "lastModified": 1773796496,
-        "narHash": "sha256-h+4fAF71K2193Omwt4Ss2CCTKJkjfoQ9erPCtLeQQKQ=",
-        "ref": "refs/heads/main",
-        "rev": "d1f5252ea64edab6087552eb4220e23c019c2fbe",
-        "revCount": 1396,
+        "lastModified": 1787114094,
+        "narHash": "sha256-Ser9MfdEIbAmM/SgPh2eeTM5sa2uX3yi75V2U23SI2U=",
+        "ref": "refs/tags/0.7.0",
+        "rev": "650ace5dba984f5d9c7dd1a005648ff7b40655f7",
+        "revCount": 1547,
         "type": "git",
         "url": "https://github.com/au-ts/sddf"
       },
       "original": {
-        "ref": "refs/heads/main",
-        "rev": "d1f5252ea64edab6087552eb4220e23c019c2fbe",
+        "ref": "refs/tags/0.7.0",
+        "rev": "650ace5dba984f5d9c7dd1a005648ff7b40655f7",
         "type": "git",
         "url": "https://github.com/au-ts/sddf"
       }
@@ -533,16 +531,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1764823094,
-        "narHash": "sha256-Eeef5J0y31NH/F5Z0fayJ+4mroYfb8JPadu3cw6cNhc=",
-        "ref": "refs/tags/0.28.1",
-        "rev": "13686a373b9189c7b1d778cd749d7d8bbd8a63f6",
-        "revCount": 770,
+        "lastModified": 1787026496,
+        "narHash": "sha256-NHl5gzx32nExiALlJ9RpbSB3AyTD/pOcGQBgt4jI0m8=",
+        "ref": "refs/tags/0.35.0",
+        "rev": "0fdbd7429d2e8eceb599b6b4bca67cbccfaf1001",
+        "revCount": 828,
         "type": "git",
         "url": "https://github.com/au-ts/microkit_sdf_gen"
       },
       "original": {
-        "ref": "refs/tags/0.28.1",
+        "ref": "refs/tags/0.35.0",
         "type": "git",
         "url": "https://github.com/au-ts/microkit_sdf_gen"
       }
@@ -565,11 +563,11 @@
     "systems-ci": {
       "flake": false,
       "locked": {
-        "lastModified": 1773289997,
-        "narHash": "sha256-wnHlBRWsDyVUJMhCtE5INmrPhBD4+96cb6ebn6PCLPc=",
+        "lastModified": 1784859398,
+        "narHash": "sha256-Q4dqAW9yzl+6iAFqAvxvUSFKLPp2ECNiybMP2G1Lan0=",
         "owner": "au-ts",
         "repo": "systems-ci",
-        "rev": "61229535322a1e2d1dba91920ba8c0647af95164",
+        "rev": "39ada3f51b3f1ae167e05c5ced6946e8f75786e0",
         "type": "github"
       },
       "original": {

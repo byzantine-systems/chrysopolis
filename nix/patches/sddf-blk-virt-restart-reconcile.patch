@@ -69,7 +69,7 @@
      /* Initialise client queues */
      for (int i = 0; i < config.num_clients; i++) {
          blk_virt_config_client_t *client = &config.clients[i];
-@@ -65,6 +120,187 @@
+@@ -65,6 +120,171 @@
      virt_partition_init();
  }
  
@@ -118,38 +118,22 @@
 +        }
 +
 +        /*
-+         * Skip the free list's tail: ialloc_in_use() reports it as in use even
-+         * though it is free.
++         * A full sweep like this one needs ialloc_in_use() to be exact, and as
++         * of sDDF 0.7.0 it is. Before 0.7.0 the predicate was "idxlist[id] ==
++         * -1" and the free list's tail also held -1, so the tail read as in use
++         * and this loop had to skip it by hand: freeing it created a self-loop
++         * in the free list, after which ialloc_alloc handed the same id to two
++         * requests, one client received another's response, and the second
++         * completion tripped the assert in handle_driver(), faulting this PD,
++         * which is top-level and has no fault handler to restart it.
 +         *
-+         * ialloc_in_use(ia, id) is literally "idxlist[id] == -1", and the tail
-+         * element's slot is always -1. ialloc_init sets idxlist[size - 1] = -1
-+         * with tail = size - 1, and ialloc_free links the OLD tail to the id
-+         * being freed ("idxlist[tail] = id; tail = id") without ever clearing the
-+         * NEW tail's own slot, which ialloc_alloc had set to -1 when it handed
-+         * that id out. So "idxlist[tail] == -1" is an invariant.
-+         *
-+         * That false positive is harmless for the only upstream use of the
-+         * predicate, which is asking about an id the caller believes it
-+         * allocated. It is NOT harmless for a full sweep like this one:
-+         * ialloc_free() on the tail executes "idxlist[tail] = tail", a self-loop
-+         * in the free list, and increments num_free past the allocator's size.
-+         * Once the allocator's head walks onto that node, every subsequent
-+         * ialloc_alloc returns the SAME id; two concurrent requests then share one
-+         * reqsbk[] slot, so one client gets the other's response, and the second
-+         * completion's ialloc_free returns -1 and trips the assert in
-+         * handle_driver(). That faults this PD, which is top-level and therefore
-+         * has no fault handler to restart it.
-+         *
-+         * The guard is conditional on !ialloc_full because when the allocator is
-+         * full, head and tail are stale by design (see ialloc_free) and every id
-+         * genuinely is in use, so there is no false positive to skip.
-+         *
-+         * The clean fix belongs upstream in ialloc.h: an unambiguous in-use
-+         * predicate, since any restart or hotplug sweep added there will hit this.
++         * 0.7.0 changed the sentinel: ialloc_init leaves the last slot at
++         * `capacity` and ialloc_free writes "idxlist[id] = ia->capacity", so
++         * only allocated ids hold -1 and the predicate is now unambiguous. The
++         * hand-written guard that used to sit here has been dropped along with
++         * the ialloc_t fields it read (`offset` is gone, `size` now counts
++         * allocated rather than total).
 +         */
-+        if (!ialloc_full(&ialloc) && id == ialloc.tail + ialloc.offset) {
-+            continue;
-+        }
 +
 +        /* Only ids that name a real CLIENT request get a response. An allocated
 +         * id with no reqsbk entry belongs to the virtualiser's own partition
@@ -257,7 +241,7 @@
  static void handle_driver()
  {
      bool client_notify[SDDF_BLK_MAX_CLIENTS];
-@@ -81,6 +317,9 @@
+@@ -81,6 +301,9 @@
  
          reqbk_t reqbk = reqsbk[drv_resp_id];
          err = ialloc_free(&ialloc, drv_resp_id);
@@ -267,7 +251,7 @@
          assert(!err);
  
          switch (reqbk.code) {
-@@ -135,6 +374,38 @@
+@@ -135,6 +358,38 @@
  
      bool driver_notify = false;
      bool client_notify = false;
@@ -306,7 +290,7 @@
      /*
       * In addition to checking the client actually has a request, we check that the
       * we can enqueue the request into the driver as well as that our index state tracking
-@@ -200,6 +471,10 @@
+@@ -200,6 +455,10 @@
          err = ialloc_alloc(&ialloc, &drv_req_id);
          assert(!err);
          reqsbk[drv_req_id] = (reqbk_t) { cli_id, cli_req_id, cli_data_base_vaddr + cli_offset, cli_count, cli_code };
@@ -317,7 +301,7 @@
  
          err = blk_enqueue_req(&drv_h, cli_code, cli_data_base_paddr + cli_offset, drv_block_number, cli_count,
                                drv_req_id);
-@@ -239,6 +514,76 @@
+@@ -239,6 +498,76 @@
  
  void notified(sddf_channel ch)
  {
