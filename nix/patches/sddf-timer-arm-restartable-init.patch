@@ -1,6 +1,6 @@
 --- a/drivers/timer/arm/timer.c
 +++ b/drivers/timer/arm/timer.c
-@@ -128,6 +128,11 @@
+@@ -97,6 +97,11 @@
  
  static uint64_t timeouts[MAX_TIMEOUTS];
  
@@ -12,7 +12,7 @@
  static void process_timeouts(uint64_t curr_time)
  {
      for (int i = 0; i < MAX_TIMEOUTS; i++) {
-@@ -152,10 +157,55 @@
+@@ -120,10 +125,55 @@
  
  void init()
  {
@@ -68,7 +68,7 @@
      for (int i = 0; i < MAX_TIMEOUTS; i++) {
          timeouts[i] = UINT64_MAX;
      }
-@@ -163,11 +213,59 @@
+@@ -131,11 +181,59 @@
      generic_timer_set_compare(UINT64_MAX);
      generic_timer_enable();
      timer_freq = generic_timer_get_freq();
@@ -129,7 +129,7 @@
      sddf_deferred_irq_ack(ch);
  
      generic_timer_set_compare(UINT64_MAX);
-@@ -177,6 +275,13 @@
+@@ -145,6 +243,13 @@
  
  seL4_MessageInfo_t protected(sddf_channel ch, seL4_MessageInfo_t msginfo)
  {
@@ -142,4 +142,4 @@
 +
      switch (seL4_MessageInfo_get_label(msginfo)) {
      case SDDF_TIMER_GET_TIME: {
-         uint64_t time_ns = freq_cycles_and_hz_to_ns(get_ticks(), timer_freq);
+         uint64_t time_ns = ticks_to_ns(get_ticks(), timer_freq);

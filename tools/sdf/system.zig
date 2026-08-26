@@ -235,6 +235,12 @@ pub fn main() !void {
     // (worker_thread_stack_one..four), so we do NOT add a blk client by hand.
     // The libc fs path in beam_server stays dormant until the memfs cutover, for
     // now beam_server only verifies the share/queues are mapped at init.
+    //
+    // Fat.init also emits a fat_config.data blob, which is zero bytes and has no
+    // matching ELF section, so modules/images.nix objcopies 20 of the 21 blobs
+    // written here. That is expected rather than a dropped config: the fatfs PD
+    // takes its runtime configuration from .blk_client_config and
+    // .fs_server_config, and its build-time settings from fat_config.h.
     var fatfs = Pd.create(allocator, "fatfs", "fat.elf", .{ .priority = 96 });
     sdf.addProtectionDomain(&fatfs);
     var fs = try lionsos.FileSystem.Fat.init(allocator, &sdf, &fatfs, &beam_server, &blk_system, .{ .partition = 0 });
@@ -257,7 +263,12 @@ pub fn main() !void {
     sdf.addProtectionDomain(&net_copy);
 
     const net_node = blob.child("virtio_mmio@a000000") orelse return error.NetNodeNotFound;
-    var net_system = sddf.Net.init(allocator, &sdf, net_node, &eth_driver, &net_virt_tx, &net_virt_rx, .{});
+    // The null is sdfgen 0.35.0's optional vswitch PD. A vswitch bridges
+    // several net clients to each other as well as to the NIC; we have exactly
+    // one client (beam_server), so there is nothing to switch between and the
+    // virtualisers talk to it directly. Every vswitch path in sdfgen is gated
+    // on this being non-null or on ClientOptions.vswitch, which we leave false.
+    var net_system = sddf.Net.init(allocator, &sdf, net_node, &eth_driver, &net_virt_tx, &net_virt_rx, null, .{});
     // beam_server is the sole net client. The fixed MAC matches the NIC MAC the
     // virtio driver hardcodes, QEMU filters unicast RX by it, and keeps the
     // generated config deterministic (sdfgen otherwise randomises client MACs).

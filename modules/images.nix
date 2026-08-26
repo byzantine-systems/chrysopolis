@@ -31,6 +31,145 @@
         src = ../tools/sdf;
       };
 
+      # Which gen-sdf config blob lands in which ELF section, as data rather
+      # than as twenty near-identical shell lines. The objcopy loop below is
+      # generated from it, which keeps the mapping readable and greppable and
+      # makes an addition one line instead of one line plus a column-aligned
+      # edit.
+      #
+      # Worth knowing when this list changes: sdfgen writes the blob and an
+      # sDDF/LionsOS C header declares the struct the PD reads it into. If they
+      # disagree, a blob LARGER than its section is a hard objcopy error (that
+      # is how the sdfgen 0.35.0 bump surfaced: net_virt_rx grew 3168 -> 27744
+      # while the consuming sDDF was still at the old pin), but a smaller or
+      # merely reordered one is silent and the PD reads plausible garbage at
+      # init. The structural defence is keeping sdfgen, sDDF and LionsOS on
+      # versions that pin each other (0.35.0 / 0.7.0 / 0.4.0 do), so bump them
+      # as a set rather than individually.
+      #
+      # `elf` is the name in build/, so "beam_server.elf" is whichever ELF the
+      # mkSel4Image caller passed as beamElf (beam_server for the ERTS image,
+      # beam_test for bring-up).
+      configSections = [
+        # Serial and timer: driver device resources, driver/virt configs, and
+        # the beam_server client configs.
+        {
+          section = ".device_resources";
+          blob = "serial_driver_device_resources.data";
+          elf = "serial_driver.elf";
+        }
+        {
+          section = ".serial_driver_config";
+          blob = "serial_driver_config.data";
+          elf = "serial_driver.elf";
+        }
+        {
+          section = ".serial_virt_tx_config";
+          blob = "serial_virt_tx.data";
+          elf = "serial_virt_tx.elf";
+        }
+        {
+          section = ".serial_virt_rx_config";
+          blob = "serial_virt_rx.data";
+          elf = "serial_virt_rx.elf";
+        }
+        {
+          section = ".device_resources";
+          blob = "timer_driver_device_resources.data";
+          elf = "timer_driver.elf";
+        }
+        {
+          section = ".serial_client_config";
+          blob = "serial_client_beam_server.data";
+          elf = "beam_server.elf";
+        }
+        {
+          section = ".timer_client_config";
+          blob = "timer_client_beam_server.data";
+          elf = "beam_server.elf";
+        }
+
+        # Block subsystem: driver device resources + driver/virt configs.
+        {
+          section = ".device_resources";
+          blob = "blk_driver_device_resources.data";
+          elf = "blk_driver.elf";
+        }
+        {
+          section = ".blk_driver_config";
+          blob = "blk_driver.data";
+          elf = "blk_driver.elf";
+        }
+        {
+          section = ".blk_virt_config";
+          blob = "blk_virt.data";
+          elf = "blk_virt.elf";
+        }
+
+        # FAT fs_server: fatfs is the blk client (partition 0) and the fs
+        # server, beam_server is the fs client (libc fs path dormant until the
+        # memfs cutover). gen-sdf also emits a 21st blob, fat_config.data, which
+        # is zero bytes and has no section: the fatfs PD takes its real
+        # configuration from the two below plus a compile-time fat_config.h, so
+        # the 21-vs-20 count is expected rather than a dropped blob.
+        {
+          section = ".blk_client_config";
+          blob = "blk_client_fatfs.data";
+          elf = "fat.elf";
+        }
+        {
+          section = ".fs_server_config";
+          blob = "fs_server_fatfs.data";
+          elf = "fat.elf";
+        }
+        {
+          section = ".fs_client_config";
+          blob = "fs_client_beam_server.data";
+          elf = "beam_server.elf";
+        }
+
+        # Network subsystem: driver device resources + driver/virt/copy configs.
+        {
+          section = ".device_resources";
+          blob = "eth_driver_device_resources.data";
+          elf = "eth_driver.elf";
+        }
+        {
+          section = ".net_driver_config";
+          blob = "net_driver.data";
+          elf = "eth_driver.elf";
+        }
+        {
+          section = ".net_virt_rx_config";
+          blob = "net_virt_rx.data";
+          elf = "net_virt_rx.elf";
+        }
+        {
+          section = ".net_virt_tx_config";
+          blob = "net_virt_tx.data";
+          elf = "net_virt_tx.elf";
+        }
+        {
+          section = ".net_copy_config";
+          blob = "net_copy_net_copy.data";
+          elf = "net_copy.elf";
+        }
+
+        # Socket client: beam_server links the lwIP stack + LionsOS socket
+        # backend, so it carries the net client config and the lib_sddf_lwip
+        # (pbuf pool) config it reads at sddf_lwip_init.
+        {
+          section = ".net_client_config";
+          blob = "net_client_beam_server.data";
+          elf = "beam_server.elf";
+        }
+        {
+          section = ".lib_sddf_lwip_config";
+          blob = "lib_sddf_lwip_config_beam_server.data";
+          elf = "beam_server.elf";
+        }
+      ];
+
       # Synthesize a bootable image from a beam_server ELF: gather every
       # PD ELF into the search path, embed the per-PD config blobs the
       # metaprogram emitted into the matching ELF sections (the LionsOS
@@ -190,39 +329,10 @@
               printf '\072\073\074\075' > pd_restart_channels.bin  # 58 59 60 61
               llvm-objcopy --update-section .pd_restart_config=pd_restart_channels.bin build/beam_server.elf
             ''}
-            oc .device_resources     serial_driver_device_resources.data serial_driver.elf
-            oc .serial_driver_config serial_driver_config.data           serial_driver.elf
-            oc .serial_virt_tx_config serial_virt_tx.data                serial_virt_tx.elf
-            oc .serial_virt_rx_config serial_virt_rx.data                serial_virt_rx.elf
-            oc .device_resources     timer_driver_device_resources.data  timer_driver.elf
-            oc .serial_client_config serial_client_beam_server.data      beam_server.elf
-            oc .timer_client_config  timer_client_beam_server.data       beam_server.elf
-
-            # Block subsystem: driver device resources + driver/virt configs.
-            oc .device_resources     blk_driver_device_resources.data    blk_driver.elf
-            oc .blk_driver_config    blk_driver.data                     blk_driver.elf
-            oc .blk_virt_config      blk_virt.data                       blk_virt.elf
-
-            # FAT fs_server: fatfs is the blk client (partition 0) and the fs
-            # server, beam_server is the fs client (libc fs path dormant until
-            # the memfs cutover).
-            oc .blk_client_config    blk_client_fatfs.data               fat.elf
-            oc .fs_server_config     fs_server_fatfs.data                fat.elf
-            oc .fs_client_config     fs_client_beam_server.data          beam_server.elf
-
-            # Network subsystem: driver device resources + driver/virt/copy
-            # configs.
-            oc .device_resources     eth_driver_device_resources.data    eth_driver.elf
-            oc .net_driver_config    net_driver.data                     eth_driver.elf
-            oc .net_virt_rx_config   net_virt_rx.data                    net_virt_rx.elf
-            oc .net_virt_tx_config   net_virt_tx.data                    net_virt_tx.elf
-            oc .net_copy_config      net_copy_net_copy.data              net_copy.elf
-
-            # Socket client: beam_server links the lwIP stack + LionsOS
-            # socket backend, so it now carries the net client config and
-            # the lib_sddf_lwip (pbuf pool) config it reads at sddf_lwip_init.
-            oc .net_client_config    net_client_beam_server.data           beam_server.elf
-            oc .lib_sddf_lwip_config lib_sddf_lwip_config_beam_server.data  beam_server.elf
+            # Generated from the configSections list above.
+            ${pkgs.lib.concatMapStringsSep "\n            " (
+              c: "oc ${c.section} ${c.blob} ${c.elf}"
+            ) configSections}
 
             ${chryso.microkitSdk}/bin/microkit $cfg/system.sdf \
               --search-path build \

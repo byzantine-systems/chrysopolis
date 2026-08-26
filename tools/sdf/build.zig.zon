@@ -8,11 +8,11 @@
     // sddf Zig packages via its own build.zig.zon. zig2nix resolves the whole
     // tree into a Nix-managed cache (build.zig.zon2json-lock) so the
     // metaprogram builds offline, no hand-vendored Zig deps in flake.nix.
-    // Pinned to the same sdfgen rev as the flake's `sdfgen` input (0.28.1).
+    // Pinned to the same sdfgen rev as the flake's `sdfgen` input (0.35.0).
     .dependencies = .{
         .sdfgen = .{
-            .url = "https://github.com/au-ts/microkit_sdf_gen/archive/13686a373b9189c7b1d778cd749d7d8bbd8a63f6.tar.gz",
-            .hash = "sdfgen-0.0.0-kupG3yryBwDhOJWuex-WQ-VfCr5l_4EdVYYXqItOype_",
+            .url = "https://github.com/au-ts/microkit_sdf_gen/archive/0fdbd7429d2e8eceb599b6b4bca67cbccfaf1001.tar.gz",
+            .hash = "sdfgen-0.0.0-kupG39SDCABayDhvJq4agLW1KCPZdpNqEeo7FvayQPfC",
         },
     },
 

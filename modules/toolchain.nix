@@ -15,10 +15,13 @@
     let
       # 1. Microkit SDK. The upstream seL4/microkit flake exposes only a
       # dev shell, not the tool or libmicrokit. The
-      # prebuilt SDK release (the same mechanism the LionsOS flake uses,
-      # hashes copied from there) ships the statically linked `microkit`
-      # tool plus per-board libmicrokit.a, microkit.ld and loader images.
-      microkitVersion = "2.2.0";
+      # prebuilt SDK release (the same mechanism the LionsOS flake uses)
+      # ships the statically linked `microkit` tool plus per-board
+      # libmicrokit.a, microkit.ld and loader images. The hashes below are
+      # the NAR hashes of each release tarball's stripped root, computed
+      # directly from the 2.3.0 release rather than copied from LionsOS,
+      # which still pins 2.2.0.
+      microkitVersion = "2.3.0";
       microkitPlatform =
         {
           aarch64-darwin = "macos-aarch64";
@@ -32,10 +35,10 @@
         url = "https://github.com/seL4/microkit/releases/download/${microkitVersion}/microkit-sdk-${microkitVersion}-${microkitPlatform}.tar.gz";
         hash =
           {
-            aarch64-darwin = "sha256-UZBEwS3vAQqJe6Xj+13smJRS0RYfoc0uCK7hB8ujbvA=";
-            x86_64-darwin = "sha256-aE2mYToK2ne9vzw6d3YQDzJvhpnI8IHOR9+VqZxwlfY=";
-            aarch64-linux = "sha256-U1hA7Vk/TlSWgV7KiEeG7AkA7t5IR/x89mSE0YHBRNA=";
-            x86_64-linux = "sha256-dxPu2Q01qjKhME6Z6kgG4ASDUe12ytZmh5tCtFva/L0=";
+            aarch64-darwin = "sha256-7WtFeEf/BbcpNLCKtsJDWcypYXHxAAEMElL+p4KsVXc=";
+            x86_64-darwin = "sha256-ob07JxvpiG9DqCB5rdEeDlUYPK2X2wqj1MFJjFbge6k=";
+            aarch64-linux = "sha256-Chv1S0xxaf2ROQ4OcATLorQ9iaNaiXrCresl+AW0iBI=";
+            x86_64-linux = "sha256-95nmS3e2Y0Mu3SC5Yy7lMDabyhEw7vjgwGMJpXAz4Hs=";
           }
           .${system} or (throw "Microkit SDK: no hash for ${system}");
       };
