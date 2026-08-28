@@ -588,6 +588,8 @@ in
       # arrive), and crash() needs QEMU's main loop, which a wedged guest
       # starves. Without this a failure here hangs silently until the global
       # timeout instead of reporting. See the serial test for the same note.
+      # This is not hypothetical for this check: it is exactly what the
+      # post-restart sleep assertion below used to do.
       try:
           load_test_modules(chryso)
 
@@ -619,9 +621,9 @@ in
               ms = int(re.findall(tag + r"\|(\d+)", machine.get_console_log())[-1])
               assert ms >= 500, f"{tag}: timer:sleep(500) returned after only {ms} ms"
 
-          # BASELINE: timeouts work before any restart. Retained even though the
-          # post-restart sleep check is currently disabled (see below), because
-          # it is what proves the image's timer path is healthy to begin with.
+          # BASELINE: timeouts work before any restart. This is what proves the
+          # image's timer path is healthy to begin with, so that a failure of
+          # the post-restart check below can only be about the restart.
           sleep_works(chryso, "slept_before", 120)
           before = monotonic(chryso, "before")
 
@@ -637,28 +639,17 @@ in
           assert after > before, \
               f"monotonic clock did not advance across timer restart ({before} -> {after})"
 
-          # 2. KNOWN GAP, deliberately not asserted: a NEW timeout firing after
-          # the restart. `sleep_works(chryso, "slept_after", 180)` belongs here
-          # and currently HANGS -- timer:sleep/1 never returns after a restart,
-          # though it works immediately before (SLEPT_BEFORE above).
+          # 2. A NEW timeout still fires. The driver's init() discards every
+          # timeout set before the restart, so reaching it at all depends on
+          # the lost-timeout notification the driver sends on the way back up
+          # (TIMER|init|lost-timeout|ch=N, in sddf-timer-arm-restartable-init.patch)
+          # reaching notified(), which clears the slot so the next
+          # beam_timer_arm re-issues it.
           #
-          # This is NOT the driver. Every layer beneath timer:sleep was measured
-          # across a restart and is healthy:
-          #   - driver re-inits fully (init entry+exit prints, freq re-read)
-          #   - its IRQ fires MORE after than before (1298 -> 1819)
-          #   - PPCs are served: GET_TIME and SET_TIMEOUT both flow
-          #   - beam_server RECEIVES every one of those notifications: its count
-          #     matches the driver's IRQ count 1:1 (1298 before / 1820 after),
-          #     so thread_io_wake() pulses parked cothreads ~10x/sec as usual
-          #   - the monotonic clock advances correctly (asserted above)
-          # The break is therefore inside ERTS's own timer handling, above the
-          # sDDF layer this milestone covers. 
-          # Tracked in https://github.com/byzantine-systems/chrysopolis/issues/30
-          # the commented-out diagnostics in the sddf-timer patch and main.c reproduce 
-          # the measurements above.
-          #
-          # The issue's stated criterion for this class -- "restarting
-          # timer_driver recovers the monotonic clock" -- IS met and asserted.
+          # The latest upstream bump in d9d49b1 (Microkit 2.3.0 / seL4 16.0.0
+          # / sDDF 0.7.0 / LionsOS 0.4.0) seems to have fixed it without any
+          # client-side change, no code in src/runtime was touched.
+          sleep_works(chryso, "slept_after", 180)
 
           assert_no_pd_fault(chryso)
       finally:
