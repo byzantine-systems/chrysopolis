@@ -874,10 +874,9 @@ static bool is_rng_device_path(const char *path) {
 /* ---- Test-only driver-restart trigger: /dev/pd-restart.
  *
  * Writing a driver class name to this virtual device asks the Root PD to
- * restart that driver, letting an integration test exercise the RECOVERY path
- * from the Eshell (`file:write_file("/dev/pd-restart", "serial")`). Fault
- * DETECTION is already covered by the crasher PD, so this deliberately does not
- * involve a fault: the target driver is healthy when it is restarted.
+ * restart that healthy driver. Prefixing the class with "fault:" instead asks
+ * Root to resume the real driver at address 0, which produces a genuine seL4
+ * instruction fault before Root restarts it through the ordinary fault path.
  *
  * Gating: this code is compiled into every beam_server (production images reuse
  * the same ELF, only the SDF differs), so it is disabled by DATA rather than by
@@ -889,40 +888,58 @@ static bool is_rng_device_path(const char *path) {
 
 #define PD_RESTART_CH_NONE 0xff
 
-/* One entry per restartable driver class, in the order tools/sdf/system.zig
- * wires the beam_server -> root debug channels. Values are Microkit channel
- * ids; PD_RESTART_CH_NONE means "not wired in this image". Its own section,
- * volatile and used, so the compiler cannot fold the initialiser away and
- * objcopy can overwrite it: the same mechanism as root.c's .restart_config and
- * sDDF's per-PD config blobs. */
-__attribute__((__section__(".pd_restart_config"),
-               used)) volatile uint8_t pd_restart_channels[4] = {
-    PD_RESTART_CH_NONE, /* serial */
-    PD_RESTART_CH_NONE, /* timer */
-    PD_RESTART_CH_NONE, /* blk */
-    PD_RESTART_CH_NONE, /* eth */
+#define PD_RESTART_CLASS_COUNT 4
+#define PD_RESTART_MODE_COUNT 2
+#define PD_RESTART_MODE_HEALTHY 0
+#define PD_RESTART_MODE_FAULT 1
+
+/* One entry per operation and restartable driver class, in the order
+ * tools/sdf/system.zig wires the beam_server -> root test channels. The first
+ * row is healthy restart and the second is fault injection. Values are
+ * Microkit channel ids; PD_RESTART_CH_NONE means "not wired in this image".
+ * Its own section, volatile and used, so the compiler cannot fold the
+ * initialiser away and objcopy can overwrite it: the same mechanism as
+ * root.c's .restart_config and sDDF's per-PD config blobs. */
+__attribute__((__section__(".pd_restart_config"), used)) volatile uint8_t
+    pd_restart_channels[PD_RESTART_MODE_COUNT][PD_RESTART_CLASS_COUNT] = {
+        {
+            PD_RESTART_CH_NONE, /* healthy serial */
+            PD_RESTART_CH_NONE, /* healthy timer */
+            PD_RESTART_CH_NONE, /* healthy blk */
+            PD_RESTART_CH_NONE, /* healthy eth */
+        },
+        {
+            PD_RESTART_CH_NONE, /* fault serial */
+            PD_RESTART_CH_NONE, /* fault timer */
+            PD_RESTART_CH_NONE, /* fault blk */
+            PD_RESTART_CH_NONE, /* fault eth */
+        },
 };
 
 /* Class names accepted as the write payload, indexed to match
  * pd_restart_channels above. */
-static const char *const pd_restart_names[4] = {"serial", "timer", "blk",
-                                                "eth"};
+static const char *const pd_restart_names[PD_RESTART_CLASS_COUNT] = {
+    "serial", "timer", "blk", "eth"};
 
-/* True when the SDF wired at least one debug-restart channel, i.e. this is the
- * restart image. Used to decide whether /dev/pd-restart exists at all, so a
- * production image behaves exactly as if the shim were not compiled in. */
+/* True when the SDF wired at least one restart or fault-injection channel, i.e.
+ * this is the restart image. Used to decide whether /dev/pd-restart exists at
+ * all, so a production image behaves exactly as if the shim were not compiled
+ * in. */
 static bool pd_restart_enabled(void) {
-  for (size_t i = 0; i < 4; i++) {
-    if (pd_restart_channels[i] != PD_RESTART_CH_NONE) {
-      return true;
+  for (size_t mode = 0; mode < PD_RESTART_MODE_COUNT; mode++) {
+    for (size_t class = 0; class < PD_RESTART_CLASS_COUNT; class++) {
+      if (pd_restart_channels[mode][class] != PD_RESTART_CH_NONE) {
+        return true;
+      }
     }
   }
   return false;
 }
 
-/* write callback for the /dev/pd-restart fd. The payload is a driver class name
- * ("serial", "timer", "blk", "eth"); trailing whitespace/newline is ignored so
- * both `file:write_file/2` and an echo-style write work. */
+/* write callback for the /dev/pd-restart fd. The payload is either a driver
+ * class name ("serial", "timer", "blk", "eth") for a healthy restart, or
+ * "fault:<class>" for a genuine driver fault. Trailing whitespace/newline is
+ * ignored so both `file:write_file/2` and an echo-style write work. */
 static ssize_t pd_restart_write(const void *data, size_t count, int fd) {
   (void)fd;
   const char *buf = (const char *)data;
@@ -940,7 +957,17 @@ static ssize_t pd_restart_write(const void *data, size_t count, int fd) {
     count--;
   }
 
-  for (size_t i = 0; i < 4; i++) {
+  size_t mode = PD_RESTART_MODE_HEALTHY;
+  const char fault_prefix[] = "fault:";
+  const size_t fault_prefix_len = sizeof(fault_prefix) - 1;
+  if (count > fault_prefix_len &&
+      strncmp(buf, fault_prefix, fault_prefix_len) == 0) {
+    mode = PD_RESTART_MODE_FAULT;
+    buf += fault_prefix_len;
+    count -= fault_prefix_len;
+  }
+
+  for (size_t i = 0; i < PD_RESTART_CLASS_COUNT; i++) {
     const char *name = pd_restart_names[i];
     size_t len = strlen(name);
     if (count != len || strncmp(buf, name, len) != 0) {
@@ -950,7 +977,7 @@ static ssize_t pd_restart_write(const void *data, size_t count, int fd) {
      * missing channel here means the SDF was generated without
      * --with-restart-debug for this class; notifying anyway would invoke an
      * unbound capability and fault beam_server. */
-    uint8_t ch = pd_restart_channels[i];
+    uint8_t ch = pd_restart_channels[mode][i];
     if (ch == PD_RESTART_CH_NONE) {
       return -ENODEV;
     }
@@ -959,7 +986,8 @@ static ssize_t pd_restart_write(const void *data, size_t count, int fd) {
      * length: the trimmed bytes were genuinely consumed, and returning fewer
      * bytes than were passed in is a short write, which makes a caller like
      * file:write/2 retry with the remainder and trigger a second restart. */
-    printf("PD_RESTART|request|class=%s|ch=%u\n", name, (unsigned)ch);
+    printf("PD_RESTART|request|class=%s|mode=%s|ch=%u\n", name,
+           mode == PD_RESTART_MODE_FAULT ? "fault" : "restart", (unsigned)ch);
     microkit_notify(ch);
     return (ssize_t)written;
   }

@@ -41,7 +41,7 @@
 %% Tag plumbing, shared with the sibling chryso_* modules.
 -export([emit/2, tag/1]).
 %% Assertions.
--export([eval_check/0, alive/1, restart_pd/1]).
+-export([eval_check/0, alive/1, restart_pd/1, fault_pd/1]).
 -export([serial_before/0, serial_after/0, serial_rx/0]).
 
 -define(EBIN, "/lib/chryso_test/ebin").
@@ -148,8 +148,19 @@ alive(Class) ->
 %% the write reached the shim at all.
 -spec restart_pd(serial | timer | blk | eth) -> ok.
 restart_pd(Class) ->
+    request_pd(atom_to_binary(Class, latin1)).
+
+%% Ask Root to resume the real driver at address 0. The resulting instruction
+%% fault is delivered to Root's fault() callback, so this exercises the same
+%% detection, budget and recovery path as a production driver bug.
+-spec fault_pd(serial | timer | blk | eth) -> ok.
+fault_pd(Class) ->
+    request_pd(<<"fault:", (atom_to_binary(Class, latin1))/binary>>).
+
+-spec request_pd(binary()) -> ok.
+request_pd(Request) ->
     {ok, F} = file:open("/dev/pd-restart", [write, raw]),
-    ok = file:write(F, atom_to_binary(Class, latin1)),
+    ok = file:write(F, Request),
     ok = file:close(F).
 
 %% serial-restart-smoke, in order: console output works before the restart,
