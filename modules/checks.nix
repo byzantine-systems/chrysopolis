@@ -22,12 +22,13 @@
         # QEMU checks because it is a pure grep over the generated system
         # description: seconds to run, and it gates on every platform.
         #
-        # The debug-restart channels and the deliberately-faulting crasher PD are
-        # test-only affordances. If either leaked into the production topology,
-        # beam_server could ask root to restart a driver at will, and a PD whose
-        # whole purpose is to fault would be in the shipped system. Both are
-        # gated behind gen-sdf flags that only the restart SDF passes, so this
-        # asserts the gate actually holds rather than trusting it.
+        # The debug restart/fault-injection channels and the deliberately
+        # faulting crasher PD are test-only affordances. If either leaked into
+        # the production topology, beam_server could restart or fault a driver
+        # at will, and a PD whose whole purpose is to fault would be in the
+        # shipped system. Both are gated behind gen-sdf flags that only the
+        # restart SDF passes, so this asserts the gate actually holds rather
+        # than trusting it.
         production-sdf-gate = pkgs.runCommand "chrysopolis-production-sdf-gate" { } ''
           sdf=${config.packages.sdf}/system.sdf
 
@@ -53,7 +54,7 @@
           }
 
           if channel_pair root beam_server "$sdf" >&2; then
-            echo "production SDF has a root <-> beam_server channel (debug-restart leak)" >&2
+            echo "production SDF has a root <-> beam_server channel (restart/fault injection leak)" >&2
             exit 1
           fi
 

@@ -141,6 +141,34 @@ let
               f"timed out waiting for {count}x {regex!r} on console (saw {seen})"
           )
 
+      def assert_fault_sequence(machine, child, count):
+          """Assert one injected driver fault followed the production path.
+
+          `count` selects the Nth injection and genuine fault for this child;
+          the restart record carries that same count as a unique witness that
+          the budget was charged exactly once.
+          """
+          log = machine.get_console_log()
+          injections = [
+              m.start()
+              for m in re.finditer(r"ROOT\|fault-inject\|child=%d" % child, log)
+          ]
+          faults = [
+              m.start()
+              for m in re.finditer(r"ROOT\|fault\|child=%d(?:\||$)" % child, log)
+          ]
+          restart = re.search(
+              r"ROOT\|restart\|child=%d\|count=%d" % (child, count), log
+          )
+          assert len(injections) >= count, \
+              f"child {child}: saw only {len(injections)} fault injections"
+          assert len(faults) >= count, \
+              f"child {child}: saw only {len(faults)} genuine faults"
+          assert restart is not None, \
+              f"child {child}: missing restart count {count}"
+          assert injections[count - 1] < faults[count - 1] < restart.start(), \
+              f"child {child}: fault injection, fault and restart were out of order"
+
       def assert_no_beam_fault(machine):
           """beam_server is a child of root, so ITS faults are reported by root
           and never reach the monitor. assert_no_pd_fault greps MON|ERROR and
@@ -559,6 +587,42 @@ in
     '';
   };
 
+  # Driver fault injection, serial class: force serial_driver to execute at
+  # address 0, require a genuine seL4 fault to reach Root, then reuse the
+  # healthy-restart test's console output and RX recovery assertions.
+  serial-fault-smoke = mkSel4Test {
+    name = "serial-fault-smoke";
+    image = sel4RestartImage;
+    testScript = ''
+      try:
+          load_test_modules(chryso)
+
+          chryso.send_console("chryso_test:serial_before().\r")
+          wait_console(chryso, r"SERIAL_BEFORE\|2", 60)
+
+          chryso.send_console("chryso_test:fault_pd('serial').\r")
+          wait_console(
+              chryso,
+              r"PD_RESTART\|request\|class=serial\|mode=fault",
+              60,
+          )
+          wait_console(chryso, r"ROOT\|fault\|child=0", 60)
+          wait_console(chryso, r"ROOT\|restart\|child=0\|count=1", 60)
+          assert_fault_sequence(chryso, 0, 1)
+
+          chryso.send_console("chryso_test:serial_after().\r")
+          wait_console(chryso, r"SERIAL_AFTER\|42", 120)
+          chryso.send_console("chryso_test:serial_rx().\r")
+          wait_console(chryso, r"SERIAL_RX\|3", 120)
+
+          assert "ROOT|debug-restart|child=0" not in chryso.get_console_log(), \
+              "serial fault test used the healthy debug-restart path"
+          assert_no_pd_fault(chryso)
+      finally:
+          power_off(chryso)
+    '';
+  };
+
   # Driver restart, timer class: restart a HEALTHY timer_driver and assert the
   # monotonic clock survives AND that timeouts still fire afterwards.
   #
@@ -657,6 +721,55 @@ in
     '';
   };
 
+  # Driver fault injection, timer class: enter through Root's real fault()
+  # callback, then require the same clock and timeout recovery as the healthy
+  # restart check above.
+  timer-fault-smoke = mkSel4Test {
+    name = "timer-fault-smoke";
+    image = sel4RestartImage;
+    testScript = ''
+      try:
+          load_test_modules(chryso)
+
+          def monotonic(machine, suffix):
+              tag = "CLOCK_" + suffix.upper()
+              machine.send_console("chryso_clock:now_tagged('" + suffix + "').\r")
+              wait_console(machine, tag + r"\|-?\d+", 60)
+              return int(re.findall(tag + r"\|(-?\d+)", machine.get_console_log())[-1])
+
+          def sleep_works(machine, suffix, timeout):
+              tag = suffix.upper()
+              machine.send_console("chryso_clock:sleep_check('" + suffix + "').\r")
+              wait_console(machine, tag + r"\|\d+", timeout)
+              ms = int(re.findall(tag + r"\|(\d+)", machine.get_console_log())[-1])
+              assert ms >= 500, f"{tag}: timer:sleep(500) returned after only {ms} ms"
+
+          sleep_works(chryso, "slept_before", 120)
+          before = monotonic(chryso, "before")
+
+          chryso.send_console("chryso_test:fault_pd('timer').\r")
+          wait_console(
+              chryso,
+              r"PD_RESTART\|request\|class=timer\|mode=fault",
+              60,
+          )
+          wait_console(chryso, r"ROOT\|fault\|child=1", 60)
+          wait_console(chryso, r"ROOT\|restart\|child=1\|count=1", 60)
+          assert_fault_sequence(chryso, 1, 1)
+
+          after = monotonic(chryso, "after")
+          assert after > before, \
+              f"monotonic clock did not advance across timer fault ({before} -> {after})"
+          sleep_works(chryso, "slept_after", 180)
+
+          assert "ROOT|debug-restart|child=1" not in chryso.get_console_log(), \
+              "timer fault test used the healthy debug-restart path"
+          assert_no_pd_fault(chryso)
+      finally:
+          power_off(chryso)
+    '';
+  };
+
   # Driver restart, block class: restart blk_driver and assert fs reads resume.
   #
   # This is the hardest class, because blk is the only driver whose restart can
@@ -735,6 +848,63 @@ in
     '';
   };
 
+  # Driver fault injection, block class. Exercise both an idle fault and a
+  # fault requested immediately after starting a client read, then require the
+  # same virtualiser reconciliation and filesystem recovery as above.
+  blk-fault-smoke = mkSel4Test {
+    name = "blk-fault-smoke";
+    image = sel4RestartImage;
+    testScript = ''
+      try:
+          load_test_modules(chryso)
+
+          chryso.send_console("chryso_fs:read_tagged('before', lists).\r")
+          wait_console(chryso, r"FS_BEFORE\|\d+", 120)
+
+          # Fault while idle.
+          chryso.send_console("chryso_test:fault_pd('blk').\r")
+          wait_console(
+              chryso,
+              r"PD_RESTART\|request\|class=blk\|mode=fault",
+              60,
+          )
+          wait_console(chryso, r"ROOT\|fault\|child=2", 60)
+          wait_console(chryso, r"ROOT\|restart\|child=2\|count=1", 60)
+          assert_fault_sequence(chryso, 2, 1)
+          wait_console(chryso, r"driver restarted, reconciling", 60)
+          wait_console(chryso, r"driver restarted: failed \d+ client request", 60)
+
+          chryso.send_console("chryso_fs:read_tagged('after_idle', lists).\r")
+          wait_console(chryso, r"FS_AFTER_IDLE\|\d+", 180)
+
+          # Coordinate the reader and fault worker inside one BEAM probe, avoiding
+          # the serial-shell delay that could let a short read finish first.
+          chryso.send_console("chryso_fs:read_during_fault().\r")
+          wait_console(chryso, r"ROOT\|restart\|child=2\|count=2", 60)
+          assert_fault_sequence(chryso, 2, 2)
+          wait_console_count(chryso, r"driver restarted, reconciling", 2, 60)
+          wait_console(chryso, r"FS_INFLIGHT\|(ok|error|EXIT)", 180)
+
+          log = chryso.get_console_log()
+          second_fault = [
+              m.start()
+              for m in re.finditer(r"ROOT\|fault\|child=2(?:\||$)", log)
+          ][1]
+          outcome = re.search(r"FS_INFLIGHT\|(ok|error|EXIT)", log)
+          assert outcome is not None and second_fault < outcome.start(), \
+              "in-flight block client answered before the injected fault"
+
+          chryso.send_console("chryso_fs:read_tagged('after_inflight', lists).\r")
+          wait_console(chryso, r"FS_AFTER_INFLIGHT\|\d+", 180)
+
+          assert "ROOT|debug-restart|child=2" not in chryso.get_console_log(), \
+              "block fault test used the healthy debug-restart path"
+          assert_no_pd_fault(chryso)
+      finally:
+          power_off(chryso)
+    '';
+  };
+
   # Driver give-up, blk class: spend the driver's ENTIRE restart budget and
   # assert the system degrades instead of wedging.
   #
@@ -748,9 +918,9 @@ in
   # observable difference between "handled" and "unhandled" here is the entire
   # system surviving.
   #
-  # The test drives give-up through the debug-restart channel rather than by
-  # faulting the driver, for the same reason the other per-class tests do: it
-  # isolates recovery from detection, which restart-smoke already covers.
+  # Every budget slot is spent through a genuine driver fault. This proves the
+  # injected path charges the same production budget as an unplanned fault and
+  # that faults alone converge on give-up.
   blk-giveup-smoke = mkSel4Test {
     name = "blk-giveup-smoke";
     image = sel4RestartImage;
@@ -760,9 +930,9 @@ in
       # guest is very likely wedged, and both crash() and release() need QEMU's
       # main loop that a wedged guest starves. See serial-restart-smoke.
       try:
-          # Loading the probes HERE, before the budget is spent, this test ends 
+          # Loading the probes HERE, before the budget is spent, this test ends
           # with the block device stopped for good, and a probe not already in
-          # memory by then could never be loaded. 
+          # memory by then could never be loaded.
           # Once loaded they keep reporting, which is exactly what lets them
           # observe the failure below. code:which/1 only resolves a path string,
           # so the reads stay genuine disk round trips either way.
@@ -800,15 +970,16 @@ in
               "baseline fs read failed before any restart"
 
           # Spend the budget. ROOT_RESTART_BUDGET is 8 in src/runtime/root.c, so
-          # requests 1..8 each restart the driver and the 9th finds the budget
+          # faults 1..8 each restart the driver and the 9th finds the budget
           # spent and stops it. Each restart is awaited before the next is asked
           # for: overlapping them would leave the driver re-initialising while
           # the next request arrives, which is a different scenario (and one the
           # in-flight half of blk-restart-smoke already covers).
           budget = 8
           for n in range(1, budget + 1):
-              chryso.send_console("chryso_test:restart_pd('blk').\r")
-              wait_console(chryso, r"ROOT\|debug-restart\|child=2\|count=%d" % n, 120)
+              chryso.send_console("chryso_test:fault_pd('blk').\r")
+              wait_console(chryso, r"ROOT\|restart\|child=2\|count=%d" % n, 120)
+              assert_fault_sequence(chryso, 2, n)
 
           # The driver still works while the budget lasts: give-up must be the
           # budget running out, not the driver having broken along the way.
@@ -816,8 +987,25 @@ in
               "fs reads stopped working before the budget was even spent"
 
           # One more request: nothing left to spend, so root stops it for good.
-          chryso.send_console("chryso_test:restart_pd('blk').\r")
+          chryso.send_console("chryso_test:fault_pd('blk').\r")
+          wait_console_count(chryso, r"ROOT\|fault\|child=2(?:\||$)", budget + 1, 120)
           wait_console(chryso, r"ROOT\|giveup\|child=2\|reason=budget-exhausted", 120)
+
+          log = chryso.get_console_log()
+          injections = [
+              m.start()
+              for m in re.finditer(r"ROOT\|fault-inject\|child=2", log)
+          ]
+          faults = [m.start() for m in re.finditer(r"ROOT\|fault\|child=2(?:\||$)", log)]
+          giveup = log.find("ROOT|giveup|child=2|reason=budget-exhausted")
+          assert len(injections) == budget + 1, \
+              f"expected {budget + 1} block fault injections, saw {len(injections)}"
+          assert len(faults) == budget + 1, \
+              f"expected {budget + 1} genuine block faults, saw {len(faults)}"
+          assert injections[-1] < faults[-1] < giveup, \
+              "final block fault and give-up were out of order"
+          assert "ROOT|debug-restart|child=2" not in log, \
+              "block give-up used the healthy debug-restart path"
 
           # THE POINT OF THE TEST. Root's give-up reached the virtualiser over
           # the production root -> blk_virt channel, and it reconciled rather
@@ -1118,6 +1306,78 @@ in
 
           # A distinct host port per round trip: reusing one would let slirp or
           # TIME_WAIT state make a later attempt succeed for the wrong reason.
+          assert_no_pd_fault(chryso)
+      finally:
+          power_off(chryso)
+    '';
+  };
+
+  # Driver fault injection, network class. Fault the real eth_driver twice so
+  # the existing reclaim requirement is strong enough to exhaust the pool if
+  # buffers are stranded, and prove the full guest-to-host TCP path each time.
+  net-fault-smoke = mkSel4Test {
+    name = "net-fault-smoke";
+    image = sel4RestartImage;
+    testScript = ''
+      import socket
+
+      def tcp_ping(machine, tag, port):
+          try:
+              tcp_ping_strict(machine, tag, port)
+          except AssertionError:
+              net_postmortem(machine, tag, port)
+              raise
+
+      def tcp_ping_strict(machine, tag, port):
+          expected = tag.upper().encode()
+          srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          srv.bind(("127.0.0.1", port))
+          srv.listen(1)
+          srv.settimeout(180)
+          try:
+              machine.send_console(
+                  "chryso_net:ping('" + tag + "', " + str(port) + ").\r"
+              )
+              try:
+                  conn, _addr = srv.accept()
+              except TimeoutError:
+                  raise AssertionError(f"{tag}: guest never connected") from None
+              conn.settimeout(60)
+              got = recv_exactly(conn, len(expected), tag)
+              conn.close()
+          finally:
+              srv.close()
+          assert got == expected, f"{tag}: host listener received {got!r}"
+          wait_console(machine, r"NET_OK\|" + tag.upper(), 60)
+
+      def fault_eth(machine, expect_count):
+          machine.send_console("chryso_test:fault_pd('eth').\r")
+          wait_console(
+              machine,
+              r"ROOT\|restart\|child=3\|count=" + str(expect_count),
+              60,
+          )
+          assert_fault_sequence(machine, 3, expect_count)
+          wait_console_count(
+              machine,
+              r"ETH\|restart\|reclaimed\|rx=\d+\|tx=\d+",
+              expect_count,
+              60,
+          )
+
+      try:
+          wait_console(chryso, r"SOCKET_SMOKE\|DHCP:", 300)
+          load_test_modules(chryso)
+
+          tcp_ping(chryso, "before", 5580)
+          fault_eth(chryso, 1)
+          tcp_ping(chryso, "after1", 5581)
+          fault_eth(chryso, 2)
+          tcp_ping(chryso, "after2", 5582)
+
+          assert "ROOT|debug-restart|child=3" not in chryso.get_console_log(), \
+              "network fault test used the healthy debug-restart path"
           assert_no_pd_fault(chryso)
       finally:
           power_off(chryso)

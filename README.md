@@ -91,7 +91,8 @@ Crash and restart:
 - **`restart-smoke`**: Root catches a deliberately faulting child, restarts it until the budget is spent, then gives up.
 - **`beam-restart-smoke`**: An ERTS exit (`init:stop()`, then `erlang:halt(3)`) restarts `beam_server` to a fresh `1>`, carrying the exit code to Root, with none of the previous VM's state surviving.
 - **`serial-restart-smoke`**, **`timer-restart-smoke`**, **`blk-restart-smoke`**, **`net-restart-smoke`**: A healthy driver of each class is restarted on request and its subsystem must keep working.
-- **`blk-giveup-smoke`**: The restart budget is spent, Root stops the block driver for good, and the system must degrade rather than wedge.
+- **`serial-fault-smoke`**, **`timer-fault-smoke`**, **`blk-fault-smoke`**, **`net-fault-smoke`**: Each real driver is forced to take a genuine seL4 fault, Root catches and restarts it, and its subsystem must recover. The block case includes a client request in flight.
+- **`blk-giveup-smoke`**: Genuine block-driver faults spend the entire restart budget, Root stops the driver for good, and the system must degrade rather than wedge.
 
 Pure (non-QEMU): 
 - **`production-sdf-gate`** asserts the test-only restart affordances stay out of the shipped topology.

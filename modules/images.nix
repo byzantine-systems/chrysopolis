@@ -315,18 +315,21 @@
 
             ${pkgs.lib.optionalString restartDebug ''
               # Test-only /dev/pd-restart trigger: patch the beam_server-side
-              # channel ids of the beam_server -> root debug-restart channels
+              # channel ids of the beam_server -> root debug channels
               # into beam_server.elf's .pd_restart_config (src/runtime/bringup.c
-              # reads them there). One byte per driver class, in the order
-              # serial, timer, blk, eth, matching BOTH the pinned ids in
-              # tools/sdf/system.zig and the pd_restart_channels[] array.
+              # reads them there). The first four bytes are healthy restart
+              # channels in serial, timer, blk, eth order; the next four are
+              # fault-injection channels in the same class order. This matches
+              # BOTH the pinned ids in tools/sdf/system.zig and the
+              # pd_restart_channels[][] array.
               #
               # The shim is compiled into every beam_server (production images
               # reuse the same ELF), so this patch is what ENABLES it: without
               # it the array keeps its 0xff "not wired" initialiser and
               # /dev/pd-restart reports ENOENT. That is why the ids live in data
               # rather than behind a build flag.
-              printf '\072\073\074\075' > pd_restart_channels.bin  # 58 59 60 61
+              # healthy: 58 59 60 61; fault: 54 55 56 57
+              printf '\072\073\074\075\066\067\070\071' > pd_restart_channels.bin
               llvm-objcopy --update-section .pd_restart_config=pd_restart_channels.bin build/beam_server.elf
             ''}
             # Generated from the configSections list above.
@@ -359,7 +362,7 @@
         # Same topology plus the test-only restart scaffolding:
         #   --with-crasher       the faulting child of root (fault DETECTION),
         #   --with-restart-debug the beam_server -> root channels that let a test
-        #                        restart a HEALTHY driver (fault RECOVERY).
+        #                        restart a healthy driver or fault a real one.
         # Both live in this one variant so the restart tests need a single extra
         # image rather than one per concern.
         sdf-restart = pkgs.runCommand "chrysopolis-system-sdf-restart" { } ''
@@ -435,6 +438,14 @@
                 ${config.packages.test-modules}/lib/erlang/lib/chryso_test-*/ebin/* \
                 ::/lib/chryso_test/ebin/
 
+              # A large inert read target for blk-fault-smoke. Small BEAM files
+              # can cross the virtio block path before the coordinated fault
+              # worker gets scheduled, leaving no driver request to reconcile.
+              # This file keeps the guest client read pending long enough for
+              # the injected fault to land, and is never loaded or executed.
+              truncate -s 16M fault-inflight.bin
+              mcopy -i $part fault-inflight.bin ::/fault-inflight.bin
+
               # Boot script: the clean boot (kernel + stdlib) as start.boot.
               cp "$otp/releases/$rel/start_clean.boot" start.boot
               mcopy -i $part start.boot "::/releases/$rel/start.boot"
@@ -468,9 +479,9 @@
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
         };
 
-        # ERTS image plus the crasher child of root: used only by the
-        # restart-smoke test to exercise fault -> restart -> give-up while the
-        # system boots through to the Eshell.
+        # ERTS image plus test-only control channels and the crasher child of
+        # root. The restart/fault checks share this image so each boots the same
+        # topology while selecting how the target driver goes down.
         restart-image = mkSel4Image {
           imgName = "sel4-beam-restart-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";

@@ -52,12 +52,11 @@ pub fn main() !void {
     // child of root, for the restart-smoke fault-injection test. Off by default,
     // so production images never carry it.
     var with_crasher = false;
-    // Optional test-only flag: wire the beam_server -> root debug-restart
-    // channels, one per restartable driver class. They let a test ask root to
-    // restart a healthy driver on demand (via the /dev/pd-restart shim in
-    // src/runtime/bringup.c) WITHOUT injecting a fault: fault detection is
-    // already covered by the crasher, what the driver-restart tests need is the
-    // recovery path. Off by default, so production images carry no such channel.
+    // Optional test-only flag: wire the beam_server -> root debug channels,
+    // two per restartable driver class. One asks root to restart a healthy
+    // driver. The other asks root to resume the real driver at address 0 so it
+    // takes a genuine instruction fault. Off by default, so production images
+    // carry no such channel.
     var with_restart_debug = false;
     for (args[4..]) |arg| {
         if (std.mem.eql(u8, arg, "--with-crasher")) with_crasher = true;
@@ -338,14 +337,16 @@ pub fn main() !void {
         .pd_b_notify = false,
     }));
 
-    // Test-only debug-restart channels (see the --with-restart-debug comment at
-    // the top). One channel per restartable driver class so the notification
-    // itself carries the target: a Microkit notify has no payload, so a single
-    // channel would need a shared memory word to say WHICH driver to restart.
+    // Test-only restart and fault-injection channels (see the
+    // --with-restart-debug comment at the top). Two channels per restartable
+    // driver class let the notification carry both the target and operation: a
+    // Microkit notify has no payload, so a single channel would need a shared
+    // memory command word.
     //
-    // Both ends are pinned. Root's ids are 0..3 (it has no other channels) and
-    // map 1:1 onto ROOT_DEBUG_CH_* in src/runtime/root.c. beam_server's ids are
-    // pinned HIGH (58..61) and out of the way of the serial/timer/net/fs
+    // Both ends are pinned. Root's ids are 0..7 and map onto the healthy
+    // ROOT_DEBUG_CH_* and fault ROOT_FAULT_CH_* groups in src/runtime/root.c.
+    // beam_server's ids are
+    // pinned HIGH (54..61) and out of the way of the serial/timer/net/fs
     // channels sdfgen allocates from 0 upwards: beam_server learns every other
     // channel id from a serialised config blob, but these have no blob, so
     // src/runtime/bringup.c reads them from the .pd_restart_config section that
@@ -356,10 +357,14 @@ pub fn main() !void {
     // helpers allocated above.
     if (with_restart_debug) {
         const debug_channels = [_]struct { root_id: u8, beam_id: u8 }{
-            .{ .root_id = 0, .beam_id = 58 }, // serial
-            .{ .root_id = 1, .beam_id = 59 }, // timer
-            .{ .root_id = 2, .beam_id = 60 }, // blk
-            .{ .root_id = 3, .beam_id = 61 }, // eth
+            .{ .root_id = 0, .beam_id = 58 }, // healthy serial
+            .{ .root_id = 1, .beam_id = 59 }, // healthy timer
+            .{ .root_id = 2, .beam_id = 60 }, // healthy blk
+            .{ .root_id = 3, .beam_id = 61 }, // healthy eth
+            .{ .root_id = 4, .beam_id = 54 }, // fault serial
+            .{ .root_id = 5, .beam_id = 55 }, // fault timer
+            .{ .root_id = 6, .beam_id = 56 }, // fault blk
+            .{ .root_id = 7, .beam_id = 57 }, // fault eth
         };
         for (debug_channels) |c| {
             sdf.addChannel(try Channel.create(&root, &beam_server, .{

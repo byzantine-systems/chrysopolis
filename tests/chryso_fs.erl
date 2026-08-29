@@ -17,7 +17,7 @@
 %% device they probe is gone.
 -module(chryso_fs).
 
--export([read_tagged/2, read_status/2, read_inflight/1]).
+-export([read_tagged/2, read_status/2, read_inflight/1, read_during_fault/0]).
 
 %% blk-restart-smoke: report the SIZE read, so a successful round trip is
 %% proved by a number rather than by the mere absence of an error.
@@ -44,5 +44,32 @@ read_status(Tag, Module) ->
 read_inflight(Module) ->
     spawn(fun() ->
         R = (catch file:read_file(code:which(Module))),
+        chryso_test:emit("FS_INFLIGHT", element(1, R))
+    end).
+
+%% blk-fault-smoke: remove the serial-shell delay between starting the client
+%% read and asking Root to fault blk_driver. The reader wakes a fault worker
+%% immediately before entering file:read_file/1; that worker waits a bounded
+%% 100 ms so the async transfer is established before it writes the test-only
+%% fault command.
+%% The integration test requires the genuine fault and restart records to
+%% precede FS_INFLIGHT, proving the client call receives its answer only after
+%% the fault rather than completing before the injection command is processed.
+-spec read_during_fault() -> pid().
+read_during_fault() ->
+    Fault = spawn(fun() ->
+        receive
+            fault ->
+                %% Let the reader enter the async file path before waking Root.
+                %% The 16 MiB transfer remains active well beyond this delay
+                %% under QEMU, while a bounded timer avoids an uncoordinated
+                %% race between two immediately runnable BEAM processes.
+                timer:sleep(100),
+                chryso_test:fault_pd(blk)
+        end
+    end),
+    spawn(fun() ->
+        Fault ! fault,
+        R = (catch file:read_file("/fault-inflight.bin")),
         chryso_test:emit("FS_INFLIGHT", element(1, R))
     end).
