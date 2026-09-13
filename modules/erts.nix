@@ -1,8 +1,8 @@
 # packages.liberts, the cross-compiled ERTS emulator, archived as liberts.a.
 #
 # Only the emulator (erts/emulator/) is built, the OTP standard
-# library is not needed until the BEAM bytecode is loaded from
-# romfs. The source tarball is inherited from pkgs.erlang so
+# library is not needed until the BEAM bytecode is loaded from disk.
+# The source tarball is inherited from pkgs.erlang so
 # its hash is already pinned in flake.lock.
 #
 # The preloaded .beam files (init, erlang, erts_internal, ...) ship

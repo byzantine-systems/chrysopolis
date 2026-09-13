@@ -13,11 +13,6 @@
 
     treefmt-nix.url = "github:numtide/treefmt-nix";
 
-    nix-gleam = {
-      url = "github:arnarg/nix-gleam";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     nix2container = {
       url = "github:nlewo/nix2container";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -121,7 +116,7 @@
   #   toolchain.nix  Microkit SDK, cross/LLVM toolchains, zig2nix env
   #   lionsos.nix    LionsOS source reconstruction (+ libc patch), musl libc.a
   #   erts.nix       the cross-compiled ERTS emulator archive (liberts.a)
-  #   beam.nix       root build.zig artifacts, the Gleam app, romfs
+  #   beam.nix       root build.zig artifacts and Erlang test probes
   #   images.nix     gen-sdf, the FAT disk, the bootable seL4 images
   #   checks.nix     the QEMU integration tests (tests.nix)
   #   devshell.nix   treefmt + the devenv shell (run-sel4)

@@ -324,26 +324,6 @@
         "type": "github"
       }
     },
-    "nix-gleam": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1782483386,
-        "narHash": "sha256-zihWKNVDxH1eNWiKshseP7PRuJUNs+i/qwu/HMHQ2Z0=",
-        "owner": "arnarg",
-        "repo": "nix-gleam",
-        "rev": "347afd30f4d2701d16913f285f430731343cd96f",
-        "type": "github"
-      },
-      "original": {
-        "owner": "arnarg",
-        "repo": "nix-gleam",
-        "type": "github"
-      }
-    },
     "nix2container": {
       "inputs": {
         "nixpkgs": [
@@ -462,7 +442,6 @@
         "lionsos": "lionsos",
         "mk-shell-bin": "mk-shell-bin",
         "musllibc": "musllibc",
-        "nix-gleam": "nix-gleam",
         "nix2container": "nix2container",
         "nixpkgs": "nixpkgs_2",
         "sddf": "sddf",
