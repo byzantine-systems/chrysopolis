@@ -8,9 +8,15 @@
  */
 #pragma once
 
+#include <limits.h>
 #include <sddf/util/printf.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+/* lwIP uses SSIZE_MAX to detect whether libc already supplies ssize_t. */
+#ifndef SSIZE_MAX
+#define SSIZE_MAX LONG_MAX
+#endif
 
 typedef uint8_t u8_t;
 typedef uint16_t u16_t;

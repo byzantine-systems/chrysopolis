@@ -21,16 +21,18 @@
  * produce randomness (a property worth keeping even now that init() returns to
  * the event loop and blocking waits exist).
  */
-#pragma once
+#ifndef CHRYSOPOLIS_RUNTIME_RNG_H
+#define CHRYSOPOLIS_RUNTIME_RNG_H 1
 
 #include <stddef.h>
 #include <stdint.h>
 
 /*
- * An entropy provider. collect() fills up to len bytes of raw entropy into buf
- * and returns the number of bytes actually produced. A return of 0 means
- * "nothing available this round" and rng_reseed_from() treats it as a no-op
- * (skip the reseed, the DRBG keeps producing from its current key).
+ * An entropy provider borrowed by rng_reseed_from() for one synchronous call.
+ * name may be NULL and is not secret. collect must be non-NULL, fills at most
+ * len bytes of raw entropy into non-NULL buf, and returns a value in [0, len].
+ * A return of 0 means "nothing available this round" and is a no-op.
+ * Providers must not log raw entropy or retain buf.
  */
 typedef struct {
   const char *name;
@@ -42,17 +44,21 @@ typedef struct {
  * on health-check failure), srand() the libc PRNG so stray rand() users stop
  * being boot-deterministic, derive the per-boot CLOCK_REALTIME offset, and
  * print one boot line: "RNG|source=<jitter|fallback>|fp=<8-hex>". Call once,
- * after bringup_register_syscalls() (so the timer client config is valid).
+ * after bringup_register_syscalls() and before any generation or reseed call.
+ * The fingerprint is derived output; seeds, raw entropy, DRBG state and random
+ * output must never be logged.
  */
 void rng_init(void);
 
-/* Fill buf with len cryptographically-strong bytes. Never blocks, never EOFs,
- * never returns short. Safe to call from any syscall shim on this PD. */
+/* Fill buf with len cryptographically-strong bytes. buf must be non-NULL when
+ * len is non-zero and rng_init() must already have completed. Never blocks,
+ * never EOFs, never returns short, and does not retain buf. */
 void rng_fill(uint8_t *buf, size_t len);
 
-/* Fold a provider's entropy into the DRBG key and rekey. A provider that
- * returns 0 bytes is a no-op. Not used on the "software-only" path, it
- * is the seam the virtio-rng / RNDR reseed providers plug into. */
+/* Fold a borrowed provider's entropy into the DRBG key and rekey. NULL, a NULL
+ * collect callback, a call before rng_init(), or a provider returning 0 bytes
+ * is a no-op. The call is synchronous and neither retains the provider nor
+ * blocks beyond the provider's collect callback. */
 void rng_reseed_from(const rng_provider_t *provider);
 
 /*
@@ -75,3 +81,5 @@ extern uint32_t rng_realtime_offset_sec;
  * in, which wedged ERTS boot.
  */
 #define RNG_REALTIME_BASE_EPOCH 1767225600ull
+
+#endif

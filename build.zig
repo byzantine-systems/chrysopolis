@@ -1,5 +1,33 @@
 const std = @import("std");
 
+const first_party_cflags = [_][]const u8{
+    "-std=c23",
+    "-ffreestanding",
+    "-O2",
+    "-g",
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+    // The LionsOS libc boundary intentionally exposes POSIX clocks and env.
+    "-D_POSIX_C_SOURCE=200809L",
+    // seL4's public headers use GNU's bare spelling even in otherwise
+    // standards-compatible declarations. Keep that extension at the boundary.
+    "-Dasm=__asm__",
+};
+const diagnostic_cflags = first_party_cflags ++ [_][]const u8{"-Werror"};
+const runtime_contract_diagnostic_cflags = diagnostic_cflags ++ [_][]const u8{
+    "-Wmissing-prototypes",
+    "-Wmissing-variable-declarations",
+};
+
+fn firstPartyCFlags(diagnostic: bool) []const []const u8 {
+    return if (diagnostic) &diagnostic_cflags else &first_party_cflags;
+}
+
+fn runtimeCFlags(diagnostic: bool) []const []const u8 {
+    return if (diagnostic) &runtime_contract_diagnostic_cflags else &first_party_cflags;
+}
+
 // One root build.zig for every aarch64 cross artifact the Chrysopolis image is
 // made of. It consolidates what used to be three separate Zig packages, each
 // with its own build.zig and Nix derivation:
@@ -121,7 +149,7 @@ fn addPd(
     });
     pd.addObjectFile(libmicrokit);
     pd.setLinkerScript(libmicrokit_linker_script);
-    pd.root_module.addIncludePath(libmicrokit_include);
+    pd.root_module.addSystemIncludePath(libmicrokit_include);
     return pd;
 }
 
@@ -399,6 +427,10 @@ fn addLwipLib(
 pub fn build(b: *std.Build) void {
     const target = crossTarget(b);
     const optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const diagnostic = b.option(bool, "diagnostic", "build first-party C with ReleaseSafe and warnings as errors") orelse false;
+    const first_party_optimize: std.builtin.OptimizeMode = if (diagnostic) .ReleaseSafe else .ReleaseFast;
+    const first_party_flags = firstPartyCFlags(diagnostic);
+    const runtime_flags = runtimeCFlags(diagnostic);
 
     // Nix store paths supplied by the derivation (see modules/beam.nix).
     const board_dir = b.option([]const u8, "board-dir", "Microkit board dir ($MICROKIT_SDK/board/<board>/<config>)") orelse @panic("set -Dboard-dir");
@@ -574,8 +606,8 @@ pub fn build(b: *std.Build) void {
     // its restart entry point from the .restart_config section that
     // modules/images.nix objcopies in per board, falling back to the 0x200000
     // literal compiled in here for a bare `zig build`.
-    const root_pd = addPd(b, "root.elf", target, optimize);
-    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/root.c") });
+    const root_pd = addPd(b, "root.elf", target, first_party_optimize);
+    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/root.c"), .flags = first_party_flags });
     // Same reason the beam exe and fat.elf disable it: modules/images.nix patches
     // the per-board child entry point into .restart_config with
     // objcopy --update-section, which fails outright if the linker garbage
@@ -584,21 +616,20 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(root_pd);
 
     if (with_crasher) {
-        const crasher_pd = addPd(b, "crasher.elf", target, optimize);
-        crasher_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/crasher.c") });
+        const crasher_pd = addPd(b, "crasher.elf", target, first_party_optimize);
+        crasher_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/crasher.c"), .flags = first_party_flags });
         b.installArtifact(crasher_pd);
     }
 
-    // === beam_server PD glue. Compile main/bringup/process into ONE object
+    // === beam_server PD glue. Compile the first-party runtime into ONE object
     // (see addBeamExe for why the object, not module C). -O2 is pinned via
-    // cflags, ReleaseFast keeps Zig from adding safety/UBSan instrumentation to
-    // the C compile. File I/O goes to the FAT fs_server (no embedded boot data).
-    const cflags = &[_][]const u8{ "-ffreestanding", "-O2", "-g", "-Wall" };
+    // cflags. Production uses ReleaseFast; -Ddiagnostic uses ReleaseSafe and
+    // -Werror. File I/O goes to the FAT fs_server (no embedded boot data).
     const glue = b.addObject(.{
         .name = "beam_glue",
         .root_module = b.createModule(.{
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = first_party_optimize,
             // Microkit patches setvar_vaddr (beam_heap_start) and objcopy
             // updates the config sections, both via the symbol table.
             .strip = false,
@@ -611,26 +642,50 @@ pub fn build(b: *std.Build) void {
         // already defined by this object the lazily-linked libmicrokit archive
         // never extracts it and there is no duplicate symbol. It also defines
         // _reset, the entry root resumes this PD at.
-        .files = &.{ "main.c", "bringup.c", "process.c", "rng.c", "restart.c" },
-        .flags = cflags,
+        .files = &.{ "c23_probe.c", "main.c", "bringup.c", "process.c", "rng.c", "restart.c" },
+        .flags = runtime_flags,
     });
 
+    if (diagnostic) {
+        // Compile each internal contract header alone and include it twice.
+        // This rejects hidden include-order dependencies and missing guards.
+        const runtime_contract_headers = [_][]const u8{
+            "runtime_boot.h",
+            "runtime_config.h",
+            "runtime_timer.h",
+            "runtime_wait.h",
+            "runtime_cothread.h",
+            "runtime_network.h",
+            "runtime_restart.h",
+            "rng.h",
+        };
+        for (runtime_contract_headers) |header| {
+            const probe_flags = b.allocator.alloc([]const u8, runtime_flags.len + 1) catch @panic("OOM");
+            @memcpy(probe_flags[0..runtime_flags.len], runtime_flags);
+            probe_flags[runtime_flags.len] = b.fmt("-DRUNTIME_CONTRACT_HEADER=\"{s}\"", .{header});
+            glue.root_module.addCSourceFile(.{
+                .file = b.path("src/runtime/runtime_contract_header_probe.c"),
+                .flags = probe_flags,
+            });
+        }
+    }
+
     glue.root_module.addIncludePath(b.path("src/runtime")); // libmicrokitco_opts.h
-    glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });
-    glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
+    glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });
+    glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
     // libmicrokitco.h + libhostedqueue/ (process.c's cothread layer), straight
     // from the libmicrokitco source tree (no installed include/ needed).
-    glue.root_module.addIncludePath(.{ .cwd_relative = libmicrokitco_src });
-    glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
-    glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{sddf}) });
-    glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/microkit", .{sddf}) });
-    glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lionsos_src}) });
+    glue.root_module.addSystemIncludePath(.{ .cwd_relative = libmicrokitco_src });
+    glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
+    glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{sddf}) });
+    glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include/microkit", .{sddf}) });
+    glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lionsos_src}) });
     // lwIP headers: main.c includes <sddf/network/lib_sddf_lwip.h>, which pulls
     // lwip/pbuf.h -> lwipopts.h + arch/cc.h from our vendored lwip_include.
-    glue.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
+    glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
     glue.root_module.addIncludePath(b.path("src/runtime/lwip_include"));
     // <bearssl.h> for rng.c's HMAC-DRBG calls.
-    glue.root_module.addIncludePath(bearssl_dep.path("inc"));
+    glue.root_module.addSystemIncludePath(bearssl_dep.path("inc"));
 
     // Prebuilt archives are linked lazily (pulled on demand), the way the
     // Makefile's `-lmicrokit -lc` and ld --start-group did, so members are

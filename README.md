@@ -28,7 +28,7 @@ Chrysopolis aims to run the BEAM on the [seL4 microkernel](https://sel4.systems/
 ```mermaid
 flowchart LR
     %% Nodes
-    App["Gleam / Erlang Application"]
+    App["Erlang/OTP Application"]
     ERTS["ERTS 28.5<br/>(scheduler, GC, code loader)"]
     Runtime["Runtime Adapter<br/>(pthread -> cothreads, syscall stubs, FAT fs client)"]
     LionsOS["LionsOS<br/>(musl libc, sDDF serial/timer drivers, libmicrokitco)"]

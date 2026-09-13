@@ -118,7 +118,10 @@
 
       }
       // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
-        import ../tests.nix {
+        {
+          c23-diagnostic = config.packages.beam-zig-diagnostic;
+        }
+        // import ../tests.nix {
           inherit pkgs;
           sel4SystemImage = config.packages.default;
           sel4TestImage = config.packages.test-image;

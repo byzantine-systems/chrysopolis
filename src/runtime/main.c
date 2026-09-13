@@ -8,10 +8,18 @@
  * serial TX/RX queue handles, then hands the beam_heap region to libc_init()
  * as the malloc arena and runs the BEAM.
  */
+#include "rng.h"
+#include "runtime_boot.h"
+#include "runtime_config.h"
+#include "runtime_cothread.h"
+#include "runtime_network.h"
+#include "runtime_restart.h"
+#include "runtime_timer.h"
+#include "runtime_wait.h"
+
 #include <lions/posix/posix.h>
 
 #include <libmicrokitco.h>
-#include <lions/fs/config.h>
 #include <lions/fs/helpers.h>
 #include <lions/fs/protocol.h>
 #include <microkit.h>
@@ -67,7 +75,6 @@ char *fs_share;
  * libc_init(&socket_config, ...) enables the socket syscalls. */
 net_queue_handle_t net_rx_handle;
 net_queue_handle_t net_tx_handle;
-extern libc_socket_config_t socket_config;
 
 /* net_enabled: net_config's magic validated (the SDF wired the net client).
  * lwip_up: sddf_lwip_init has run, so notified() may pump the stack (it must
@@ -88,26 +95,6 @@ static bool dhcp_ready;
  * replaces the old hand-rolled mmap.c bump allocator. */
 uintptr_t beam_heap_start;
 #define BEAM_HEAP_SIZE 0x20000000
-
-extern void erl_start(int argc, char **argv) __attribute__((weak));
-extern void beam_process_external_events(microkit_channel ch)
-    __attribute__((weak));
-
-extern void bringup_register_syscalls(void);
-extern void rng_init(void);
-extern void thread_init(void);
-extern void thread_notified(microkit_channel ch);
-extern void thread_run_cothreads(void);
-extern void thread_io_wake(void);
-extern void thread_park_forever(void);
-
-/* Warm-restart support (restart.c). beam_warm_start() is true once this PD has
- * been restarted at least once, which is what the shared-ring reconciles below
- * are gated on; beam_boot_generation() counts entries into main() and lives
- * OUTSIDE the memory the reset restores, so it climbs across restarts. */
-extern bool beam_warm_start(void);
-extern void beam_boot_banner(void);
-extern _Noreturn void beam_request_restart(int status);
 
 /* ---- Timer multiplexer ----
  *

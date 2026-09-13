@@ -16,6 +16,11 @@
  * Cooperative scheduling: a cothread runs until it yields/blocks. ERTS's
  * threads coordinate via condvars (= yield points), so boot makes progress.
  */
+#include "rng.h"
+#include "runtime_cothread.h"
+#include "runtime_timer.h"
+#include "runtime_wait.h"
+
 #include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -26,13 +31,6 @@
 #include <sel4/sel4.h>
 
 #include <libmicrokitco.h>
-
-#include "rng.h" /* RNG_REALTIME_BASE_EPOCH, for the condvar deadline clock */
-
-/* Timer multiplexer (main.c): keeps the single sDDF timeout slot armed for the
- * nearest pending deadline (absolute, monotonic ns). Timed waits arm it so a
- * thread_io_wait() pulse is guaranteed to arrive by their deadline. */
-extern void beam_timer_arm(uint64_t deadline_ns);
 
 /* -------------------------------------------------------------------------
  * Cothread runtime

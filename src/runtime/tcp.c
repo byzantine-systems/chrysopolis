@@ -7,6 +7,8 @@
 #include <microkit.h>
 #include <libmicrokitco.h>
 
+#include "runtime_network.h"
+
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -100,12 +102,6 @@ typedef struct {
     microkit_cothread_sem_t recv_sem;
     microkit_cothread_sem_t send_sem;
 } socket_t;
-
-extern timer_client_config_t timer_config;
-extern net_client_config_t net_config;
-extern lib_sddf_lwip_config_t lib_sddf_lwip_config;
-extern net_queue_handle_t net_rx_handle;
-extern net_queue_handle_t net_tx_handle;
 
 socket_t sockets[MAX_SOCKETS] = { 0 };
 

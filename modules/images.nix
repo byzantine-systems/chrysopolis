@@ -378,7 +378,7 @@
         # FAT disk image the fat fs_server serves to beam_server. Carries a
         # minimal OTP release (kernel + stdlib + the clean boot script) under
         # the -root layout ERTS expects, plus the device files ERTS opens and
-        # the Gleam app's BEAM. Populated with mtools, then wrapped in an MBR
+        # the Erlang test probes. Populated with mtools, then wrapped in an MBR
         # partition table (the blk virtualiser reads partition 0). BEAM
         # bytecode is platform-independent, so the host pkgs.erlang .beam
         # files load directly on the cross-built aarch64 ERTS.
@@ -410,13 +410,6 @@
                 base=$(basename "$app")
                 mmd -i $part "::/lib/$base" "::/lib/$base/ebin"
                 mcopy -i $part "$app"/ebin/*.beam "::/lib/$base/ebin/"
-              done
-
-              # The Gleam application's compiled modules.
-              find ${config.packages.app} -type d -name ebin | while IFS= read -r dir; do
-                app=$(basename "$(dirname "$dir")")
-                mmd -i $part "::/lib/$app" "::/lib/$app/ebin" 2>/dev/null || true
-                mcopy -i $part "$dir"/*.beam "::/lib/$app/ebin/" 2>/dev/null || true
               done
 
               # The console-driving test probes (tests/*.erl, built by rebar3 in

@@ -18,7 +18,6 @@
         settings.global.excludes = [ "src/runtime/tcp.c" ];
         programs.clang-format.enable = true;
         programs.erlfmt.enable = true;
-        programs.gleam.enable = true;
         programs.nixfmt.enable = true;
         programs.zig.enable = true;
       };
@@ -52,10 +51,6 @@
         };
 
         languages.erlang = {
-          enable = true;
-        };
-
-        languages.gleam = {
           enable = true;
         };
 

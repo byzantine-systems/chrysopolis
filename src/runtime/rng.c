@@ -24,6 +24,7 @@
  *     (link libcrypto + ship the crypto app).
  */
 #include "rng.h"
+#include "runtime_config.h"
 
 #include <bearssl.h>
 
@@ -34,10 +35,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* Timer client config (driver_id channel), defined in main.c. Used only for
- * the documented fallback seed and to perturb the jitter loop. */
-extern timer_client_config_t timer_config;
 
 uint32_t rng_realtime_offset_sec = 0;
 

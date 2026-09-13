@@ -66,6 +66,8 @@
  * stack inside the very arena libc_init is about to re-hand-out. It switches to
  * a stack inside the snapshot region before it calls any C.
  */
+#include "runtime_restart.h"
+
 #include <microkit.h>
 #include <sel4/sel4.h>
 
