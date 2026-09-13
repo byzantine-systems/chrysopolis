@@ -15,9 +15,17 @@ const first_party_cflags = [_][]const u8{
     "-Dasm=__asm__",
 };
 const diagnostic_cflags = first_party_cflags ++ [_][]const u8{"-Werror"};
+const runtime_contract_diagnostic_cflags = diagnostic_cflags ++ [_][]const u8{
+    "-Wmissing-prototypes",
+    "-Wmissing-variable-declarations",
+};
 
 fn firstPartyCFlags(diagnostic: bool) []const []const u8 {
     return if (diagnostic) &diagnostic_cflags else &first_party_cflags;
+}
+
+fn runtimeCFlags(diagnostic: bool) []const []const u8 {
+    return if (diagnostic) &runtime_contract_diagnostic_cflags else &first_party_cflags;
 }
 
 // One root build.zig for every aarch64 cross artifact the Chrysopolis image is
@@ -422,6 +430,7 @@ pub fn build(b: *std.Build) void {
     const diagnostic = b.option(bool, "diagnostic", "build first-party C with ReleaseSafe and warnings as errors") orelse false;
     const first_party_optimize: std.builtin.OptimizeMode = if (diagnostic) .ReleaseSafe else .ReleaseFast;
     const first_party_flags = firstPartyCFlags(diagnostic);
+    const runtime_flags = runtimeCFlags(diagnostic);
 
     // Nix store paths supplied by the derivation (see modules/beam.nix).
     const board_dir = b.option([]const u8, "board-dir", "Microkit board dir ($MICROKIT_SDK/board/<board>/<config>)") orelse @panic("set -Dboard-dir");
@@ -634,8 +643,32 @@ pub fn build(b: *std.Build) void {
         // never extracts it and there is no duplicate symbol. It also defines
         // _reset, the entry root resumes this PD at.
         .files = &.{ "c23_probe.c", "main.c", "bringup.c", "process.c", "rng.c", "restart.c" },
-        .flags = first_party_flags,
+        .flags = runtime_flags,
     });
+
+    if (diagnostic) {
+        // Compile each internal contract header alone and include it twice.
+        // This rejects hidden include-order dependencies and missing guards.
+        const runtime_contract_headers = [_][]const u8{
+            "runtime_boot.h",
+            "runtime_config.h",
+            "runtime_timer.h",
+            "runtime_wait.h",
+            "runtime_cothread.h",
+            "runtime_network.h",
+            "runtime_restart.h",
+            "rng.h",
+        };
+        for (runtime_contract_headers) |header| {
+            const probe_flags = b.allocator.alloc([]const u8, runtime_flags.len + 1) catch @panic("OOM");
+            @memcpy(probe_flags[0..runtime_flags.len], runtime_flags);
+            probe_flags[runtime_flags.len] = b.fmt("-DRUNTIME_CONTRACT_HEADER=\"{s}\"", .{header});
+            glue.root_module.addCSourceFile(.{
+                .file = b.path("src/runtime/runtime_contract_header_probe.c"),
+                .flags = probe_flags,
+            });
+        }
+    }
 
     glue.root_module.addIncludePath(b.path("src/runtime")); // libmicrokitco_opts.h
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });

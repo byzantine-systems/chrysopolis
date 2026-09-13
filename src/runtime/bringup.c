@@ -18,10 +18,16 @@
  * timerfd-built emulator, spawn_init's AF_UNIX pair), deliberate shims, not a
  * substitute for networking.
  */
+#include "rng.h"
+#include "runtime_boot.h"
+#include "runtime_config.h"
+#include "runtime_network.h"
+#include "runtime_restart.h"
+#include "runtime_timer.h"
+#include "runtime_wait.h"
+
 #include <lions/posix/fd.h>
 #include <lions/posix/posix.h>
-
-#include "rng.h"
 
 #include <microkit.h>
 #include <sel4/sel4.h>
@@ -48,42 +54,6 @@
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
-
-/* Serial RX queue handle for console input, defined in main.c. The TX handle
- * is used to echo keystrokes back to the console (see console_read). */
-extern serial_queue_handle_t serial_rx_queue_handle;
-extern serial_queue_handle_t serial_tx_queue_handle;
-extern serial_client_config_t serial_config;
-/* Timer client config (driver_id channel), defined in main.c. Used by
- * clock_nanosleep to read the monotonic clock for a real timed sleep. */
-extern timer_client_config_t timer_config;
-
-/* tcp.c's full socket_config (readable/writable/hup/err intact), distinct from
- * the poll-callback-nulled copy main.c hands libc_init. The socket-aware epoll
- * below queries readiness through it. */
-extern libc_socket_config_t socket_config;
-/* Advances the linked lwIP stack (RX/TX). Defined in main.c, still pumped from
- * the poll/sleep stubs as a backstop. The primary driver is now notified(),
- * which fires again because init() returns to the Microkit event loop. */
-extern void beam_net_pump(void);
-
-/* Cothread idle plumbing (process.c). The poll/sleep stubs park on the shared
- * idle semaphore instead of busy-yielding, so the PD idles at ~0% CPU.
- * thread_io_wait() blocks until notified() pulses (any channel) or a waker
- * calls thread_io_wake(). Callers re-check their predicate in a loop.
- * thread_park_forever() blocks with no wakeup (dead reads). */
-extern void thread_io_wait(void);
-extern void thread_io_wake(void);
-extern void thread_park_forever(void);
-
-/* Hand this PD to the Root fault handler for a restart, carrying the exit code
- * (restart.c). Used by the exit/exit_group shim below. */
-extern _Noreturn void beam_request_restart(int status);
-
-/* Timer multiplexer (main.c): arm the single sDDF timeout slot for the nearest
- * pending absolute monotonic deadline. Timed waits use it so a wakeup pulse is
- * guaranteed to arrive by their deadline. */
-extern void beam_timer_arm(uint64_t deadline_ns);
 
 #define SERIAL_RX_CH 1
 
@@ -885,13 +855,6 @@ static bool is_rng_device_path(const char *path) {
  * Production images keep the PD_RESTART_CH_NONE initialiser, so the shim
  * reports the path as nonexistent and can never notify a channel the SDF did
  * not wire (which would fault the PD on an unbound capability). ---- */
-
-#define PD_RESTART_CH_NONE 0xff
-
-#define PD_RESTART_CLASS_COUNT 4
-#define PD_RESTART_MODE_COUNT 2
-#define PD_RESTART_MODE_HEALTHY 0
-#define PD_RESTART_MODE_FAULT 1
 
 /* One entry per operation and restartable driver class, in the order
  * tools/sdf/system.zig wires the beam_server -> root test channels. The first
