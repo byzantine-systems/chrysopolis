@@ -1,4 +1,5 @@
 const std = @import("std");
+const abi_schema = @import("tools/sdf/abi.zig");
 
 const first_party_cflags = [_][]const u8{
     "-std=c23",
@@ -26,6 +27,65 @@ fn firstPartyCFlags(diagnostic: bool) []const []const u8 {
 
 fn runtimeCFlags(diagnostic: bool) []const []const u8 {
     return if (diagnostic) &runtime_contract_diagnostic_cflags else &first_party_cflags;
+}
+
+fn runtimeAbiConfigHeader(b: *std.Build, abi: abi_schema.Contract) *std.Build.Step.ConfigHeader {
+    const snapshot = abi.memory.snapshot;
+    const reset_stack_top = snapshot.reset_stack_offset + snapshot.reset_stack_size;
+    return b.addConfigHeader(.{
+        .style = .blank,
+        .include_path = "runtime_abi.h",
+        .include_guard_override = "CHRYSOPOLIS_RUNTIME_ABI_H",
+    }, .{
+        .CHRYSO_MICROKIT_ID_COUNT = @as(i64, abi.microkit.id_count),
+        .ROOT_MAX_CHILDREN = @as(i64, abi.microkit.id_count),
+        .ROOT_CHILD_SERIAL = @as(i64, abi.drivers[0].child),
+        .ROOT_CHILD_TIMER = @as(i64, abi.drivers[1].child),
+        .ROOT_CHILD_BLK = @as(i64, abi.drivers[2].child),
+        .ROOT_CHILD_ETH = @as(i64, abi.drivers[3].child),
+        .ROOT_CHILD_CRASHER = @as(i64, abi.children.crasher),
+        .ROOT_CHILD_BEAM = @as(i64, abi.children.beam),
+        .ROOT_DEBUG_CH_SERIAL = @as(i64, abi.drivers[0].root_debug_channel),
+        .ROOT_DEBUG_CH_TIMER = @as(i64, abi.drivers[1].root_debug_channel),
+        .ROOT_DEBUG_CH_BLK = @as(i64, abi.drivers[2].root_debug_channel),
+        .ROOT_DEBUG_CH_ETH = @as(i64, abi.drivers[3].root_debug_channel),
+        .ROOT_DEBUG_CH_MAX = @as(i64, abi.drivers[3].root_debug_channel),
+        .ROOT_FAULT_CH_SERIAL = @as(i64, abi.drivers[0].root_fault_channel),
+        .ROOT_FAULT_CH_TIMER = @as(i64, abi.drivers[1].root_fault_channel),
+        .ROOT_FAULT_CH_BLK = @as(i64, abi.drivers[2].root_fault_channel),
+        .ROOT_FAULT_CH_ETH = @as(i64, abi.drivers[3].root_fault_channel),
+        .ROOT_FAULT_CH_MAX = @as(i64, abi.drivers[3].root_fault_channel),
+        .ROOT_GONE_CH_BLK = @as(i64, abi.giveup.root_blk_channel),
+        .ROOT_GONE_CH_NONE = @as(i64, abi.microkit.absent_id),
+        .ROOT_RESTART_BUDGET = @as(i64, abi.restart.driver_budget),
+        .ROOT_BEAM_RESTART_BUDGET = @as(i64, abi.restart.beam_budget),
+        .MICROKIT_RESTART_ENTRY = @as(i64, @intCast(abi.restart.entry_fallback)),
+        .ROOT_RESTART_CONFIG_WORDS = @as(i64, abi.restart.config_words),
+        .ROOT_RESTART_CONFIG_WORD_BYTES = @as(i64, abi.restart.word_bytes),
+        .ROOT_RESTART_CONFIG_SECTION = abi.restart.config_section,
+        .PD_RESTART_CH_NONE = @as(i64, abi.microkit.absent_id),
+        .PD_RESTART_CLASS_COUNT = @as(i64, abi_schema.driver_count),
+        .PD_RESTART_MODE_COUNT = @as(i64, abi.restart.pd_modes),
+        .PD_RESTART_MODE_HEALTHY = @as(i64, 0),
+        .PD_RESTART_MODE_FAULT = @as(i64, 1),
+        .PD_RESTART_CONFIG_SECTION = abi.restart.pd_config_section,
+        .BEAM_HEAP_SIZE = @as(i64, @intCast(abi.memory.heap.size)),
+        .BEAM_SNAPSHOT_SIZE = @as(i64, @intCast(snapshot.size)),
+        .BEAM_RESET_STACK_OFF = @as(i64, @intCast(snapshot.reset_stack_offset)),
+        .BEAM_RESET_STACK_SIZE = @as(i64, @intCast(snapshot.reset_stack_size)),
+        .BEAM_RESET_STACK_TOP = @as(i64, @intCast(reset_stack_top)),
+        .BEAM_SURVIVORS_OFF = @as(i64, @intCast(snapshot.survivors_offset)),
+        .BEAM_SURVIVORS_SIZE = @as(i64, @intCast(snapshot.survivors_size)),
+        .BEAM_DATA_OFF = @as(i64, @intCast(snapshot.data_offset)),
+        .BEAM_DATA_SIZE = @as(i64, @intCast(snapshot.size - snapshot.data_offset)),
+        .BEAM_EXIT_FAULT_BASE = @as(i64, @intCast(abi.restart.exit_fault_base)),
+        .BEAM_EXIT_FAULT_SIZE = @as(i64, @intCast(abi.restart.exit_fault_size)),
+        .SERIAL_CLIENT_CONFIG_SECTION = abi.sections.serial_client,
+        .TIMER_CLIENT_CONFIG_SECTION = abi.sections.timer_client,
+        .FS_CLIENT_CONFIG_SECTION = abi.sections.fs_client,
+        .NET_CLIENT_CONFIG_SECTION = abi.sections.net_client,
+        .LWIP_CONFIG_SECTION = abi.sections.lwip,
+    });
 }
 
 // One root build.zig for every aarch64 cross artifact the Chrysopolis image is
@@ -431,6 +491,10 @@ pub fn build(b: *std.Build) void {
     const first_party_optimize: std.builtin.OptimizeMode = if (diagnostic) .ReleaseSafe else .ReleaseFast;
     const first_party_flags = firstPartyCFlags(diagnostic);
     const runtime_flags = runtimeCFlags(diagnostic);
+    const runtime_abi = abi_schema.load(b.allocator, "tools/sdf/runtime-abi.json") catch |err| {
+        std.debug.panic("invalid tools/sdf/runtime-abi.json: {s}", .{@errorName(err)});
+    };
+    const generated_abi = runtimeAbiConfigHeader(b, runtime_abi);
 
     // Nix store paths supplied by the derivation (see modules/beam.nix).
     const board_dir = b.option([]const u8, "board-dir", "Microkit board dir ($MICROKIT_SDK/board/<board>/<config>)") orelse @panic("set -Dboard-dir");
@@ -608,6 +672,7 @@ pub fn build(b: *std.Build) void {
     // literal compiled in here for a bare `zig build`.
     const root_pd = addPd(b, "root.elf", target, first_party_optimize);
     root_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/root.c"), .flags = first_party_flags });
+    root_pd.root_module.addConfigHeader(generated_abi);
     // Same reason the beam exe and fat.elf disable it: modules/images.nix patches
     // the per-board child entry point into .restart_config with
     // objcopy --update-section, which fails outright if the linker garbage
@@ -671,6 +736,7 @@ pub fn build(b: *std.Build) void {
     }
 
     glue.root_module.addIncludePath(b.path("src/runtime")); // libmicrokitco_opts.h
+    glue.root_module.addConfigHeader(generated_abi);
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
     // libmicrokitco.h + libhostedqueue/ (process.c's cothread layer), straight

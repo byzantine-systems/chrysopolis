@@ -48,15 +48,16 @@
 
 /* Config blobs the sdfgen metaprogram emits and the build objcopies into
  * these ELF sections (.serial_client_config etc.). */
-__attribute__((
-    __section__(".serial_client_config"))) serial_client_config_t serial_config;
-__attribute__((
-    __section__(".timer_client_config"))) timer_client_config_t timer_config;
-__attribute__((__section__(".fs_client_config"))) fs_client_config_t fs_config;
-__attribute__((
-    __section__(".net_client_config"))) net_client_config_t net_config;
 __attribute__((__section__(
-    ".lib_sddf_lwip_config"))) lib_sddf_lwip_config_t lib_sddf_lwip_config;
+    SERIAL_CLIENT_CONFIG_SECTION))) serial_client_config_t serial_config;
+__attribute__((__section__(
+    TIMER_CLIENT_CONFIG_SECTION))) timer_client_config_t timer_config;
+__attribute__((
+    __section__(FS_CLIENT_CONFIG_SECTION))) fs_client_config_t fs_config;
+__attribute__((
+    __section__(NET_CLIENT_CONFIG_SECTION))) net_client_config_t net_config;
+__attribute__((__section__(
+    LWIP_CONFIG_SECTION))) lib_sddf_lwip_config_t lib_sddf_lwip_config;
 
 /* The libc console path (lib/libc/posix/fd.c) writes through this handle. */
 serial_queue_handle_t serial_tx_queue_handle;
@@ -94,7 +95,6 @@ static bool dhcp_ready;
  * (setvar_vaddr). Handed to libc_init() as the malloc arena, which
  * replaces the old hand-rolled mmap.c bump allocator. */
 uintptr_t beam_heap_start;
-#define BEAM_HEAP_SIZE 0x20000000
 
 /* ---- Timer multiplexer ----
  *

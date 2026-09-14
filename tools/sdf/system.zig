@@ -24,6 +24,7 @@
 //! Writes <output-dir>/system.sdf plus the subsystem *.data config blobs.
 
 const std = @import("std");
+const abi = @import("runtime_abi");
 
 const mod = @import("sdf");
 const SystemDescription = mod.sdf.SystemDescription;
@@ -87,20 +88,12 @@ pub fn main() !void {
     var root = Pd.create(allocator, "root", "root.elf", .{ .priority = 254 });
     sdf.addProtectionDomain(&root);
 
-    // Child ids are PINNED rather than auto-allocated. The id is what root's
-    // fault()/notified() receive to identify which child to restart, so it is
-    // an ABI between this file and src/runtime/root.c (ROOT_CHILD_*): letting
-    // sdfgen allocate them would silently renumber every child whenever one is
-    // added or reordered. Child ids and channel ids are SEPARATE Microkit id
-    // spaces (microkit_child indexes BASE_TCB_CAP, microkit_channel indexes
+    // Child ids come from runtime-abi.json rather than sdfgen's allocator. The
+    // id is what root's fault()/notified() receive to identify which child to
+    // restart, so changing it is an ABI change shared with src/runtime/root.c.
+    // Child ids and channel ids are SEPARATE Microkit id spaces (microkit_child
+    // indexes BASE_TCB_CAP, microkit_channel indexes
     // BASE_OUTPUT_NOTIFICATION_CAP), so these never collide with channel ids.
-    const CHILD_SERIAL = 0;
-    const CHILD_TIMER = 1;
-    const CHILD_BLK = 2;
-    const CHILD_ETH = 3;
-    const CHILD_CRASHER = 4; // test-only
-    const CHILD_BEAM = 5;
-
     // The BEAM server PD, its malloc arena and its restart snapshot. Both maps
     // carry the setvar_vaddr symbol the Microkit tool patches into
     // beam_server.elf, so the C runtime reads each region's base from a global.
@@ -115,9 +108,9 @@ pub fn main() !void {
     // (pthread_create is unavailable, so it cannot move to its own). Give
     // beam_server generous room.
     beam_server.stack_size = 0x200000;
-    const beam_heap = Mr.create(allocator, "beam_heap", 0x20000000, .{ .page_size = .large });
+    const beam_heap = Mr.create(allocator, "beam_heap", abi.heap_size, .{ .page_size = .large });
     sdf.addMemoryRegion(beam_heap);
-    beam_server.addMap(Map.create(beam_heap, 0x40000000, .rw, .{ .setvar_vaddr = "beam_heap_start" }));
+    beam_server.addMap(Map.create(beam_heap, abi.heap_vaddr, .rw, .{ .setvar_vaddr = abi.heap_setvar }));
 
     // Restart snapshot region. beam_server takes a pristine copy of its own
     // writable segment here at first boot and restores from it when root
@@ -129,21 +122,19 @@ pub fn main() !void {
     // gets restored; that is the role rust-sel4's sel4-reset gives its
     // .persistent section.
     //
-    // Size is duplicated as BEAM_SNAPSHOT_SIZE in restart.c rather than being
-    // threaded through, matching beam_heap/BEAM_HEAP_SIZE above: the pinned
-    // sdfgen's Map supports setvar_vaddr but not setvar_size. modules/images.nix
-    // asserts at build time that the region is large enough for the ELF that
-    // was actually linked, so the duplication cannot go silently wrong.
+    // The size and internal offsets come from runtime-abi.json for both this
+    // generator and restart.c. modules/images.nix also checks that the region
+    // is large enough for the ELF that was actually linked.
     //
     // Placed BELOW beam_heap and mapped immediately after it. sdfgen's
     // auto-allocator (getMapVaddr) hands out addresses above the highest map
     // already present, so with beam_heap ending at 0x60000000 every later
     // subsystem mapping lands above that and none can collide with this one.
-    const beam_snapshot = Mr.create(allocator, "beam_snapshot", 0x80000, .{});
+    const beam_snapshot = Mr.create(allocator, "beam_snapshot", abi.snapshot_size, .{});
     sdf.addMemoryRegion(beam_snapshot);
-    beam_server.addMap(Map.create(beam_snapshot, 0x30000000, .rw, .{ .setvar_vaddr = "beam_snapshot_start" }));
+    beam_server.addMap(Map.create(beam_snapshot, abi.snapshot_vaddr, .rw, .{ .setvar_vaddr = abi.snapshot_setvar }));
 
-    _ = try root.addChild(&beam_server, .{ .id = CHILD_BEAM });
+    _ = try root.addChild(&beam_server, .{ .id = abi.child_beam });
 
     // Serial subsystem: PL011 driver + TX/RX virtualisers. beam_server is the
     // sole client, its console writes flow through the TX virtualiser to the
@@ -151,7 +142,7 @@ pub fn main() !void {
     // a child of root (restartable); the virtualisers stay top-level (pure SW,
     // restarting them is out of scope here).
     var serial_driver = Pd.create(allocator, "serial_driver", "serial_driver.elf", .{ .priority = 100 });
-    _ = try root.addChild(&serial_driver, .{ .id = CHILD_SERIAL });
+    _ = try root.addChild(&serial_driver, .{ .id = abi.child_serial });
     var serial_virt_tx = Pd.create(allocator, "serial_virt_tx", "serial_virt_tx.elf", .{ .priority = 99 });
     sdf.addProtectionDomain(&serial_virt_tx);
     var serial_virt_rx = Pd.create(allocator, "serial_virt_rx", "serial_virt_rx.elf", .{ .priority = 98 });
@@ -190,7 +181,7 @@ pub fn main() !void {
     // MAX_TIMEOUTS. Throttling it would risk delaying or stalling the monotonic
     // clock every client depends on, for no benefit.
     var timer_driver = Pd.create(allocator, "timer_driver", "timer_driver.elf", .{ .priority = 101 });
-    _ = try root.addChild(&timer_driver, .{ .id = CHILD_TIMER });
+    _ = try root.addChild(&timer_driver, .{ .id = abi.child_timer });
 
     // Test-only fault injector: a child of root that faults on every init, so
     // the restart-smoke test can observe root catching it, restarting it to the
@@ -200,7 +191,7 @@ pub fn main() !void {
     var crasher: Pd = undefined;
     if (with_crasher) {
         crasher = Pd.create(allocator, "crasher", "crasher.elf", .{ .priority = 50 });
-        _ = try root.addChild(&crasher, .{ .id = CHILD_CRASHER });
+        _ = try root.addChild(&crasher, .{ .id = abi.child_crasher });
     }
 
     const timer_node = blob.child("timer") orelse return error.TimerNodeNotFound;
@@ -221,7 +212,7 @@ pub fn main() !void {
     // reqsbk/ialloc bookkeeping that lets it error-complete requests orphaned by
     // a driver crash), so restarting it would defeat the recovery.
     var blk_driver = Pd.create(allocator, "blk_driver", "blk_driver.elf", .{ .priority = 200 });
-    _ = try root.addChild(&blk_driver, .{ .id = CHILD_BLK });
+    _ = try root.addChild(&blk_driver, .{ .id = abi.child_blk });
     var blk_virt = Pd.create(allocator, "blk_virt", "blk_virt.elf", .{ .priority = 199 });
     sdf.addProtectionDomain(&blk_virt);
 
@@ -253,7 +244,7 @@ pub fn main() !void {
     // Child of root (restartable); the net virtualisers stay top-level, same
     // reasoning as blk_virt above.
     var eth_driver = Pd.create(allocator, "eth_driver", "eth_driver.elf", .{ .priority = 110, .budget = 100, .period = 400 });
-    _ = try root.addChild(&eth_driver, .{ .id = CHILD_ETH });
+    _ = try root.addChild(&eth_driver, .{ .id = abi.child_eth });
     var net_virt_tx = Pd.create(allocator, "net_virt_tx", "net_virt_tx.elf", .{ .priority = 109, .budget = 100, .period = 500 });
     sdf.addProtectionDomain(&net_virt_tx);
     var net_virt_rx = Pd.create(allocator, "net_virt_rx", "net_virt_rx.elf", .{ .priority = 108, .budget = 100, .period = 500 });
@@ -332,8 +323,8 @@ pub fn main() !void {
     // lets the error kernel stay a pure sink for faults rather than something a
     // component below it can poke.
     sdf.addChannel(try Channel.create(&root, &blk_virt, .{
-        .pd_a_id = 10,
-        .pd_b_id = 61,
+        .pd_a_id = abi.root_blk_gone_channel,
+        .pd_b_id = abi.blk_virt_gone_channel,
         .pd_b_notify = false,
     }));
 
@@ -343,33 +334,21 @@ pub fn main() !void {
     // Microkit notify has no payload, so a single channel would need a shared
     // memory command word.
     //
-    // Both ends are pinned. Root's ids are 0..7 and map onto the healthy
+    // Both ends come from runtime-abi.json. Root's ids map onto the healthy
     // ROOT_DEBUG_CH_* and fault ROOT_FAULT_CH_* groups in src/runtime/root.c.
-    // beam_server's ids are
-    // pinned HIGH (54..61) and out of the way of the serial/timer/net/fs
+    // beam_server's ids are allocated high and out of the way of the serial/timer/net/fs
     // channels sdfgen allocates from 0 upwards: beam_server learns every other
     // channel id from a serialised config blob, but these have no blob, so
     // src/runtime/bringup.c reads them from the .pd_restart_config section that
     // modules/images.nix objcopies in (0xff = channel absent, which is what
-    // production images keep). 61 is the ceiling: sdfgen's id bitset is
-    // StaticBitSet(MAX_IDS=62), so 62 is out of range and panics rather than
-    // erroring. Declared last so they never perturb the ids the subsystem
-    // helpers allocated above.
+    // production images keep). The manifest validator enforces sdfgen's id
+    // ceiling so no channel can overflow its StaticBitSet. Declared last so
+    // they never perturb the ids the subsystem helpers allocated above.
     if (with_restart_debug) {
-        const debug_channels = [_]struct { root_id: u8, beam_id: u8 }{
-            .{ .root_id = 0, .beam_id = 58 }, // healthy serial
-            .{ .root_id = 1, .beam_id = 59 }, // healthy timer
-            .{ .root_id = 2, .beam_id = 60 }, // healthy blk
-            .{ .root_id = 3, .beam_id = 61 }, // healthy eth
-            .{ .root_id = 4, .beam_id = 54 }, // fault serial
-            .{ .root_id = 5, .beam_id = 55 }, // fault timer
-            .{ .root_id = 6, .beam_id = 56 }, // fault blk
-            .{ .root_id = 7, .beam_id = 57 }, // fault eth
-        };
-        for (debug_channels) |c| {
+        for (abi.root_debug_channels, abi.beam_debug_channels) |root_id, beam_id| {
             sdf.addChannel(try Channel.create(&root, &beam_server, .{
-                .pd_a_id = c.root_id,
-                .pd_b_id = c.beam_id,
+                .pd_a_id = root_id,
+                .pd_b_id = beam_id,
                 // Only beam_server -> root is ever signalled (the test asks root
                 // to restart a driver); root never notifies back on these.
                 //
@@ -392,6 +371,13 @@ pub fn main() !void {
                 .pd_a_notify = false,
             }));
         }
+        for (abi.root_fault_channels, abi.beam_fault_channels) |root_id, beam_id| {
+            sdf.addChannel(try Channel.create(&root, &beam_server, .{
+                .pd_a_id = root_id,
+                .pd_b_id = beam_id,
+                .pd_a_notify = false,
+            }));
+        }
     }
 
     // beam_server asks root to restart it by faulting deliberately at
@@ -409,17 +395,15 @@ pub fn main() !void {
     //
     // The one page from the base covers every encodable exit code (the code is
     // masked to a byte).
-    const BEAM_EXIT_FAULT_BASE = 0xBEA00000;
-    const BEAM_EXIT_FAULT_SIZE = 0x1000;
     for (beam_server.maps.items) |map| {
         const lo = map.vaddr;
         const hi = map.vaddr + map.mr.size;
-        if (lo < BEAM_EXIT_FAULT_BASE + BEAM_EXIT_FAULT_SIZE and BEAM_EXIT_FAULT_BASE < hi) {
+        if (lo < abi.exit_fault_base + abi.exit_fault_size and abi.exit_fault_base < hi) {
             std.debug.print(
                 "beam_server map '{s}' at 0x{x}..0x{x} covers the restart-request " ++
                     "fault address 0x{x}; move the mapping or change " ++
                     "BEAM_EXIT_FAULT_BASE in src/runtime/restart.c (and here)\n",
-                .{ map.mr.name, lo, hi, BEAM_EXIT_FAULT_BASE },
+                .{ map.mr.name, lo, hi, abi.exit_fault_base },
             );
             std.process.exit(1);
         }

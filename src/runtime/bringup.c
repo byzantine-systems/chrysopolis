@@ -55,8 +55,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#define SERIAL_RX_CH 1
-
 /* Discard sink / EOF source for the synthetic fds below (pipe write end,
  * timerfd, socketpair): writes are discarded, reads return EOF. A write DOES
  * pulse the idle waiters: ERTS wakes its pollset by writing a byte to its
@@ -143,7 +141,7 @@ static ssize_t console_read(void *data, size_t count, int fd) {
         break;
       if (nonblock)
         return -EAGAIN;
-      microkit_cothread_wait_on_channel(SERIAL_RX_CH);
+      microkit_cothread_wait_on_channel(serial_config.rx.id);
     }
   }
   return (ssize_t)n;
@@ -863,7 +861,7 @@ static bool is_rng_device_path(const char *path) {
  * Its own section, volatile and used, so the compiler cannot fold the
  * initialiser away and objcopy can overwrite it: the same mechanism as
  * root.c's .restart_config and sDDF's per-PD config blobs. */
-__attribute__((__section__(".pd_restart_config"), used)) volatile uint8_t
+__attribute__((__section__(PD_RESTART_CONFIG_SECTION), used)) volatile uint8_t
     pd_restart_channels[PD_RESTART_MODE_COUNT][PD_RESTART_CLASS_COUNT] = {
         {
             PD_RESTART_CH_NONE, /* healthy serial */

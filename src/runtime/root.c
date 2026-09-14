@@ -32,18 +32,17 @@
  *     path. Root's part is only knowing which of the two entry points to use;
  *     the mechanism lives in src/runtime/restart.c.
  */
+#include <runtime_abi.h>
+
 #include <microkit.h>
 
-/* Compile-time fallback child ELF entry point, matching every board's
- * microkit.ld shipped in the SDK. Our build never defines this macro: the value
- * cannot be threaded from a build-time-read ELF into a -D flag through Zig's
- * build graph, which is precisely why it is patched into a section instead. The
- * fallback only covers a by-hand `zig build` plus `microkit` run, where nothing
- * patches .restart_config. */
-#ifndef MICROKIT_RESTART_ENTRY
-#define MICROKIT_RESTART_ENTRY 0x200000
-#endif
+#include <stddef.h>
+#include <stdint.h>
 
+/* Compile-time fallback child ELF entry point from runtime-abi.json. Image
+ * assembly replaces it with the actual linked child entry after checking that
+ * every restartable child agrees. The fallback covers a by-hand `zig build`
+ * plus `microkit` run where nothing patches the section. */
 /* Entry points to resume children at, patched per-board at image assembly.
  * `volatile` + `used` + its own section keep the compiler from folding them and
  * let objcopy overwrite the pair, the same mechanism sDDF uses for its per-PD
@@ -65,17 +64,34 @@
  * The initializers are the fallback for an un-patched build. A zero
  * beam_reset_entry means "not patched", which root treats as "beam_server is
  * not restartable in this image" rather than jumping to address 0. */
-__attribute__((__section__(".restart_config"),
-               used)) volatile seL4_Uint64 restart_config[2] = {
-    MICROKIT_RESTART_ENTRY,
-    0,
+typedef struct {
+  uint64_t restart_entry;
+  uint64_t beam_reset_entry;
+} root_restart_config_t;
+
+_Static_assert(sizeof(root_restart_config_t) ==
+                   ROOT_RESTART_CONFIG_WORDS * ROOT_RESTART_CONFIG_WORD_BYTES,
+               "Root restart config size must match the image patch payload");
+_Static_assert(_Alignof(root_restart_config_t) == _Alignof(uint64_t),
+               "Root restart config must remain 64-bit aligned");
+_Static_assert(offsetof(root_restart_config_t, restart_entry) == 0,
+               "child restart entry must be the first patch word");
+_Static_assert(offsetof(root_restart_config_t, beam_reset_entry) ==
+                   ROOT_RESTART_CONFIG_WORD_BYTES,
+               "BEAM reset entry must be the second patch word");
+_Static_assert(sizeof(seL4_Word) == ROOT_RESTART_CONFIG_WORD_BYTES,
+               "restart entries must have the target word width");
+_Static_assert(ROOT_CHILD_BEAM < ROOT_MAX_CHILDREN,
+               "BEAM child id must fit the restart budget table");
+
+__attribute__((__section__(ROOT_RESTART_CONFIG_SECTION),
+               used)) volatile root_restart_config_t restart_config = {
+    .restart_entry = MICROKIT_RESTART_ENTRY,
+    .beam_reset_entry = 0,
 };
 
-#define restart_entry (restart_config[0])
-#define beam_reset_entry (restart_config[1])
-
-/* Microkit child ids are small; size the table to the channel-id space. */
-#define ROOT_MAX_CHILDREN 64
+#define restart_entry (restart_config.restart_entry)
+#define beam_reset_entry (restart_config.beam_reset_entry)
 
 /*
  * Test-only debug-restart channels (present only in the restart image, which
@@ -87,34 +103,14 @@ __attribute__((__section__(".restart_config"),
  * first group lets a test restart a HEALTHY driver on demand. The second group
  * resumes that driver at address 0, making the real driver PD take an
  * instruction fault that returns through fault() and the ordinary restart
- * policy. The ids are pinned in system.zig and map 1:1 onto the pinned child
- * ids.
+ * policy. Both channel and child ids come from runtime-abi.json and map 1:1.
  *
  * Note these are microkit_channel ids, a SEPARATE id space from the
  * microkit_child ids they map to (BASE_OUTPUT_NOTIFICATION_CAP vs
  * BASE_TCB_CAP).
  */
-#define ROOT_DEBUG_CH_SERIAL 0
-#define ROOT_DEBUG_CH_TIMER 1
-#define ROOT_DEBUG_CH_BLK 2
-#define ROOT_DEBUG_CH_ETH 3
-#define ROOT_DEBUG_CH_MAX ROOT_DEBUG_CH_ETH
-
-#define ROOT_FAULT_CH_SERIAL 4
-#define ROOT_FAULT_CH_TIMER 5
-#define ROOT_FAULT_CH_BLK 6
-#define ROOT_FAULT_CH_ETH 7
-#define ROOT_FAULT_CH_MAX ROOT_FAULT_CH_ETH
-
-/* Child ids, pinned in tools/sdf/system.zig (an ABI with this file). */
-#define ROOT_CHILD_SERIAL 0
-#define ROOT_CHILD_TIMER 1
-#define ROOT_CHILD_BLK 2
-#define ROOT_CHILD_ETH 3
-#define ROOT_CHILD_BEAM 5
-
 /*
- * Give-up notification channels, pinned in tools/sdf/system.zig.
+ * Give-up notification channels, shared through runtime-abi.json.
  *
  * Unlike the debug-restart channels above these exist in EVERY image, including
  * production. They carry the one thing only root can report: that a child has
@@ -136,9 +132,6 @@ __attribute__((__section__(".restart_config"),
  * console is silent, a dead NIC drops traffic), so they are left unwired rather
  * than given a channel with no listener.
  */
-#define ROOT_GONE_CH_BLK 10
-#define ROOT_GONE_CH_NONE 0xff
-
 /* Debug channel -> child id. Indexed by channel, so it must stay dense and in
  * ROOT_DEBUG_CH_* order. */
 static const microkit_child debug_restart_child[ROOT_DEBUG_CH_MAX + 1] = {
@@ -185,15 +178,11 @@ static microkit_channel root_gone_channel(microkit_child child) {
  * rather than spin forever (the reliability talk's "giving up" decision). A
  * time-windowed budget (reset the count after the child stays up for a while)
  * is a future refinement: it needs a timer channel wired into the Root PD. */
-#define ROOT_RESTART_BUDGET 8
-
 /* beam_server's budget is larger because its restarts are not all failures. A
  * driver restart always means a driver went wrong, but a BEAM PD restart is
  * also what an ordinary `init:stop()` at the shell produces, and eight of those
  * should not permanently stop the system. The budget still exists: an ERTS that
  * faults on every boot is exactly the runaway this bounds. */
-#define ROOT_BEAM_RESTART_BUDGET 64
-
 /*
  * A switch rather than a table, for the same reason root_gone_channel above is
  * one: with a designated-initialiser array every unlisted child would default

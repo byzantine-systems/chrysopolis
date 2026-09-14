@@ -62,6 +62,16 @@
 }:
 let
   qemu = "${pkgs.qemu}/bin/qemu-system-aarch64";
+  runtimeAbi = builtins.fromJSON (builtins.readFile ./tools/sdf/runtime-abi.json);
+  serialChild = toString (builtins.elemAt runtimeAbi.drivers 0).child;
+  timerChild = toString (builtins.elemAt runtimeAbi.drivers 1).child;
+  blkChild = toString (builtins.elemAt runtimeAbi.drivers 2).child;
+  ethChild = toString (builtins.elemAt runtimeAbi.drivers 3).child;
+  beamChild = toString runtimeAbi.children.beam;
+  driverRestartBudget = toString runtimeAbi.restart.driver_budget;
+  beamExitCode3Address = pkgs.lib.toLower (
+    pkgs.lib.toHexString (runtimeAbi.restart.exit_fault_base + 3)
+  );
 
   # The sibling probe modules load_test_modules asks for, derived from the
   # directory so adding a tests/*.erl file needs no edit here. chryso_test is
@@ -175,9 +185,9 @@ let
           therefore no longer covers it: without this a beam_server crash during
           an ordinary boot would leave every check green."""
           log = machine.get_console_log()
-          assert not re.search(r"ROOT\|fault\|child=5", log), \
-              "beam_server faulted (ROOT|fault|child=5 in serial log): " + \
-              (re.findall(r"ROOT\|fault\|child=5.*", log) or ["(no detail)"])[-1]
+          assert not re.search(r"ROOT\|fault\|child=${beamChild}", log), \
+              "beam_server faulted (ROOT|fault|child=${beamChild} in serial log): " + \
+              (re.findall(r"ROOT\|fault\|child=${beamChild}.*", log) or ["(no detail)"])[-1]
 
       def assert_no_pd_fault(machine):
           """MON|ERROR on serial means a protection domain faulted."""
@@ -431,9 +441,9 @@ in
 
           # Root saw it as a fault on child 5 and spent one restart. The
           # ROOT|restart tag distinguishes this from a debug-restart request,
-          # and child=5 from any driver.
-          wait_console(chryso, r"ROOT\|fault\|child=5", 60)
-          wait_console(chryso, r"ROOT\|restart\|child=5\|count=1", 60)
+          # and the manifest's beam child id from any driver.
+          wait_console(chryso, r"ROOT\|fault\|child=${beamChild}", 60)
+          wait_console(chryso, r"ROOT\|restart\|child=${beamChild}\|count=1", 60)
 
           # It came back. Counted, because the first banner is still in the log.
           wait_console_count(chryso, r"Eshell", 2, 300)
@@ -464,11 +474,11 @@ in
           # Now the crash path with a NON-ZERO code, which is what proves the
           # code travels to the error kernel: the shim faults at
           # BEAM_EXIT_FAULT_BASE + code, and for a VM fault mr1 is the faulting
-          # address, so root logs 0xbea00003 for halt(3).
+          # address, so root logs the manifest fault base plus 3 for halt(3).
           chryso.send_console("chryso_beam:halt_vm(3).\r")
           wait_console(chryso, r"BEAM\|exit\|code=3\|requesting-restart", 120)
-          wait_console(chryso, r"ROOT\|fault\|child=5\|.*mr1=0x0*bea00003", 60)
-          wait_console(chryso, r"ROOT\|restart\|child=5\|count=2", 60)
+          wait_console(chryso, r"ROOT\|fault\|child=${beamChild}\|.*mr1=0x0*${beamExitCode3Address}", 60)
+          wait_console(chryso, r"ROOT\|restart\|child=${beamChild}\|count=2", 60)
           wait_console_count(chryso, r"Eshell", 3, 300)
           wait_console(chryso, r"BEAM\|boot\|generation=3\|bss-counter=1", 120)
 
@@ -563,7 +573,7 @@ in
           # Root actually restarted child 0 (serial_driver's pinned id). Distinct
           # from the crasher's ROOT|restart tag, so this cannot match a
           # fault-driven restart left over from boot.
-          wait_console(chryso, r"ROOT\|debug-restart\|child=0", 60)
+          wait_console(chryso, r"ROOT\|debug-restart\|child=${serialChild}", 60)
 
           # THE ASSERTION THAT MATTERS: the console still works afterwards. This
           # only prints if the restarted driver re-initialised the UART, drained
@@ -606,16 +616,16 @@ in
               r"PD_RESTART\|request\|class=serial\|mode=fault",
               60,
           )
-          wait_console(chryso, r"ROOT\|fault\|child=0", 60)
-          wait_console(chryso, r"ROOT\|restart\|child=0\|count=1", 60)
-          assert_fault_sequence(chryso, 0, 1)
+          wait_console(chryso, r"ROOT\|fault\|child=${serialChild}", 60)
+          wait_console(chryso, r"ROOT\|restart\|child=${serialChild}\|count=1", 60)
+          assert_fault_sequence(chryso, ${serialChild}, 1)
 
           chryso.send_console("chryso_test:serial_after().\r")
           wait_console(chryso, r"SERIAL_AFTER\|42", 120)
           chryso.send_console("chryso_test:serial_rx().\r")
           wait_console(chryso, r"SERIAL_RX\|3", 120)
 
-          assert "ROOT|debug-restart|child=0" not in chryso.get_console_log(), \
+          assert "ROOT|debug-restart|child=${serialChild}" not in chryso.get_console_log(), \
               "serial fault test used the healthy debug-restart path"
           assert_no_pd_fault(chryso)
       finally:
@@ -694,7 +704,7 @@ in
           # Ask root to restart timer_driver (pinned child id 1).
           chryso.send_console("chryso_test:restart_pd('timer').\r")
           wait_console(chryso, r"PD_RESTART\|request\|class=timer", 60)
-          wait_console(chryso, r"ROOT\|debug-restart\|child=1", 60)
+          wait_console(chryso, r"ROOT\|debug-restart\|child=${timerChild}", 60)
 
           # 1. The monotonic clock survived and ADVANCED. Reaching this line at
           # all also proves the restarted timer answers PPCs again (Erlang
@@ -753,16 +763,16 @@ in
               r"PD_RESTART\|request\|class=timer\|mode=fault",
               60,
           )
-          wait_console(chryso, r"ROOT\|fault\|child=1", 60)
-          wait_console(chryso, r"ROOT\|restart\|child=1\|count=1", 60)
-          assert_fault_sequence(chryso, 1, 1)
+          wait_console(chryso, r"ROOT\|fault\|child=${timerChild}", 60)
+          wait_console(chryso, r"ROOT\|restart\|child=${timerChild}\|count=1", 60)
+          assert_fault_sequence(chryso, ${timerChild}, 1)
 
           after = monotonic(chryso, "after")
           assert after > before, \
               f"monotonic clock did not advance across timer fault ({before} -> {after})"
           sleep_works(chryso, "slept_after", 180)
 
-          assert "ROOT|debug-restart|child=1" not in chryso.get_console_log(), \
+          assert "ROOT|debug-restart|child=${timerChild}" not in chryso.get_console_log(), \
               "timer fault test used the healthy debug-restart path"
           assert_no_pd_fault(chryso)
       finally:
@@ -813,7 +823,7 @@ in
           # --- Scenario 1: restart while idle ---
           chryso.send_console("chryso_test:restart_pd('blk').\r")
           wait_console(chryso, r"PD_RESTART\|request\|class=blk", 60)
-          wait_console(chryso, r"ROOT\|debug-restart\|child=2", 60)
+          wait_console(chryso, r"ROOT\|debug-restart\|child=${blkChild}", 60)
 
           # The virtualiser saw the generation bump and reconciled.
           # DEBUG_BLK_VIRT is compiled in, so these lines are emitted. The
@@ -835,7 +845,7 @@ in
           # prevents.
           chryso.send_console("chryso_fs:read_inflight(dict).\r")
           chryso.send_console("chryso_test:restart_pd('blk').\r")
-          wait_console(chryso, r"ROOT\|debug-restart\|child=2\|count=2", 60)
+          wait_console(chryso, r"ROOT\|debug-restart\|child=${blkChild}\|count=2", 60)
           wait_console(chryso, r"FS_INFLIGHT\|(ok|error|EXIT)", 180)
 
           # And the system still serves fs reads after an in-flight failure.
@@ -868,9 +878,9 @@ in
               r"PD_RESTART\|request\|class=blk\|mode=fault",
               60,
           )
-          wait_console(chryso, r"ROOT\|fault\|child=2", 60)
-          wait_console(chryso, r"ROOT\|restart\|child=2\|count=1", 60)
-          assert_fault_sequence(chryso, 2, 1)
+          wait_console(chryso, r"ROOT\|fault\|child=${blkChild}", 60)
+          wait_console(chryso, r"ROOT\|restart\|child=${blkChild}\|count=1", 60)
+          assert_fault_sequence(chryso, ${blkChild}, 1)
           wait_console(chryso, r"driver restarted, reconciling", 60)
           wait_console(chryso, r"driver restarted: failed \d+ client request", 60)
 
@@ -880,15 +890,15 @@ in
           # Coordinate the reader and fault worker inside one BEAM probe, avoiding
           # the serial-shell delay that could let a short read finish first.
           chryso.send_console("chryso_fs:read_during_fault().\r")
-          wait_console(chryso, r"ROOT\|restart\|child=2\|count=2", 60)
-          assert_fault_sequence(chryso, 2, 2)
+          wait_console(chryso, r"ROOT\|restart\|child=${blkChild}\|count=2", 60)
+          assert_fault_sequence(chryso, ${blkChild}, 2)
           wait_console_count(chryso, r"driver restarted, reconciling", 2, 60)
           wait_console(chryso, r"FS_INFLIGHT\|(ok|error|EXIT)", 180)
 
           log = chryso.get_console_log()
           second_fault = [
               m.start()
-              for m in re.finditer(r"ROOT\|fault\|child=2(?:\||$)", log)
+              for m in re.finditer(r"ROOT\|fault\|child=${blkChild}(?:\||$)", log)
           ][1]
           outcome = re.search(r"FS_INFLIGHT\|(ok|error|EXIT)", log)
           assert outcome is not None and second_fault < outcome.start(), \
@@ -897,7 +907,7 @@ in
           chryso.send_console("chryso_fs:read_tagged('after_inflight', lists).\r")
           wait_console(chryso, r"FS_AFTER_INFLIGHT\|\d+", 180)
 
-          assert "ROOT|debug-restart|child=2" not in chryso.get_console_log(), \
+          assert "ROOT|debug-restart|child=${blkChild}" not in chryso.get_console_log(), \
               "block fault test used the healthy debug-restart path"
           assert_no_pd_fault(chryso)
       finally:
@@ -969,17 +979,17 @@ in
           assert read_module(chryso, "before", "lists", 120) == "ok", \
               "baseline fs read failed before any restart"
 
-          # Spend the budget. ROOT_RESTART_BUDGET is 8 in src/runtime/root.c, so
+          # Spend the budget declared by the shared runtime ABI, so
           # faults 1..8 each restart the driver and the 9th finds the budget
           # spent and stops it. Each restart is awaited before the next is asked
           # for: overlapping them would leave the driver re-initialising while
           # the next request arrives, which is a different scenario (and one the
           # in-flight half of blk-restart-smoke already covers).
-          budget = 8
+          budget = ${driverRestartBudget}
           for n in range(1, budget + 1):
               chryso.send_console("chryso_test:fault_pd('blk').\r")
-              wait_console(chryso, r"ROOT\|restart\|child=2\|count=%d" % n, 120)
-              assert_fault_sequence(chryso, 2, n)
+              wait_console(chryso, r"ROOT\|restart\|child=${blkChild}\|count=%d" % n, 120)
+              assert_fault_sequence(chryso, ${blkChild}, n)
 
           # The driver still works while the budget lasts: give-up must be the
           # budget running out, not the driver having broken along the way.
@@ -988,23 +998,23 @@ in
 
           # One more request: nothing left to spend, so root stops it for good.
           chryso.send_console("chryso_test:fault_pd('blk').\r")
-          wait_console_count(chryso, r"ROOT\|fault\|child=2(?:\||$)", budget + 1, 120)
-          wait_console(chryso, r"ROOT\|giveup\|child=2\|reason=budget-exhausted", 120)
+          wait_console_count(chryso, r"ROOT\|fault\|child=${blkChild}(?:\||$)", budget + 1, 120)
+          wait_console(chryso, r"ROOT\|giveup\|child=${blkChild}\|reason=budget-exhausted", 120)
 
           log = chryso.get_console_log()
           injections = [
               m.start()
-              for m in re.finditer(r"ROOT\|fault-inject\|child=2", log)
+              for m in re.finditer(r"ROOT\|fault-inject\|child=${blkChild}", log)
           ]
-          faults = [m.start() for m in re.finditer(r"ROOT\|fault\|child=2(?:\||$)", log)]
-          giveup = log.find("ROOT|giveup|child=2|reason=budget-exhausted")
+          faults = [m.start() for m in re.finditer(r"ROOT\|fault\|child=${blkChild}(?:\||$)", log)]
+          giveup = log.find("ROOT|giveup|child=${blkChild}|reason=budget-exhausted")
           assert len(injections) == budget + 1, \
               f"expected {budget + 1} block fault injections, saw {len(injections)}"
           assert len(faults) == budget + 1, \
               f"expected {budget + 1} genuine block faults, saw {len(faults)}"
           assert injections[-1] < faults[-1] < giveup, \
               "final block fault and give-up were out of order"
-          assert "ROOT|debug-restart|child=2" not in log, \
+          assert "ROOT|debug-restart|child=${blkChild}" not in log, \
               "block give-up used the healthy debug-restart path"
 
           # THE POINT OF THE TEST. Root's give-up reached the virtualiser over
@@ -1274,13 +1284,13 @@ in
           assert got == expected, f"{tag}: host listener received {got!r}"
           wait_console(machine, r"NET_OK\|" + tag.upper(), 60)
 
-      # Ask root to restart eth_driver (pinned child id 3) and wait for the
+      # Ask root to restart eth_driver and wait for the
       # driver to report what it handed back. The shim line is emitted while the
       # OLD instance is still alive, so it proves the write reached the shim.
       def restart_eth(machine, expect_count):
           machine.send_console("chryso_test:restart_pd('eth').\r")
           wait_console(machine, r"PD_RESTART\|request\|class=eth", 60)
-          wait_console(machine, r"ROOT\|debug-restart\|child=3\|count=" + str(expect_count), 60)
+          wait_console(machine, r"ROOT\|debug-restart\|child=${ethChild}\|count=" + str(expect_count), 60)
           # The reclaim walk ran. Asserting the line (not the values) keeps this
           # robust: how many buffers are in flight at restart time is inherently
           # racy, but the line appearing at all proves the walk executed against
@@ -1355,10 +1365,10 @@ in
           machine.send_console("chryso_test:fault_pd('eth').\r")
           wait_console(
               machine,
-              r"ROOT\|restart\|child=3\|count=" + str(expect_count),
+              r"ROOT\|restart\|child=${ethChild}\|count=" + str(expect_count),
               60,
           )
-          assert_fault_sequence(machine, 3, expect_count)
+          assert_fault_sequence(machine, ${ethChild}, expect_count)
           wait_console_count(
               machine,
               r"ETH\|restart\|reclaimed\|rx=\d+\|tx=\d+",
@@ -1376,7 +1386,7 @@ in
           fault_eth(chryso, 2)
           tcp_ping(chryso, "after2", 5582)
 
-          assert "ROOT|debug-restart|child=3" not in chryso.get_console_log(), \
+          assert "ROOT|debug-restart|child=${ethChild}" not in chryso.get_console_log(), \
               "network fault test used the healthy debug-restart path"
           assert_no_pd_fault(chryso)
       finally:

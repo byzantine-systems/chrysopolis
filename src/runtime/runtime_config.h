@@ -1,6 +1,8 @@
 #ifndef CHRYSOPOLIS_RUNTIME_CONFIG_H
 #define CHRYSOPOLIS_RUNTIME_CONFIG_H 1
 
+#include <runtime_abi.h>
+
 #include <lions/fs/config.h>
 #include <lions/fs/protocol.h>
 #include <sddf/serial/config.h>
@@ -36,13 +38,16 @@ extern char *fs_share;
  * The dimensions and sentinel are part of the current C/image contract. The
  * production image leaves every entry at PD_RESTART_CH_NONE.
  */
-#define PD_RESTART_CH_NONE 0xff
-#define PD_RESTART_CLASS_COUNT 4
-#define PD_RESTART_MODE_COUNT 2
-#define PD_RESTART_MODE_HEALTHY 0
-#define PD_RESTART_MODE_FAULT 1
 extern volatile uint8_t pd_restart_channels[PD_RESTART_MODE_COUNT]
                                            [PD_RESTART_CLASS_COUNT];
+
+_Static_assert(sizeof(pd_restart_channels) ==
+                   PD_RESTART_MODE_COUNT * PD_RESTART_CLASS_COUNT,
+               "PD restart config must remain one byte per channel");
+_Static_assert(
+    _Alignof(uint8_t[PD_RESTART_MODE_COUNT][PD_RESTART_CLASS_COUNT]) ==
+        _Alignof(uint8_t),
+    "PD restart config must remain byte-aligned");
 
 /*
  * Base of the Microkit-provided libc arena. The image tool patches this value

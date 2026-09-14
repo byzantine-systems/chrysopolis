@@ -4,11 +4,16 @@
 # asserts on the serial trace / drives TCP peers from the test
 # script, pinning a phase's exit criterion as an automated gate.
 #
-# Plus one pure (non-QEMU) check, production-sdf-gate, asserting the
+# Pure (non-QEMU) checks also validate the generated ABI and assert that
 # restart-test affordances stay out of the production topology.
 {
   perSystem =
     { pkgs, config, ... }:
+    let
+      runtimeAbi = builtins.fromJSON (builtins.readFile ../tools/sdf/runtime-abi.json);
+      drivers = runtimeAbi.drivers;
+      hex = value: "0x${pkgs.lib.toHexString value}";
+    in
     {
       checks = {
         # Compile gate for the console-driving probes in tests/. Exposed as a
@@ -17,6 +22,71 @@
         # cross build, and so it gates on darwin too, where the QEMU checks are
         # skipped. rebar.config sets warnings_as_errors, so a warning fails here.
         test-modules = config.packages.test-modules;
+
+        # The Zig parser rejects malformed, overlapping and out-of-range ABI
+        # values while producing both SDF variants. This check then verifies
+        # that the rendered topology and config-blob set reflect those values.
+        # C layout and ELF section sizes are checked by c23-diagnostic and the
+        # image builders respectively.
+        abi-contract = pkgs.runCommand "chrysopolis-abi-contract" { } ''
+          production=${config.packages.sdf}
+          restart=${config.packages.sdf-restart}
+
+          require_line() {
+            local file=$1 text=$2
+            grep -Fq "$text" "$file" || {
+              echo "ABI contract missing from $file: $text" >&2
+              exit 1
+            }
+          }
+          require_channel() {
+            local file=$1 a=$2 b=$3
+            awk -v a="$a" -v b="$b" '
+              /<channel>/   { inside = 1; block = "" }
+              inside        { block = block $0 }
+              /<\/channel>/ { inside = 0
+                               if (index(block, a) && index(block, b)) found = 1 }
+              END           { exit(found ? 0 : 1) }
+            ' "$file" || {
+              echo "ABI channel missing from $file: $a <-> $b" >&2
+              exit 1
+            }
+          }
+
+          for sdf in "$production/system.sdf" "$restart/system.sdf"; do
+            require_line "$sdf" '<memory_region name="beam_heap" size="${hex runtimeAbi.memory.heap.size}"'
+            require_line "$sdf" '<memory_region name="beam_snapshot" size="${hex runtimeAbi.memory.snapshot.size}"'
+            require_line "$sdf" '<map mr="beam_heap" vaddr="${hex runtimeAbi.memory.heap.vaddr}" perms="rw" setvar_vaddr="${runtimeAbi.memory.heap.setvar}" />'
+            require_line "$sdf" '<map mr="beam_snapshot" vaddr="${hex runtimeAbi.memory.snapshot.vaddr}" perms="rw" setvar_vaddr="${runtimeAbi.memory.snapshot.setvar}" />'
+            require_line "$sdf" '<protection_domain name="beam_server" id="${toString runtimeAbi.children.beam}"'
+            ${pkgs.lib.concatMapStringsSep "\n            " (driver: ''
+              require_line "$sdf" '<protection_domain name="${driver.name}_driver" id="${toString driver.child}"'
+            '') drivers}
+            require_channel "$sdf" 'pd="root" id="${toString runtimeAbi.giveup.root_blk_channel}"' \
+                                   'pd="blk_virt" id="${toString runtimeAbi.giveup.blk_virt_channel}"'
+          done
+
+          require_line "$restart/system.sdf" '<protection_domain name="crasher" id="${toString runtimeAbi.children.crasher}"'
+          ${pkgs.lib.concatMapStringsSep "\n          " (driver: ''
+            require_channel "$restart/system.sdf" \
+              'pd="root" id="${toString driver.root_debug_channel}"' \
+              'pd="beam_server" id="${toString driver.beam_debug_channel}"'
+            require_channel "$restart/system.sdf" \
+              'pd="root" id="${toString driver.root_fault_channel}"' \
+              'pd="beam_server" id="${toString driver.beam_fault_channel}"'
+          '') drivers}
+
+          for output in "$production" "$restart"; do
+            ${pkgs.lib.concatMapStringsSep "\n            " (mapping: ''
+              test -f "$output/${mapping.blob}" || {
+                echo "ABI config blob missing from $output: ${mapping.blob}" >&2
+                exit 1
+              }
+            '') runtimeAbi.config_sections}
+          done
+
+          touch $out
+        '';
 
         # Regression guard for the restart-test gating, kept separate from the
         # QEMU checks because it is a pure grep over the generated system
