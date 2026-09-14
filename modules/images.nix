@@ -17,6 +17,10 @@
       ...
     }:
     let
+      runtimeAbi = builtins.fromJSON (builtins.readFile ../tools/sdf/runtime-abi.json);
+      inherit (runtimeAbi) config_sections;
+      drivers = runtimeAbi.drivers;
+
       # Generate the Microkit system description with sdfgen instead
       # of hand-writing it. The generator (tools/sdf) builds the topology
       # with the LionsOS sdfgen Zig library and renders system.sdf, so
@@ -33,142 +37,27 @@
 
       # Which gen-sdf config blob lands in which ELF section, as data rather
       # than as twenty near-identical shell lines. The objcopy loop below is
-      # generated from it, which keeps the mapping readable and greppable and
-      # makes an addition one line instead of one line plus a column-aligned
-      # edit.
+      # generated from runtime-abi.json, which keeps the mapping readable and
+      # makes an addition one manifest edit.
       #
       # Worth knowing when this list changes: sdfgen writes the blob and an
       # sDDF/LionsOS C header declares the struct the PD reads it into. If they
       # disagree, a blob LARGER than its section is a hard objcopy error (that
       # is how the sdfgen 0.35.0 bump surfaced: net_virt_rx grew 3168 -> 27744
       # while the consuming sDDF was still at the old pin), but a smaller or
-      # merely reordered one is silent and the PD reads plausible garbage at
-      # init. The structural defence is keeping sdfgen, sDDF and LionsOS on
-      # versions that pin each other (0.35.0 / 0.7.0 / 0.4.0 do), so bump them
-      # as a set rather than individually.
+      # merely reordered one would normally be silent. mkSel4Image therefore
+      # also requires every blob and target section to have the exact same
+      # size. Keeping sdfgen, sDDF and LionsOS on mutually compatible pins is
+      # still required because equal sizes cannot detect reordered fields.
       #
       # `elf` is the name in build/, so "beam_server.elf" is whichever ELF the
       # mkSel4Image caller passed as beamElf (beam_server for the ERTS image,
       # beam_test for bring-up).
-      configSections = [
-        # Serial and timer: driver device resources, driver/virt configs, and
-        # the beam_server client configs.
-        {
-          section = ".device_resources";
-          blob = "serial_driver_device_resources.data";
-          elf = "serial_driver.elf";
-        }
-        {
-          section = ".serial_driver_config";
-          blob = "serial_driver_config.data";
-          elf = "serial_driver.elf";
-        }
-        {
-          section = ".serial_virt_tx_config";
-          blob = "serial_virt_tx.data";
-          elf = "serial_virt_tx.elf";
-        }
-        {
-          section = ".serial_virt_rx_config";
-          blob = "serial_virt_rx.data";
-          elf = "serial_virt_rx.elf";
-        }
-        {
-          section = ".device_resources";
-          blob = "timer_driver_device_resources.data";
-          elf = "timer_driver.elf";
-        }
-        {
-          section = ".serial_client_config";
-          blob = "serial_client_beam_server.data";
-          elf = "beam_server.elf";
-        }
-        {
-          section = ".timer_client_config";
-          blob = "timer_client_beam_server.data";
-          elf = "beam_server.elf";
-        }
-
-        # Block subsystem: driver device resources + driver/virt configs.
-        {
-          section = ".device_resources";
-          blob = "blk_driver_device_resources.data";
-          elf = "blk_driver.elf";
-        }
-        {
-          section = ".blk_driver_config";
-          blob = "blk_driver.data";
-          elf = "blk_driver.elf";
-        }
-        {
-          section = ".blk_virt_config";
-          blob = "blk_virt.data";
-          elf = "blk_virt.elf";
-        }
-
-        # FAT fs_server: fatfs is the blk client (partition 0) and the fs
-        # server, beam_server is the fs client (libc fs path dormant until the
-        # memfs cutover). gen-sdf also emits a 21st blob, fat_config.data, which
-        # is zero bytes and has no section: the fatfs PD takes its real
-        # configuration from the two below plus a compile-time fat_config.h, so
-        # the 21-vs-20 count is expected rather than a dropped blob.
-        {
-          section = ".blk_client_config";
-          blob = "blk_client_fatfs.data";
-          elf = "fat.elf";
-        }
-        {
-          section = ".fs_server_config";
-          blob = "fs_server_fatfs.data";
-          elf = "fat.elf";
-        }
-        {
-          section = ".fs_client_config";
-          blob = "fs_client_beam_server.data";
-          elf = "beam_server.elf";
-        }
-
-        # Network subsystem: driver device resources + driver/virt/copy configs.
-        {
-          section = ".device_resources";
-          blob = "eth_driver_device_resources.data";
-          elf = "eth_driver.elf";
-        }
-        {
-          section = ".net_driver_config";
-          blob = "net_driver.data";
-          elf = "eth_driver.elf";
-        }
-        {
-          section = ".net_virt_rx_config";
-          blob = "net_virt_rx.data";
-          elf = "net_virt_rx.elf";
-        }
-        {
-          section = ".net_virt_tx_config";
-          blob = "net_virt_tx.data";
-          elf = "net_virt_tx.elf";
-        }
-        {
-          section = ".net_copy_config";
-          blob = "net_copy_net_copy.data";
-          elf = "net_copy.elf";
-        }
-
-        # Socket client: beam_server links the lwIP stack + LionsOS socket
-        # backend, so it carries the net client config and the lib_sddf_lwip
-        # (pbuf pool) config it reads at sddf_lwip_init.
-        {
-          section = ".net_client_config";
-          blob = "net_client_beam_server.data";
-          elf = "beam_server.elf";
-        }
-        {
-          section = ".lib_sddf_lwip_config";
-          blob = "lib_sddf_lwip_config_beam_server.data";
-          elf = "beam_server.elf";
-        }
-      ];
+      configSections =
+        assert runtimeAbi.version == 1;
+        assert builtins.length drivers == 4;
+        assert runtimeAbi.microkit.id_count == 62;
+        config_sections;
 
       # Synthesize a bootable image from a beam_server ELF: gather every
       # PD ELF into the search path, embed the per-PD config blobs the
@@ -191,6 +80,9 @@
           # meaningful alongside an sdf generated with --with-restart-debug, and
           # left false everywhere else so production images cannot notify root.
           restartDebug ? false,
+          # Test-only config corruption applied after normal section injection.
+          # Used to prove ReleaseFast rejects malformed blobs explicitly.
+          corruptConfig ? null,
         }:
         pkgs.stdenvNoCC.mkDerivation {
           name = imgName;
@@ -218,7 +110,63 @@
             chmod -R u+w build
 
             cfg=${sdf}
-            oc() { llvm-objcopy --update-section "$1"="$cfg/$2" "build/$3"; }
+
+            # Read a property relative to a named ELF section from readelf's
+            # wide table. Relative columns avoid the variable-width [ N]
+            # index at the start of each row.
+            section_property() {
+              llvm-readelf -SW "$1" | awk -v section="$2" -v offset="$3" '
+                {
+                  for (i = 1; i <= NF; i++) {
+                    if (!found && $i == section) {
+                      print $(i + offset)
+                      found = 1
+                    }
+                  }
+                }
+                END { exit(found ? 0 : 1) }
+              '
+            }
+            section_size() { section_property "$1" "$2" 4; }
+            section_align() { section_property "$1" "$2" 9; }
+            check_section_layout() {
+              local elf=$1 section=$2 expected_size=$3 expected_align=$4
+              local size_hex align
+              if ! size_hex=$(section_size "$elf" "$section"); then
+                echo "abi: $elf has no $section section" >&2
+                exit 1
+              fi
+              align=$(section_align "$elf" "$section")
+              if [ "$((0x$size_hex))" -ne "$expected_size" ]; then
+                echo "abi: $elf $section is $((0x$size_hex)) bytes," \
+                     "expected $expected_size" >&2
+                exit 1
+              fi
+              if [ "$align" -ne "$expected_align" ]; then
+                echo "abi: $elf $section alignment is $align," \
+                     "expected $expected_align" >&2
+                exit 1
+              fi
+            }
+            oc() {
+              local section=$1 blob=$2 elf="build/$3" payload="$cfg/$2"
+              local payload_size size_hex
+              if [ ! -f "$payload" ]; then
+                echo "abi: generated config blob $blob is missing" >&2
+                exit 1
+              fi
+              if ! size_hex=$(section_size "$elf" "$section"); then
+                echo "abi: $elf has no $section section for $blob" >&2
+                exit 1
+              fi
+              payload_size=$(stat -c %s "$payload")
+              if [ "$((0x$size_hex))" -ne "$payload_size" ]; then
+                echo "abi: $blob is $payload_size bytes but $elf $section is" \
+                     "$((0x$size_hex)) bytes" >&2
+                exit 1
+              fi
+              llvm-objcopy --update-section "$section"="$payload" "$elf"
+            }
 
             # Restart entry points for the Root PD: the child ELF's e_entry
             # (== _start) is a property of the board's microkit.ld, not a
@@ -246,6 +194,10 @@
                 byte=$(( (v >> (i * 8)) & 0xff ))
                 printf "\\$(printf '%03o' "$byte")" >> "$out"
               done
+            }
+            emit_u8() {
+              local out=$1 v=$(( $2 ))
+              printf "\\$(printf '%03o' "$v")" >> "$out"
             }
 
             ref_elf=serial_driver.elf
@@ -281,8 +233,8 @@
             # actually linked still fits. Growing ERTS or libc past the region
             # then fails the build instead of corrupting memory at runtime.
             # Offsets mirror BEAM_DATA_OFF / BEAM_SNAPSHOT_SIZE in restart.c.
-            snapshot_size=$((0x80000))
-            data_off=$((0x6000))
+            snapshot_size=$((${toString runtimeAbi.memory.snapshot.size}))
+            data_off=$((${toString runtimeAbi.memory.snapshot.data_offset}))
             data_capacity=$((snapshot_size - data_off))
             # Checked explicitly rather than left to fail inside the $(( ))
             # below: an unresolved symbol yields an empty string there, and
@@ -302,8 +254,7 @@
             if [ "$data_len" -gt "$data_capacity" ]; then
               echo "restart-snapshot: beam_server's writable data is $data_len bytes," \
                    "which exceeds the $data_capacity byte snapshot data area;" \
-                   "raise BEAM_SNAPSHOT_SIZE in src/runtime/restart.c AND the" \
-                   "beam_snapshot region size in tools/sdf/system.zig" >&2
+                   "raise the snapshot size in tools/sdf/runtime-abi.json" >&2
               exit 1
             fi
             echo "restart-snapshot: data=$data_len/$data_capacity bytes"
@@ -311,7 +262,11 @@
             : > restart_entry.bin
             emit_u64 restart_entry.bin "$se"          # shared child _start
             emit_u64 restart_entry.bin "$beam_reset"  # beam_server _reset
-            llvm-objcopy --update-section .restart_config=restart_entry.bin build/root.elf
+            check_section_layout build/root.elf ${runtimeAbi.restart.config_section} \
+              $((${toString runtimeAbi.restart.config_words} * ${toString runtimeAbi.restart.word_bytes})) \
+              ${toString runtimeAbi.restart.word_bytes}
+            llvm-objcopy --update-section \
+              ${runtimeAbi.restart.config_section}=restart_entry.bin build/root.elf
 
             ${pkgs.lib.optionalString restartDebug ''
               # Test-only /dev/pd-restart trigger: patch the beam_server-side
@@ -320,7 +275,7 @@
               # reads them there). The first four bytes are healthy restart
               # channels in serial, timer, blk, eth order; the next four are
               # fault-injection channels in the same class order. This matches
-              # BOTH the pinned ids in tools/sdf/system.zig and the
+              # BOTH the manifest-driven SDF channels and the
               # pd_restart_channels[][] array.
               #
               # The shim is compiled into every beam_server (production images
@@ -328,14 +283,36 @@
               # it the array keeps its 0xff "not wired" initialiser and
               # /dev/pd-restart reports ENOENT. That is why the ids live in data
               # rather than behind a build flag.
-              # healthy: 58 59 60 61; fault: 54 55 56 57
-              printf '\072\073\074\075\066\067\070\071' > pd_restart_channels.bin
-              llvm-objcopy --update-section .pd_restart_config=pd_restart_channels.bin build/beam_server.elf
+              : > pd_restart_channels.bin
+              for ch in ${pkgs.lib.concatMapStringsSep " " (d: toString d.beam_debug_channel) drivers} \
+                        ${pkgs.lib.concatMapStringsSep " " (d: toString d.beam_fault_channel) drivers}; do
+                emit_u8 pd_restart_channels.bin "$ch"
+              done
+              check_section_layout build/beam_server.elf \
+                ${runtimeAbi.restart.pd_config_section} \
+                $((${toString runtimeAbi.restart.pd_modes} * ${toString (builtins.length drivers)})) 1
+              llvm-objcopy --update-section \
+                ${runtimeAbi.restart.pd_config_section}=pd_restart_channels.bin \
+                build/beam_server.elf
             ''}
             # Generated from the configSections list above.
             ${pkgs.lib.concatMapStringsSep "\n            " (
               c: "oc ${c.section} ${c.blob} ${c.elf}"
             ) configSections}
+
+            ${pkgs.lib.optionalString (corruptConfig != null) ''
+              cp "$cfg/${corruptConfig.blob}" corrupt-config.bin
+              chmod u+w corrupt-config.bin
+              dd if=/dev/zero of=corrupt-config.bin bs=1 count=1 \
+                conv=notrunc status=none
+              check_section_layout build/${corruptConfig.elf} \
+                ${corruptConfig.section} \
+                "$(stat -c %s corrupt-config.bin)" \
+                "$(section_align build/${corruptConfig.elf} ${corruptConfig.section})"
+              llvm-objcopy --update-section \
+                ${corruptConfig.section}=corrupt-config.bin \
+                build/${corruptConfig.elf}
+            ''}
 
             ${chryso.microkitSdk}/bin/microkit $cfg/system.sdf \
               --search-path build \
@@ -470,6 +447,18 @@
         test-image = mkSel4Image {
           imgName = "sel4-beam-test-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+        };
+
+        # Test-only image with a correctly sized but invalid required config.
+        # The runtime must catch this before following any patched address.
+        lifecycle-failure-image = mkSel4Image {
+          imgName = "sel4-beam-lifecycle-failure-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_server.elf";
+          corruptConfig = {
+            blob = "serial_client_beam_server.data";
+            section = runtimeAbi.sections.serial_client;
+            elf = "beam_server.elf";
+          };
         };
 
         # ERTS image plus test-only control channels and the crasher child of

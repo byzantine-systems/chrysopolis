@@ -3,6 +3,8 @@
 
 #include <microkit.h>
 
+#include "runtime_lifecycle.h"
+
 /*
  * Optional ERTS entry points. A missing weak symbol compares equal to NULL.
  * Callers must test it before calling; neither function takes ownership of
@@ -19,5 +21,11 @@ extern void beam_process_external_events(microkit_channel ch)
  * recoverable failure result and must run once per cold or restored boot.
  */
 void bringup_register_syscalls(void);
+
+/* Spawn ERTS when linked, otherwise spawn the optional bring-up probe. */
+[[nodiscard]] runtime_status_t runtime_payload_start(bool network_enabled);
+
+/* Forward an event to ERTS when its optional hook is linked. */
+void runtime_payload_external_event(microkit_channel ch);
 
 #endif

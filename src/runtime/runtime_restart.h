@@ -1,6 +1,8 @@
 #ifndef CHRYSOPOLIS_RUNTIME_RESTART_H
 #define CHRYSOPOLIS_RUNTIME_RESTART_H 1
 
+#include <runtime_abi.h>
+
 #include <stdbool.h>
 #include <stdint.h>
 

@@ -82,6 +82,7 @@ Core function:
 
 - **`boot-smoke`**: Headless boot of the ERTS image, asserts `beam_server` init, the sDDF monotonic clock, ERTS handoff, the FAT `MBR partitioning detected`, `Eshell`, and no PD faults.
 - **`socket-smoke`**: Boots the bring-up image (no ERTS) and asserts the linked lwIP stack gets a DHCP lease and `socket()/bind()/listen()/connect()` succeed from C.
+- **`lifecycle-config-failure-smoke`**: Boots a test-only image with malformed serial configuration and proves beam_server logs the contract failure and parks before exposing partial state.
 - **`shell-smoke`**: Drives the interactive Erlang shell over the serial console and asserts that arithmetic evaluates.
 - **`tcp-smoke`**: Drives the shell to prove `gen_tcp` both directions: a host client echoes off a guest listener, and the guest connects out to a host listener.
 - **`rng-smoke`**: Boots the ERTS image twice and asserts the RNG fingerprint, `rand:bytes/1` and `erlang:make_ref/0` all differ across boots (see *Entropy* below).

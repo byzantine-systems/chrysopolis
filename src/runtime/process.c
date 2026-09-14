@@ -96,18 +96,26 @@ static inline void co_yield_once(void) {
   }
 }
 
-/* Set up the cothread runtime. Called from main() after libc_init (malloc is
- * needed for the per-cothread stacks) and before erl_start. */
-void thread_init(void) {
-  stack_ptrs_arg_array_t stacks;
-  for (int i = 0; i < LIBMICROKITCO_MAX_COTHREADS - 1; i++) {
-    stacks[i] = (uintptr_t)malloc(CO_STACK_SIZE);
+/* Set up the cothread runtime after libc_init and before any blocking work. */
+runtime_status_t thread_init(void) {
+  stack_ptrs_arg_array_t stacks = {};
+  const size_t stack_count = LIBMICROKITCO_MAX_COTHREADS - 1;
+  for (size_t i = 0; i < stack_count; i++) {
+    void *stack = malloc(CO_STACK_SIZE);
+    if (stack == NULL) {
+      for (size_t j = 0; j < i; j++) {
+        free((void *)stacks[j]);
+      }
+      return RUNTIME_STATUS_COTHREAD_ALLOC;
+    }
+    stacks[i] = (uintptr_t)stack;
   }
   microkit_cothread_init(&co_controller, CO_STACK_SIZE, stacks);
   microkit_cothread_semaphore_init(&io_wakeup_sem);
   microkit_cothread_semaphore_init(&boot_idle_sem);
   microkit_cothread_semaphore_init(&park_sem);
   co_runtime_up = 1;
+  return RUNTIME_STATUS_OK;
 }
 
 /* Drive the cothread scheduler from the PD's notification handler: wake any

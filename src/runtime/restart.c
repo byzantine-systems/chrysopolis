@@ -90,22 +90,10 @@
  * padding because the reset trampoline below has to compute the stack top in
  * assembly, where offsetof() is not available.
  *
- * BEAM_SNAPSHOT_SIZE is an ABI with tools/sdf/system.zig, which creates the
- * matching memory region; modules/images.nix asserts at build time that the
- * data area is big enough for this ELF's writable segment.
+ * The values come from runtime-abi.json, which also configures the matching
+ * SDF memory region; modules/images.nix asserts at build time that the data
+ * area is big enough for this ELF's writable segment.
  */
-#define BEAM_SNAPSHOT_SIZE 0x80000 /* 512 KiB; matches tools/sdf/system.zig */
-
-/* Written without a `u` suffix: BEAM_RESET_STACK_TOP is stringified into the
- * reset trampoline's assembly, where a C integer suffix would not assemble. */
-#define BEAM_RESET_STACK_OFF 0x1000
-#define BEAM_RESET_STACK_SIZE 0x4000
-#define BEAM_RESET_STACK_TOP 0x5000
-#define BEAM_SURVIVORS_OFF 0x5000
-#define BEAM_SURVIVORS_SIZE 0x1000
-#define BEAM_DATA_OFF 0x6000
-#define BEAM_DATA_SIZE (BEAM_SNAPSHOT_SIZE - BEAM_DATA_OFF)
-
 _Static_assert(BEAM_RESET_STACK_TOP ==
                    BEAM_RESET_STACK_OFF + BEAM_RESET_STACK_SIZE,
                "reset stack top must be the end of the reset stack");
@@ -128,12 +116,31 @@ typedef struct {
   uint64_t survivor_bytes; /* used length of the survivor area */
 } beam_snapshot_hdr_t;
 
+_Static_assert(sizeof(beam_snapshot_hdr_t) == 5 * sizeof(uint64_t),
+               "snapshot header must remain five packed 64-bit words");
+_Static_assert(_Alignof(beam_snapshot_hdr_t) == _Alignof(uint64_t),
+               "snapshot header must remain 64-bit aligned");
+_Static_assert(offsetof(beam_snapshot_hdr_t, magic) == 0 &&
+                   offsetof(beam_snapshot_hdr_t, generation) == 8 &&
+                   offsetof(beam_snapshot_hdr_t, saved_sp) == 16 &&
+                   offsetof(beam_snapshot_hdr_t, data_bytes) == 24 &&
+                   offsetof(beam_snapshot_hdr_t, survivor_bytes) == 32,
+               "snapshot header field offsets are part of the restart ABI");
+
 /* One discovered non-zero run in .bss, followed in the survivor area by `len`
  * bytes of payload padded up to 8. */
 typedef struct {
   uint32_t offset; /* from _bss */
   uint32_t len;
 } beam_survivor_hdr_t;
+
+_Static_assert(sizeof(beam_survivor_hdr_t) == 8,
+               "survivor record header must remain eight bytes");
+_Static_assert(_Alignof(beam_survivor_hdr_t) == _Alignof(uint32_t),
+               "survivor record header must remain 32-bit aligned");
+_Static_assert(offsetof(beam_survivor_hdr_t, offset) == 0 &&
+                   offsetof(beam_survivor_hdr_t, len) == 4,
+               "survivor record offsets are part of the restart ABI");
 
 /*
  * Zero words this many apart or closer are kept inside one run rather than
@@ -148,7 +155,7 @@ typedef struct {
 /*
  * The snapshot region base, patched by the Microkit tool at synthesis time
  * (setvar_vaddr="beam_snapshot_start" in tools/sdf/system.zig), exactly like
- * beam_heap_start in main.c.
+ * beam_heap_start in runtime_config.c.
  *
  * This lives in .bss, which means it is itself one of the survivors the scan
  * discovers. The ordering keeps that safe: the reset trampoline reads it BEFORE
@@ -383,7 +390,7 @@ uintptr_t beam_reset_restore(void) {
   return sp;
 }
 
-/* True once the PD has been restarted at least once. main.c gates the
+/* True once the PD has been restarted at least once. Lifecycle subsystems gate
  * shared-ring reconciles on this: the peers (virtualisers, copier, fatfs) kept
  * running across the restart and their rings still hold the dead instance's
  * state, which a cold boot never has to deal with. */
@@ -491,8 +498,6 @@ static void beam_restart_report(void) {
  * anyway (brk, which root also sees as a fault) instead of running on with
  * ERTS half torn down.
  */
-#define BEAM_EXIT_FAULT_BASE 0xBEA00000u
-
 _Noreturn void beam_request_restart(int status) {
   /* microkit_dbg_puts, not printf: this is a direct kernel putchar, whereas
    * printf enqueues into the serial TX ring that the driver drains later. We

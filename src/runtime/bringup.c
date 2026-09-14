@@ -10,7 +10,7 @@
  * while the slots are still free, so no double-register assert).
  *
  * File I/O (open/read/write/stat/lseek) is NOT handled here: the real libc fs
- * path (lib/libc/posix/file.c, wired in main.c) routes it to the FAT fs_server.
+ * path (lib/libc/posix/file.c, wired in runtime_fs.c) routes it to fatfs.
  * TCP/IP is NOT handled here either: gen_tcp drives the real libc socket layer
  * (sock.c -> tcp.c -> lwIP), and this file's epoll/ppoll stubs report socket
  * readiness from tcp.c and pump lwIP (beam_net_pump). The pipe2/timerfd/
@@ -54,8 +54,6 @@
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
-
-#define SERIAL_RX_CH 1
 
 /* Discard sink / EOF source for the synthetic fds below (pipe write end,
  * timerfd, socketpair): writes are discarded, reads return EOF. A write DOES
@@ -143,7 +141,7 @@ static ssize_t console_read(void *data, size_t count, int fd) {
         break;
       if (nonblock)
         return -EAGAIN;
-      microkit_cothread_wait_on_channel(SERIAL_RX_CH);
+      microkit_cothread_wait_on_channel(serial_config.rx.id);
     }
   }
   return (ssize_t)n;
@@ -202,7 +200,8 @@ static long bringup_timerfd_create(va_list ap) {
 /* socketpair: the ERTS-only shim. ERTS's spawn_init opens a unix-domain
  * (AF_UNIX) socketpair to talk to its port forker (erl_child_setup). This is
  * unrelated to the real AF_INET socket path (sock.c + lwIP, enabled via
- * libc_init in main.c): sock.c does not implement socketpair, and we cannot
+ * libc_init in runtime_lifecycle.c): sock.c does not implement socketpair,
+ * and we cannot
  * spawn OS processes, but spawn_init must succeed for ERTS to boot, so we hand
  * back two valid non-blocking fds. Port operations over them simply never
  * complete. */
@@ -863,7 +862,7 @@ static bool is_rng_device_path(const char *path) {
  * Its own section, volatile and used, so the compiler cannot fold the
  * initialiser away and objcopy can overwrite it: the same mechanism as
  * root.c's .restart_config and sDDF's per-PD config blobs. */
-__attribute__((__section__(".pd_restart_config"), used)) volatile uint8_t
+__attribute__((__section__(PD_RESTART_CONFIG_SECTION), used)) volatile uint8_t
     pd_restart_channels[PD_RESTART_MODE_COUNT][PD_RESTART_CLASS_COUNT] = {
         {
             PD_RESTART_CH_NONE, /* healthy serial */
@@ -1046,7 +1045,8 @@ void bringup_register_syscalls(void) {
   libc_define_syscall(SYS_epoll_ctl, bringup_epoll_ctl);
   libc_define_syscall(SYS_epoll_pwait, bringup_epoll_pwait);
   libc_define_syscall(SYS_pselect6, bringup_pselect6);
-  /* ppoll stays with bringup (not sock.c): main.c nulls sock.c's poll callbacks
+  /* ppoll stays with bringup (not sock.c): runtime_lifecycle.c nulls sock.c's
+   * poll callbacks
    * so sock.c does not claim __NR_ppoll, keeping the cothread-blocking stub
    * that ERTS boot needs (sock.c's sys_ppoll neither yields nor parks). */
   libc_define_syscall(SYS_ppoll, bringup_poll_yield);
@@ -1064,7 +1064,7 @@ void bringup_register_syscalls(void) {
 
   /* Real-entropy redefines: these slots are already claimed by libc_init /
    * libc_init_file, so REPLACE them (returning the old handler for chaining)
-   * rather than define. rng_init() (main.c) seeds the DRBG right after this. */
+   * rather than define. The lifecycle seeds the DRBG right after this. */
   old_clock_gettime =
       libc_redefine_syscall(SYS_clock_gettime, bringup_clock_gettime);
   libc_redefine_syscall(SYS_getrandom, bringup_getrandom);
