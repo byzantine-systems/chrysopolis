@@ -3,12 +3,15 @@
 
 #include <runtime_abi.h>
 
+#include "runtime_lifecycle.h"
+
 #include <lions/fs/config.h>
 #include <lions/fs/protocol.h>
 #include <sddf/serial/config.h>
 #include <sddf/serial/queue.h>
 #include <sddf/timer/config.h>
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -22,7 +25,7 @@ extern timer_client_config_t timer_config;
 extern fs_client_config_t fs_config;
 
 /*
- * Static-lifetime queue handles owned and initialised by main.c. Consumers
+ * Static-lifetime queue handles owned by their runtime subsystem. Consumers
  * borrow them after the corresponding configuration has been validated and
  * initialisation has completed. The fs pointers refer to shared memory owned
  * by the generated system topology.
@@ -54,5 +57,15 @@ _Static_assert(
  * before _start; libc_init() receives the region but does not own this symbol.
  */
 extern uintptr_t beam_heap_start;
+
+/*
+ * Validate every patched blob before following an embedded address. Network
+ * and lwIP are optional as a pair: both all-zero means absent. On success,
+ * network_enabled receives that decision.
+ */
+[[nodiscard]] runtime_status_t runtime_config_validate(bool *network_enabled);
+
+/* Initialise the local serial queue handles after validation. */
+void runtime_serial_init(void);
 
 #endif

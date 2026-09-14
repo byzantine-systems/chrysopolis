@@ -6,11 +6,13 @@
 #include <sddf/network/lib_sddf_lwip.h>
 #include <sddf/network/queue.h>
 
+#include "runtime_lifecycle.h"
+
 /*
  * Static-lifetime network configuration populated by the Microkit image tool.
  * Callers borrow these objects. net_config must pass its magic check before
  * any embedded address is followed; the queue handles become usable only
- * after main.c initialises the linked lwIP stack.
+ * after runtime_network_init initialises the linked lwIP stack.
  */
 extern net_client_config_t net_config;
 extern lib_sddf_lwip_config_t lib_sddf_lwip_config;
@@ -29,5 +31,17 @@ extern libc_socket_config_t socket_config;
  * currently available work has been serviced.
  */
 void beam_net_pump(void);
+
+/* Initialise lwIP after libc, cothreads, and the filesystem are ready. */
+void runtime_network_init(bool enabled);
+
+/* Service network work belonging to one Microkit notification. */
+void runtime_network_notified(microkit_channel ch);
+
+/* Flush notification work deferred by the linked lwIP adapter. */
+void runtime_network_flush(void);
+
+/* Spawn the non-ERTS socket probe. */
+[[nodiscard]] runtime_status_t runtime_network_start_probe(void);
 
 #endif

@@ -296,7 +296,7 @@ fn addBeamExe(
     exe.bundle_compiler_rt = false;
     exe.link_gc_sections = false;
     // -u erl_start: force the emulator entry live so the ERTS archive members
-    // get pulled even though main.c's reference is behind a weak symbol.
+    // get pulled even though runtime_payload.c's reference is weak.
     if (with_erts) exe.forceUndefinedSymbol("erl_start");
 
     b.installArtifact(exe);
@@ -387,7 +387,7 @@ fn addFatServer(
 // Include set for the lwIP stack and any TU that pulls
 // <sddf/network/lib_sddf_lwip.h> (it transitively includes lwip/pbuf.h, which
 // resolves lwipopts.h + arch/cc.h from our vendored lwip_include). Shared by
-// the lib_sddf_lwip archive and beam_server's glue object (main.c uses it).
+// the lib_sddf_lwip archive and beam_server's runtime_network object.
 fn addLwipIncludes(
     b: *std.Build,
     mod: *std.Build.Module,
@@ -707,7 +707,20 @@ pub fn build(b: *std.Build) void {
         // already defined by this object the lazily-linked libmicrokit archive
         // never extracts it and there is no duplicate symbol. It also defines
         // _reset, the entry root resumes this PD at.
-        .files = &.{ "c23_probe.c", "main.c", "bringup.c", "process.c", "rng.c", "restart.c" },
+        .files = &.{
+            "c23_probe.c",
+            "main.c",
+            "runtime_lifecycle.c",
+            "runtime_config.c",
+            "runtime_timer.c",
+            "runtime_fs.c",
+            "runtime_network.c",
+            "runtime_payload.c",
+            "bringup.c",
+            "process.c",
+            "rng.c",
+            "restart.c",
+        },
         .flags = runtime_flags,
     });
 
@@ -717,6 +730,8 @@ pub fn build(b: *std.Build) void {
         const runtime_contract_headers = [_][]const u8{
             "runtime_boot.h",
             "runtime_config.h",
+            "runtime_fs.h",
+            "runtime_lifecycle.h",
             "runtime_timer.h",
             "runtime_wait.h",
             "runtime_cothread.h",
@@ -746,7 +761,7 @@ pub fn build(b: *std.Build) void {
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{sddf}) });
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include/microkit", .{sddf}) });
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lionsos_src}) });
-    // lwIP headers: main.c includes <sddf/network/lib_sddf_lwip.h>, which pulls
+    // lwIP headers: runtime_network.c includes this header, which pulls
     // lwip/pbuf.h -> lwipopts.h + arch/cc.h from our vendored lwip_include.
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
     glue.root_module.addIncludePath(b.path("src/runtime/lwip_include"));

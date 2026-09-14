@@ -80,6 +80,9 @@
           # meaningful alongside an sdf generated with --with-restart-debug, and
           # left false everywhere else so production images cannot notify root.
           restartDebug ? false,
+          # Test-only config corruption applied after normal section injection.
+          # Used to prove ReleaseFast rejects malformed blobs explicitly.
+          corruptConfig ? null,
         }:
         pkgs.stdenvNoCC.mkDerivation {
           name = imgName;
@@ -297,6 +300,20 @@
               c: "oc ${c.section} ${c.blob} ${c.elf}"
             ) configSections}
 
+            ${pkgs.lib.optionalString (corruptConfig != null) ''
+              cp "$cfg/${corruptConfig.blob}" corrupt-config.bin
+              chmod u+w corrupt-config.bin
+              dd if=/dev/zero of=corrupt-config.bin bs=1 count=1 \
+                conv=notrunc status=none
+              check_section_layout build/${corruptConfig.elf} \
+                ${corruptConfig.section} \
+                "$(stat -c %s corrupt-config.bin)" \
+                "$(section_align build/${corruptConfig.elf} ${corruptConfig.section})"
+              llvm-objcopy --update-section \
+                ${corruptConfig.section}=corrupt-config.bin \
+                build/${corruptConfig.elf}
+            ''}
+
             ${chryso.microkitSdk}/bin/microkit $cfg/system.sdf \
               --search-path build \
               --board ${chryso.microkitBoard} \
@@ -430,6 +447,18 @@
         test-image = mkSel4Image {
           imgName = "sel4-beam-test-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+        };
+
+        # Test-only image with a correctly sized but invalid required config.
+        # The runtime must catch this before following any patched address.
+        lifecycle-failure-image = mkSel4Image {
+          imgName = "sel4-beam-lifecycle-failure-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_server.elf";
+          corruptConfig = {
+            blob = "serial_client_beam_server.data";
+            section = runtimeAbi.sections.serial_client;
+            elf = "beam_server.elf";
+          };
         };
 
         # ERTS image plus test-only control channels and the crasher child of

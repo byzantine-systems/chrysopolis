@@ -58,6 +58,7 @@
   sel4SystemImage,
   sel4TestImage,
   sel4RestartImage,
+  sel4LifecycleFailureImage,
   fatDisk,
 }:
 let
@@ -274,7 +275,7 @@ let
           Loaded probes keep working afterwards, which is what lets them report
           the failure the test is there to observe.
 
-          ERTS boots -mode embedded (src/runtime/main.c), so a call to an
+          ERTS boots -mode embedded (src/runtime/runtime_payload.c), so a call to an
           unloaded module is a plain undef and never an autoload: the code path
           has to be added and each module asked for by name.
           code:ensure_loaded/1 returns {error,embedded} here and is useless;
@@ -354,7 +355,7 @@ in
     '';
   };
 
-  # Bring-up image (no ERTS): beam_run()'s SOCKET_SMOKE cothread brings up the
+  # Bring-up image (no ERTS): runtime_network's SOCKET_SMOKE cothread brings up the
   # linked lwIP stack, gets a DHCP lease over the sDDF net path and exercises
   # socket()/bind()/listen()/connect() from C. Pins the lwip-socket-client
   # criterion (sockets work before ERTS is involved).
@@ -367,6 +368,32 @@ in
           "no DHCP lease before the socket self-test passed"
       assert_no_pd_fault(chryso)
       chryso.crash()
+    '';
+  };
+
+  # A malformed required config is an image-contract failure, not a transient
+  # runtime failure. It must be detected before the serial queues, boot banner,
+  # or event loop become visible, and it must not spend Root's restart budget.
+  lifecycle-config-failure-smoke = mkSel4Test {
+    name = "lifecycle-config-failure-smoke";
+    image = sel4LifecycleFailureImage;
+    testScript = ''
+      try:
+          wait_console(
+              chryso,
+              r"BEAM\|lifecycle\|FATAL\|stage=config\|status=config-serial\|code=1",
+              60,
+          )
+          log = chryso.get_console_log()
+          assert "BEAM|boot|" not in log, \
+              "beam_server exposed boot state after config validation failed"
+          assert "Microkit event loop live" not in log, \
+              "beam_server entered the event loop with partial state"
+          assert not re.search(r"ROOT\|fault\|child=${beamChild}", log), \
+              "a persistent config failure incorrectly requested restart"
+          assert_no_pd_fault(chryso)
+      finally:
+          power_off(chryso)
     '';
   };
 
@@ -647,7 +674,7 @@ in
   #      re-fills timeouts[] with UINT64_MAX, discarding every timeout armed
   #      before the restart, so the client is left waiting on a notification
   #      that will never arrive. Without the lost-timeout recovery in
-  #      beam_timer_arm (src/runtime/main.c) the PD wedges permanently here.
+  #      beam_timer_arm (src/runtime/runtime_timer.c) the PD wedges permanently here.
   #
   # This also exercises the non-passive timer_driver from the client side:
   # sddf_timer_time_now is a PPC, and a restarted PASSIVE PD could never answer

@@ -155,7 +155,7 @@ _Static_assert(offsetof(beam_survivor_hdr_t, offset) == 0 &&
 /*
  * The snapshot region base, patched by the Microkit tool at synthesis time
  * (setvar_vaddr="beam_snapshot_start" in tools/sdf/system.zig), exactly like
- * beam_heap_start in main.c.
+ * beam_heap_start in runtime_config.c.
  *
  * This lives in .bss, which means it is itself one of the survivors the scan
  * discovers. The ordering keeps that safe: the reset trampoline reads it BEFORE
@@ -390,7 +390,7 @@ uintptr_t beam_reset_restore(void) {
   return sp;
 }
 
-/* True once the PD has been restarted at least once. main.c gates the
+/* True once the PD has been restarted at least once. Lifecycle subsystems gate
  * shared-ring reconciles on this: the peers (virtualisers, copier, fatfs) kept
  * running across the restart and their rings still hold the dead instance's
  * state, which a cold boot never has to deal with. */

@@ -3,15 +3,17 @@
 
 #include <microkit.h>
 
+#include "runtime_lifecycle.h"
+
 #include <pthread.h>
 
 /*
  * Initialise the cooperative scheduler after libc_init(), which supplies the
  * stack allocations. The scheduler owns those stacks for the rest of this
- * boot. The current implementation has no recoverable allocation failure
- * result and must be called once before any of the functions below.
+ * boot. On allocation failure this releases every stack allocated by the call
+ * and leaves the scheduler uninitialised.
  */
-void thread_init(void);
+[[nodiscard]] runtime_status_t thread_init(void);
 
 /*
  * Deliver one Microkit notification to cothreads waiting on ch. This must run

@@ -10,7 +10,7 @@
  * while the slots are still free, so no double-register assert).
  *
  * File I/O (open/read/write/stat/lseek) is NOT handled here: the real libc fs
- * path (lib/libc/posix/file.c, wired in main.c) routes it to the FAT fs_server.
+ * path (lib/libc/posix/file.c, wired in runtime_fs.c) routes it to fatfs.
  * TCP/IP is NOT handled here either: gen_tcp drives the real libc socket layer
  * (sock.c -> tcp.c -> lwIP), and this file's epoll/ppoll stubs report socket
  * readiness from tcp.c and pump lwIP (beam_net_pump). The pipe2/timerfd/
@@ -200,7 +200,8 @@ static long bringup_timerfd_create(va_list ap) {
 /* socketpair: the ERTS-only shim. ERTS's spawn_init opens a unix-domain
  * (AF_UNIX) socketpair to talk to its port forker (erl_child_setup). This is
  * unrelated to the real AF_INET socket path (sock.c + lwIP, enabled via
- * libc_init in main.c): sock.c does not implement socketpair, and we cannot
+ * libc_init in runtime_lifecycle.c): sock.c does not implement socketpair,
+ * and we cannot
  * spawn OS processes, but spawn_init must succeed for ERTS to boot, so we hand
  * back two valid non-blocking fds. Port operations over them simply never
  * complete. */
@@ -1044,7 +1045,8 @@ void bringup_register_syscalls(void) {
   libc_define_syscall(SYS_epoll_ctl, bringup_epoll_ctl);
   libc_define_syscall(SYS_epoll_pwait, bringup_epoll_pwait);
   libc_define_syscall(SYS_pselect6, bringup_pselect6);
-  /* ppoll stays with bringup (not sock.c): main.c nulls sock.c's poll callbacks
+  /* ppoll stays with bringup (not sock.c): runtime_lifecycle.c nulls sock.c's
+   * poll callbacks
    * so sock.c does not claim __NR_ppoll, keeping the cothread-blocking stub
    * that ERTS boot needs (sock.c's sys_ppoll neither yields nor parks). */
   libc_define_syscall(SYS_ppoll, bringup_poll_yield);
@@ -1062,7 +1064,7 @@ void bringup_register_syscalls(void) {
 
   /* Real-entropy redefines: these slots are already claimed by libc_init /
    * libc_init_file, so REPLACE them (returning the old handler for chaining)
-   * rather than define. rng_init() (main.c) seeds the DRBG right after this. */
+   * rather than define. The lifecycle seeds the DRBG right after this. */
   old_clock_gettime =
       libc_redefine_syscall(SYS_clock_gettime, bringup_clock_gettime);
   libc_redefine_syscall(SYS_getrandom, bringup_getrandom);

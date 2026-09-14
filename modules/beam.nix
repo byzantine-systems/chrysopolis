@@ -157,7 +157,7 @@
 
         # Every aarch64 cross artifact, built by the one root build.zig:
         # libmicrokitco.a (the cothread runtime), the sDDF driver/virtualiser
-        # PDs, and the beam_server PD glue (main.c + bring-up shims) linked
+        # PDs, and the beam_server PD lifecycle + bring-up shims linked
         # against the LionsOS libc.a + libmicrokit. -Dwith-erts also produces
         # beam_test.elf, the same glue with the static ERTS archive linked in:
         # bin/beam_server.elf boots in bring-up mode (console + clock + heap),
