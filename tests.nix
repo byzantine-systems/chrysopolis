@@ -80,7 +80,7 @@ let
   # loaded before it can load the others.
   #
   # Derived rather than discovered ON THE GUEST for a hard reason: the LionsOS
-  # libc registers no getdents64 (see the openat shim in src/runtime/bringup.c),
+  # libc registers no getdents64 (see the openat handler in src/runtime/runtime_sys_devices.c),
   # so file:list_dir/1 cannot work there. For the same reason nothing may pass
   # `cache` to code:add_patha/2, which lists the directory it is given.
   testModules = pkgs.lib.concatStringsSep "," (
@@ -428,7 +428,7 @@ in
   # Three things have to be true, and they fail in different ways, so each is
   # asserted separately:
   #
-  #   1. The exit REACHES root. bringup_exit faults deliberately at a reserved
+  #   1. The exit REACHES root. runtime_sys_exit faults deliberately at a reserved
   #      unmapped address whose low byte is the exit code, so root's fault log
   #      carries the code in mr1. If this fails the PD is simply gone and every
   #      later wait times out.
@@ -564,7 +564,7 @@ in
   #
   # This is the recovery half of the restart story; restart-smoke above covers
   # the detection half (a faulting child). Here nothing faults: the test writes
-  # a driver class name to /dev/pd-restart, whose bringup.c shim notifies root
+  # a driver class name to /dev/pd-restart, whose runtime_pd_restart.c handler notifies root
   # on a debug channel, and root calls microkit_pd_restart on that child. That
   # separation is deliberate, driving recovery through a real fault would
   # conflate "did we detect it" with "did the driver come back".

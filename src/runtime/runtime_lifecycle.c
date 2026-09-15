@@ -11,6 +11,7 @@
 #include "runtime_fs.h"
 #include "runtime_network.h"
 #include "runtime_restart.h"
+#include "runtime_syscalls.h"
 #include "runtime_timer.h"
 #include "runtime_wait.h"
 
@@ -55,7 +56,7 @@ runtime_status_t runtime_lifecycle_start(void) {
    * and therefore happens only after thread_init below. */
   runtime_fs_bind();
   runtime_libc_init(network_enabled);
-  bringup_register_syscalls();
+  runtime_syscalls_register();
   rng_init();
 
   status = thread_init();

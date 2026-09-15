@@ -197,7 +197,7 @@ void rng_init(void) {
   rng_fill((uint8_t *)&srand_seed, sizeof(srand_seed));
   srand(srand_seed);
 
-  /* Per-boot wall-clock offset (see rng.h / bringup.c clock shim). */
+  /* Per-boot wall-clock offset (see rng.h / runtime_sys_time.c). */
   uint32_t off;
   rng_fill((uint8_t *)&off, sizeof(off));
   rng_realtime_offset_sec = off % RNG_OFFSET_MODULO;

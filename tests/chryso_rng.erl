@@ -12,7 +12,7 @@
 -export([sample/0]).
 
 %% The bounded file:read(Fd, 8) is not an optimisation, it is a requirement:
-%% /dev/urandom is synthesised by the openat shim in src/runtime/bringup.c and
+%% /dev/urandom is synthesised by the openat handler in src/runtime/runtime_sys_devices.c and
 %% NEVER returns EOF, so file:read_file/1 would loop forever. Reading it at all
 %% is the point of including it here, since that exercises the shim rather than
 %% just ERTS's own RNG.
