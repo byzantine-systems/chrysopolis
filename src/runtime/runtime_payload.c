@@ -10,6 +10,9 @@
 #include "runtime_cothread.h"
 #include "runtime_network.h"
 #include "runtime_restart.h"
+#ifdef CHRYSO_DIAGNOSTIC
+#include "runtime_thread_probe.h"
+#endif
 
 #include <libmicrokitco.h>
 
@@ -51,6 +54,11 @@ static runtime_status_t set_erts_environment(void) {
 }
 
 runtime_status_t runtime_payload_start(bool network_enabled) {
+#ifdef CHRYSO_DIAGNOSTIC
+  if (!runtime_thread_probe_run()) {
+    return RUNTIME_STATUS_THREAD_PROBE;
+  }
+#endif
   if (erl_start != NULL) {
     const runtime_status_t environment_status = set_erts_environment();
     if (environment_status != RUNTIME_STATUS_OK) {

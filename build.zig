@@ -19,6 +19,7 @@ const diagnostic_cflags = first_party_cflags ++ [_][]const u8{"-Werror"};
 const runtime_contract_diagnostic_cflags = diagnostic_cflags ++ [_][]const u8{
     "-Wmissing-prototypes",
     "-Wmissing-variable-declarations",
+    "-DCHRYSO_DIAGNOSTIC=1",
 };
 
 fn firstPartyCFlags(diagnostic: bool) []const []const u8 {
@@ -726,12 +727,26 @@ pub fn build(b: *std.Build) void {
             "runtime_sys_identity.c",
             "runtime_sys_devices.c",
             "runtime_pd_restart.c",
-            "process.c",
+            "runtime_cothread.c",
+            "runtime_wait.c",
+            "runtime_pthread_handle.c",
+            "runtime_pthread.c",
+            "runtime_pthread_attr.c",
+            "runtime_pthread_tls.c",
+            "runtime_pthread_locks.c",
+            "runtime_pthread_cond.c",
             "rng.c",
             "restart.c",
         },
         .flags = runtime_flags,
     });
+
+    if (diagnostic) {
+        glue.root_module.addCSourceFile(.{
+            .file = b.path("src/runtime/runtime_thread_probe.c"),
+            .flags = runtime_flags,
+        });
+    }
 
     if (diagnostic) {
         // Compile each internal contract header alone and include it twice.
@@ -744,6 +759,11 @@ pub fn build(b: *std.Build) void {
             "runtime_timer.h",
             "runtime_wait.h",
             "runtime_cothread.h",
+            "runtime_cothread_state.h",
+            "runtime_pthread_abi.h",
+            "runtime_pthread_handle.h",
+            "runtime_pthread_tls.h",
+            "runtime_thread_probe.h",
             "runtime_network.h",
             "runtime_restart.h",
             "runtime_syscalls.h",
@@ -769,7 +789,7 @@ pub fn build(b: *std.Build) void {
     glue.root_module.addConfigHeader(generated_abi);
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
-    // libmicrokitco.h + libhostedqueue/ (process.c's cothread layer), straight
+    // libmicrokitco.h + libhostedqueue/ (the cothread runtime), straight
     // from the libmicrokitco source tree (no installed include/ needed).
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = libmicrokitco_src });
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });

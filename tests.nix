@@ -59,6 +59,7 @@
   sel4TestImage,
   sel4RestartImage,
   sel4LifecycleFailureImage,
+  sel4ThreadProbeImage,
   fatDisk,
 }:
 let
@@ -349,6 +350,21 @@ in
           "MBR partitioning detected",
       ]:
           assert milestone in log, f"missing boot milestone: {milestone}"
+      assert_no_pd_fault(chryso)
+      assert_no_beam_fault(chryso)
+      chryso.crash()
+    '';
+  };
+
+  # Run native pthread ABI probes inside beam_server before the bring-up
+  # payload. This covers lifecycle errors an Erlang shell cannot invoke.
+  cothread-smoke = mkSel4Test {
+    name = "cothread-smoke";
+    image = sel4ThreadProbeImage;
+    testScript = ''
+      wait_console(chryso, r"COTHREAD_PROBE\|PASS", 180)
+      assert "COTHREAD_PROBE|FAIL" not in chryso.get_console_log(), \
+          "native pthread probe failed"
       assert_no_pd_fault(chryso)
       assert_no_beam_fault(chryso)
       chryso.crash()

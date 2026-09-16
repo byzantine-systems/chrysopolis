@@ -76,9 +76,9 @@ extern uint32_t rng_realtime_offset_sec;
  * because every consumer of an ABSOLUTE realtime deadline must know the two
  * clocks now differ by ~this much: LionsOS used to alias CLOCK_REALTIME to
  * CLOCK_MONOTONIC, and code that compared a realtime deadline against the
- * monotonic clock (process.c pthread_cond_timedwait, runtime_sys_time.c
- * clock_nanosleep TIMER_ABSTIME) silently never expired once the epoch went
- * in, which wedged ERTS boot.
+ * monotonic clock (runtime_pthread_cond.c pthread_cond_timedwait,
+ * runtime_sys_time.c clock_nanosleep TIMER_ABSTIME) silently never expired once
+ * the epoch went in, which wedged ERTS boot.
  */
 #define RNG_REALTIME_BASE_EPOCH 1767225600ull
 

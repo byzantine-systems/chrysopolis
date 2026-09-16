@@ -127,6 +127,7 @@ static const char *status_stage(runtime_status_t status) {
   case RUNTIME_STATUS_PAYLOAD_SPAWN:
     return "erts";
   case RUNTIME_STATUS_PROBE_SPAWN:
+  case RUNTIME_STATUS_THREAD_PROBE:
     return "probe";
   case RUNTIME_STATUS_OK:
     return "none";
@@ -164,6 +165,8 @@ static const char *status_name(runtime_status_t status) {
     return "payload-spawn";
   case RUNTIME_STATUS_PROBE_SPAWN:
     return "probe-spawn";
+  case RUNTIME_STATUS_THREAD_PROBE:
+    return "thread-probe";
   }
   return "unknown";
 }
