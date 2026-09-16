@@ -5,13 +5,13 @@
 
 #include "runtime_lifecycle.h"
 
-#include <pthread.h>
-
 /*
  * Initialise the cooperative scheduler after libc_init(), which supplies the
- * stack allocations. The scheduler owns those stacks for the rest of this
- * boot. On allocation failure this releases every stack allocated by the call
- * and leaves the scheduler uninitialised.
+ * 31 fixed 512 KiB stack allocations (15.5 MiB total). The scheduler owns
+ * those stacks for the rest of this boot. Repeated calls after success are
+ * harmless. On allocation failure this releases every stack allocated by the
+ * call, leaves the scheduler uninitialised, and returns
+ * RUNTIME_STATUS_COTHREAD_ALLOC.
  */
 [[nodiscard]] runtime_status_t thread_init(void);
 
@@ -26,13 +26,5 @@ void thread_notified(microkit_channel ch);
  * cothreads are parked and the root context must return to Microkit.
  */
 void thread_run_cothreads(void);
-
-/*
- * Legacy pthread entry points required by ERTS but not declared by this musl
- * pthread.h configuration. They preserve the existing ABI-compatible no-op
- * behavior and do not take ownership of pointer arguments.
- */
-int pthread_attr_setstackaddr(pthread_attr_t *attr, void *stackaddr);
-int pthread_sigmask(int how, const void *set, void *oldset);
 
 #endif

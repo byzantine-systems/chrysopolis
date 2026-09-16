@@ -8,6 +8,8 @@
 #     - The bring-up image (console + clock + heap, no ERTS).
 #   packages.test-image
 #     - the ERTS-linked image (erl_start handoff).
+#   packages.cothread-probe-image
+#     - diagnostic bring-up image with native pthread checks.
 {
   perSystem =
     {
@@ -447,6 +449,14 @@
         test-image = mkSel4Image {
           imgName = "sel4-beam-test-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+        };
+
+        # Diagnostic C pthread probe on the bring-up topology. The probe code
+        # is compiled only by beam-zig-diagnostic and is absent from shipped
+        # beam_server and ERTS-linked images.
+        cothread-probe-image = mkSel4Image {
+          imgName = "sel4-beam-cothread-probe-image";
+          beamElf = "${config.packages.beam-zig-diagnostic}/bin/beam_server.elf";
         };
 
         # Test-only image with a correctly sized but invalid required config.

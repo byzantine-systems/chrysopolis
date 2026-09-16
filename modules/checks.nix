@@ -197,6 +197,7 @@
           sel4TestImage = config.packages.test-image;
           sel4RestartImage = config.packages.restart-image;
           sel4LifecycleFailureImage = config.packages.lifecycle-failure-image;
+          sel4ThreadProbeImage = config.packages.cothread-probe-image;
           fatDisk = config.packages.disk;
         }
       );
