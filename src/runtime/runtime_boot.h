@@ -15,13 +15,6 @@ extern void erl_start(int argc, char **argv) __attribute__((weak));
 extern void beam_process_external_events(microkit_channel ch)
     __attribute__((weak));
 
-/*
- * Install the syscall compatibility layer after libc_init() has populated its
- * syscall table and before RNG initialisation or ERTS startup. This has no
- * recoverable failure result and must run once per cold or restored boot.
- */
-void bringup_register_syscalls(void);
-
 /* Spawn ERTS when linked, otherwise spawn the optional bring-up probe. */
 [[nodiscard]] runtime_status_t runtime_payload_start(bool network_enabled);
 

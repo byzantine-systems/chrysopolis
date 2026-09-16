@@ -60,11 +60,11 @@
  * to a symbol we expect the tool to patch means an assumption in this comment
  * is wrong.
  *
- * The restart request usually arrives from bringup_exit(), which ERTS reaches
- * on a COTHREAD stack allocated out of beam_heap. Microkit leaves SP alone
- * across a restart, so the reset trampoline would otherwise be running on a
- * stack inside the very arena libc_init is about to re-hand-out. It switches to
- * a stack inside the snapshot region before it calls any C.
+ * The restart request usually arrives from runtime_sys_exit(), which ERTS
+ * reaches on a COTHREAD stack allocated out of beam_heap. Microkit leaves SP
+ * alone across a restart, so the reset trampoline would otherwise be running on
+ * a stack inside the very arena libc_init is about to re-hand-out. It switches
+ * to a stack inside the snapshot region before it calls any C.
  */
 #include "runtime_restart.h"
 
@@ -211,7 +211,7 @@ static void put_hex(uint64_t v) {
  * Failing loudly here turns a capacity problem into an early-boot stop instead
  * of memory corruption thousands of instructions later.
  *
- * This parks, which is what this issue removed from bringup_exit, because a
+ * This parks, which is what this issue removed from the exit syscall, because a
  * restart cannot help here: it re-runs the same code over the same too-small
  * region and fails identically, so spending root's budget on it would replace a
  * legible stop with a restart loop. modules/images.nix asserts these same

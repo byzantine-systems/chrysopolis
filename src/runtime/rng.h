@@ -44,7 +44,7 @@ typedef struct {
  * on health-check failure), srand() the libc PRNG so stray rand() users stop
  * being boot-deterministic, derive the per-boot CLOCK_REALTIME offset, and
  * print one boot line: "RNG|source=<jitter|fallback>|fp=<8-hex>". Call once,
- * after bringup_register_syscalls() and before any generation or reseed call.
+ * after runtime_syscalls_register() and before any generation or reseed call.
  * The fingerprint is derived output; seeds, raw entropy, DRBG state and random
  * output must never be logged.
  */
@@ -65,18 +65,18 @@ void rng_reseed_from(const rng_provider_t *provider);
  * Per-boot CLOCK_REALTIME offset in seconds, derived from the DRBG at rng_init.
  * Small and bounded (see rng.c): enough to make erlang:make_ref()/rand differ
  * across boots without making the wall clock randomly wrong by up to a year.
- * bringup.c's clock_gettime shim adds this (over the base epoch below) to
+ * runtime_sys_clock_gettime adds this (over the base epoch below) to
  * CLOCK_REALTIME only. CLOCK_MONOTONIC is untouched. Zero until rng_init runs.
  */
 extern uint32_t rng_realtime_offset_sec;
 
 /*
  * 2026-01-01T00:00:00Z. CLOCK_REALTIME = sDDF monotonic time + this base epoch
- * + rng_realtime_offset_sec (bringup.c's clock_gettime shim). Shared here
+ * + rng_realtime_offset_sec (runtime_sys_clock_gettime). Shared here
  * because every consumer of an ABSOLUTE realtime deadline must know the two
  * clocks now differ by ~this much: LionsOS used to alias CLOCK_REALTIME to
  * CLOCK_MONOTONIC, and code that compared a realtime deadline against the
- * monotonic clock (process.c pthread_cond_timedwait, bringup.c
+ * monotonic clock (process.c pthread_cond_timedwait, runtime_sys_time.c
  * clock_nanosleep TIMER_ABSTIME) silently never expired once the epoch went
  * in, which wedged ERTS boot.
  */

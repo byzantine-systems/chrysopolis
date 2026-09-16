@@ -90,7 +90,7 @@ load(M) ->
 
 %% Path-free fallback: read the beam and hand ERTS the bytes. Note the plain
 %% file:read_file/1 rather than anything that lists a directory. The LionsOS
-%% libc registers no getdents64 (see the openat shim in src/runtime/bringup.c),
+%% libc registers no getdents64 (see the openat handler in src/runtime/runtime_sys_devices.c),
 %% so directory listing is unavailable on the guest: never pass `cache` to
 %% code:add_patha/2 or code:set_path/2 either, both of those list the directory.
 -spec load_binary(module()) -> binary | error.
@@ -138,7 +138,7 @@ alive(Class) ->
     emit(tag(Class) ++ "_ALIVE", 6 * 7).
 
 %% Ask root to restart a driver PD by class, via the /dev/pd-restart shim in
-%% src/runtime/bringup.c. Only present in images built with restartDebug (the
+%% src/runtime/runtime_pd_restart.c. Only present in images built with restartDebug (the
 %% shim is gated on a patched .pd_restart_config section), so on a production
 %% image the open fails with enoent and this badmatches loudly rather than
 %% silently doing nothing.

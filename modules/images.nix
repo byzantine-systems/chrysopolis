@@ -271,7 +271,7 @@
             ${pkgs.lib.optionalString restartDebug ''
               # Test-only /dev/pd-restart trigger: patch the beam_server-side
               # channel ids of the beam_server -> root debug channels
-              # into beam_server.elf's .pd_restart_config (src/runtime/bringup.c
+              # into beam_server.elf's .pd_restart_config (src/runtime/runtime_pd_restart.c
               # reads them there). The first four bytes are healthy restart
               # channels in serial, timer, blk, eth order; the next four are
               # fault-injection channels in the same class order. This matches
@@ -421,7 +421,7 @@
               mcopy -i $part start.boot "::/releases/$rel/start.boot"
 
               # Device files ERTS opens (empty: reads EOF, /dev/null sink).
-              # NOT /dev/urandom or /dev/random: bringup.c's openat shim backs
+              # NOT /dev/urandom or /dev/random: runtime_sys_devices.c's openat backs
               # those with the DRBG (an empty FAT file would just read EOF).
               : > empty
               mcopy -i $part empty ::/dev/null

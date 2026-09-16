@@ -58,7 +58,7 @@ check(Which) ->
 
 %% Shut the VM down the way an operator would. init:stop/0 runs the ordinary
 %% OTP shutdown and ends in erlang:halt(0), which reaches the exit/exit_group
-%% shim in src/runtime/bringup.c and becomes a restart request to root.
+%% handler in src/runtime/runtime_sys_identity.c and becomes a restart request to root.
 %%
 %% Returns ok immediately; the shutdown is asynchronous, so the test waits on
 %% the console rather than on this call.

@@ -99,7 +99,7 @@ pub fn main() !void {
     // beam_server.elf, so the C runtime reads each region's base from a global.
     //
     // beam_server is a CHILD of root, so an ERTS crash (or a deliberate
-    // init:stop(), which src/runtime/bringup.c turns into a fault carrying the
+    // init:stop(), which src/runtime/runtime_sys_identity.c turns into a fault carrying the
     // exit code) reaches root's fault() and is restarted rather than wedging
     // the PD forever.
     var beam_server = Pd.create(allocator, "beam_server", "beam_server.elf", .{ .priority = 1 });
@@ -339,7 +339,7 @@ pub fn main() !void {
     // beam_server's ids are allocated high and out of the way of the serial/timer/net/fs
     // channels sdfgen allocates from 0 upwards: beam_server learns every other
     // channel id from a serialised config blob, but these have no blob, so
-    // src/runtime/bringup.c reads them from the .pd_restart_config section that
+    // src/runtime/runtime_pd_restart.c reads them from the .pd_restart_config section that
     // modules/images.nix objcopies in (0xff = channel absent, which is what
     // production images keep). The manifest validator enforces sdfgen's id
     // ceiling so no channel can overflow its StaticBitSet. Declared last so
