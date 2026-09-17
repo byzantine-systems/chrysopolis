@@ -34,30 +34,11 @@ static void runtime_free_stack(void *pointer, void *context) {
 bool runtime_stack_prepare(uintptr_t *stacks, size_t count, size_t bytes,
                            runtime_stack_alloc_fn allocate,
                            runtime_stack_free_fn release, void *context) {
-  if (stacks == NULL || count != LIBMICROKITCO_MAX_COTHREADS - 1 ||
-      bytes < 4096 || allocate == NULL || release == NULL) {
+  if (count != LIBMICROKITCO_MAX_COTHREADS - 1) {
     return false;
   }
-  void *owned[LIBMICROKITCO_MAX_COTHREADS - 1] = {};
-  for (size_t i = 0; i < count; i++) {
-    stacks[i] = 0;
-  }
-  for (size_t i = 0; i < count; i++) {
-    void *stack = allocate(bytes, context);
-    if (stack == NULL || (uintptr_t)stack > UINTPTR_MAX - bytes) {
-      if (stack != NULL) {
-        release(stack, context);
-      }
-      for (size_t j = i; j > 0; j--) {
-        release(owned[j - 1], context);
-        stacks[j - 1] = 0;
-      }
-      return false;
-    }
-    owned[i] = stack;
-    stacks[i] = (uintptr_t)stack;
-  }
-  return true;
+  return runtime_stack_prepare_n(stacks, count, bytes, allocate, release,
+                                 context);
 }
 
 bool runtime_co_ready(void) {
@@ -91,7 +72,7 @@ runtime_status_t thread_init(void) {
 
   stack_ptrs_arg_array_t stacks = {};
   const size_t stack_count = LIBMICROKITCO_MAX_COTHREADS - 1;
-  static_assert(RUNTIME_CO_STACK_SIZE >= 4096);
+  static_assert(RUNTIME_CO_STACK_SIZE >= runtime_stack_min_bytes);
   if (!runtime_stack_prepare(stacks, stack_count, RUNTIME_CO_STACK_SIZE,
                              runtime_malloc_stack, runtime_free_stack, NULL)) {
     return RUNTIME_STATUS_COTHREAD_ALLOC;

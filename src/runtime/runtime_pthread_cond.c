@@ -92,14 +92,14 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
 
   /* ERTS uses CLOCK_REALTIME deadlines; older callers can still pass a
    * monotonic deadline. Only a realtime value can exceed the base epoch. */
-  clockid_t clock = abstime->tv_sec >= (time_t)RNG_REALTIME_BASE_EPOCH
-                        ? CLOCK_REALTIME
-                        : CLOCK_MONOTONIC;
+  clockid_t clock =
+      runtime_deadline_is_realtime(abstime, RNG_REALTIME_BASE_EPOCH)
+          ? CLOCK_REALTIME
+          : CLOCK_MONOTONIC;
   uint64_t deadline_ns = runtime_timespec_ns(abstime);
   if (clock == CLOCK_REALTIME) {
-    uint64_t epoch_ns = (RNG_REALTIME_BASE_EPOCH + rng_realtime_offset_sec) *
-                        runtime_ns_per_sec;
-    deadline_ns = deadline_ns > epoch_ns ? deadline_ns - epoch_ns : 0;
+    deadline_ns = runtime_realtime_to_monotonic_ns(
+        deadline_ns, RNG_REALTIME_BASE_EPOCH + rng_realtime_offset_sec);
   }
 
   struct timespec now = {};

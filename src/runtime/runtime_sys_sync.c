@@ -16,6 +16,7 @@
  * the untimed wait.
  */
 #include "runtime_deadline.h"
+#include "runtime_futex_cmd.h"
 #include "runtime_syscall_handlers.h"
 #include "runtime_wait.h"
 
@@ -24,17 +25,6 @@
 #include <errno.h>
 #include <time.h>
 
-/* Linux futex command numbers, after masking off the option bits. */
-enum : int {
-  chryso_futex_wait = 0,
-  chryso_futex_wake = 1,
-  chryso_futex_wait_bitset = 9,
-  chryso_futex_wake_bitset = 10,
-};
-
-/* Strips FUTEX_PRIVATE_FLAG and FUTEX_CLOCK_REALTIME. */
-static constexpr int chryso_futex_cmd_mask = 0x7f;
-
 static constexpr int timed_wait_yields = 4096;
 
 long runtime_sys_futex(va_list ap) {
@@ -42,15 +32,14 @@ long runtime_sys_futex(va_list ap) {
   const int op = runtime_sys_arg_int(va_arg(ap, long));
   const int val = runtime_sys_arg_int(va_arg(ap, long));
   const struct timespec *timeout = runtime_sys_arg_pointer(va_arg(ap, long));
-  const int cmd = op & chryso_futex_cmd_mask;
+  const runtime_futex_cmd cmd = runtime_futex_classify(op);
 
-  if (cmd == chryso_futex_wake || cmd == chryso_futex_wake_bitset) {
+  if (cmd == runtime_futex_wake) {
     thread_io_wake();
     return 0;
   }
-  /* REQUEUE, CMP_REQUEUE, WAKE_OP and the PI commands have no implementation.
-   * ethr_event and musl's __wait/__wake use only WAIT and WAKE. */
-  if (cmd != chryso_futex_wait && cmd != chryso_futex_wait_bitset) {
+  /* ethr_event and musl's __wait/__wake use only WAIT and WAKE. */
+  if (cmd == runtime_futex_unsupported) {
     return -ENOSYS;
   }
   if (uaddr == nullptr) {

@@ -19,6 +19,7 @@
 #include "runtime_pd_restart.h"
 #include "runtime_config.h"
 #include "runtime_fd.h"
+#include "runtime_pd_restart_parse.h"
 
 #include <microkit.h>
 
@@ -57,69 +58,39 @@ __attribute__((__section__(PD_RESTART_CONFIG_SECTION), used)) volatile uint8_t
 static const char *const pd_restart_names[PD_RESTART_CLASS_COUNT] = {
     "serial", "timer", "blk", "eth"};
 
-static bool pd_restart_enabled(void) {
-  for (size_t mode = 0; mode < PD_RESTART_MODE_COUNT; mode++) {
-    for (size_t class = 0; class < PD_RESTART_CLASS_COUNT; class++) {
-      if (pd_restart_channels[mode][class] != PD_RESTART_CH_NONE) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-static bool is_whitespace(char c) {
-  return c == '\n' || c == '\r' || c == ' ' || c == '\t';
-}
+static_assert(PD_RESTART_MODE_HEALTHY == runtime_pd_restart_mode_healthy);
+static_assert(PD_RESTART_MODE_FAULT == runtime_pd_restart_mode_fault);
 
 /* The payload is a class name for a healthy restart or "fault:<class>" for a
  * genuine driver fault. Trailing whitespace is ignored so file:write_file/2
  * and an echo-style write with a newline both match. */
 static ssize_t pd_restart_write(const void *data, size_t count, int fd) {
   (void)fd;
-  const char *buf = data;
-  /* Reported back as the bytes written, see the success return below. */
-  const size_t written = count;
-
-  while (count > 0 && is_whitespace(buf[count - 1])) {
-    count--;
+  size_t mode = 0;
+  size_t class_index = 0;
+  if (runtime_pd_restart_parse(data, count, pd_restart_names,
+                               PD_RESTART_CLASS_COUNT, &mode,
+                               &class_index) != runtime_pd_restart_parse_ok) {
+    /* An unknown class fails the write, so a typo in a test surfaces as an
+     * error at the write. */
+    return -EINVAL;
   }
 
-  size_t mode = PD_RESTART_MODE_HEALTHY;
-  static constexpr char fault_prefix[] = "fault:";
-  const size_t fault_prefix_len = sizeof(fault_prefix) - 1;
-  if (count > fault_prefix_len &&
-      strncmp(buf, fault_prefix, fault_prefix_len) == 0) {
-    mode = PD_RESTART_MODE_FAULT;
-    buf += fault_prefix_len;
-    count -= fault_prefix_len;
+  /* The class needs a channel in THIS image. A missing one means the SDF was
+   * generated without --with-restart-debug for this class. */
+  const uint8_t ch = pd_restart_channels[mode][class_index];
+  if (ch == PD_RESTART_CH_NONE) {
+    return -ENODEV;
   }
-
-  for (size_t i = 0; i < PD_RESTART_CLASS_COUNT; i++) {
-    const char *name = pd_restart_names[i];
-    const size_t len = strlen(name);
-    if (count != len || strncmp(buf, name, len) != 0) {
-      continue;
-    }
-    /* The class needs a channel in THIS image. A missing one means the SDF was
-     * generated without --with-restart-debug for this class. */
-    const uint8_t ch = pd_restart_channels[mode][i];
-    if (ch == PD_RESTART_CH_NONE) {
-      return -ENODEV;
-    }
-    /* Root owns the restart policy and the child TCB caps. The full original
-     * count is reported: the trimmed bytes were consumed, and a short write
-     * would make a caller such as file:write/2 retry with the remainder and
-     * trigger a second restart. */
-    printf("PD_RESTART|request|class=%s|mode=%s|ch=%u\n", name,
-           mode == PD_RESTART_MODE_FAULT ? "fault" : "restart", (unsigned)ch);
-    microkit_notify(ch);
-    return (ssize_t)written;
-  }
-
-  /* An unknown class fails the write, so a typo in a test surfaces as an
-   * error at the write. */
-  return -EINVAL;
+  /* Root owns the restart policy and the child TCB caps. The full original
+   * count is reported: the trimmed bytes were consumed, and a short write
+   * would make a caller such as file:write/2 retry with the remainder and
+   * trigger a second restart. */
+  printf("PD_RESTART|request|class=%s|mode=%s|ch=%u\n",
+         pd_restart_names[class_index],
+         mode == PD_RESTART_MODE_FAULT ? "fault" : "restart", (unsigned)ch);
+  microkit_notify(ch);
+  return (ssize_t)count;
 }
 
 /* io.c's sys_fstat calls fd_entry->fstat without a null check, so every
@@ -140,7 +111,10 @@ static bool is_pd_restart_path(const char *path) {
 }
 
 bool runtime_pd_restart_handles_path(const char *path) {
-  return is_pd_restart_path(path) && pd_restart_enabled();
+  return is_pd_restart_path(path) &&
+         runtime_pd_restart_any_channel(
+             PD_RESTART_MODE_COUNT, PD_RESTART_CLASS_COUNT, pd_restart_channels,
+             PD_RESTART_CH_NONE);
 }
 
 int runtime_pd_restart_open(void) {

@@ -1080,6 +1080,35 @@ in
           assert read_module(chryso, "again", "sets", 180) in ("error", "EXIT"), \
               "second fs read after give-up did not fail cleanly"
 
+          # Gone is terminal. Ask for both a fault injection and a healthy
+          # restart of the stopped driver: root must log each as ignored and
+          # make no Microkit call. Before the gone state, the injection resumed
+          # the stopped TCB at address 0 (microkit_pd_restart resumes), which
+          # produced a fresh fault, a second give-up and a second notification
+          # to blk_virt. /dev/pd-restart is a device shim, not a file on the
+          # dead disk, so both requests still reach root.
+          chryso.send_console("chryso_test:fault_pd('blk').\r")
+          wait_console(chryso, r"ROOT\|gone\|child=${blkChild}\|ignored=fault-inject", 120)
+          chryso.send_console("chryso_test:restart_pd('blk').\r")
+          wait_console(chryso, r"ROOT\|gone\|child=${blkChild}\|ignored=debug-restart", 120)
+
+          log = chryso.get_console_log()
+          assert len(re.findall(r"ROOT\|fault\|child=${blkChild}(?:\||$)", log, re.M)) == budget + 1, \
+              "a request for the stopped block driver produced another fault"
+          assert len(re.findall(r"ROOT\|fault-inject\|child=${blkChild}", log)) == budget + 1, \
+              "root injected a fault into the stopped block driver"
+          assert log.count("ROOT|giveup|child=${blkChild}|") == 1, \
+              "root gave up on the block driver more than once"
+          assert len(re.findall(r"driver stopped, reconciling outstanding requests", log)) == 1, \
+              "blk_virt was told the driver stopped more than once"
+          assert "ROOT|debug-restart|child=${blkChild}" not in log, \
+              "root restarted the stopped block driver"
+
+          # And the requests changed nothing for clients: reads still fail
+          # promptly instead of reaching a half-revived driver.
+          assert read_module(chryso, "gone", "orddict", 180) in ("error", "EXIT"), \
+              "fs read after requests for the stopped driver did not fail cleanly"
+
           # The rest of the system is untouched: the shell still evaluates, so
           # losing the block device cost us the block device and nothing else.
           # A probe loaded before the disk died still runs from memory.

@@ -7,6 +7,7 @@
  */
 #include "runtime_pthread_tls.h"
 #include "runtime_cothread_state.h"
+#include "runtime_tls_row.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -14,11 +15,6 @@
 #include <stddef.h>
 
 enum { RUNTIME_MAX_KEYS = 64 };
-
-typedef struct {
-  void (*destructor)(void *);
-  bool used;
-} runtime_key_slot;
 
 static runtime_key_slot key_table[RUNTIME_MAX_KEYS];
 static void *co_tsd[LIBMICROKITCO_MAX_COTHREADS][RUNTIME_MAX_KEYS];
@@ -92,20 +88,6 @@ void runtime_tls_finish(microkit_cothread_ref_t handle) {
   if (!runtime_co_handle_valid(handle)) {
     return;
   }
-  for (size_t pass = 0; pass < RUNTIME_TSD_DESTRUCTOR_PASSES; pass++) {
-    bool called = false;
-    for (size_t key = 0; key < RUNTIME_MAX_KEYS; key++) {
-      void *value = co_tsd[(size_t)handle][key];
-      void (*destructor)(void *) = key_table[key].destructor;
-      if (key_table[key].used && value != NULL && destructor != NULL) {
-        co_tsd[(size_t)handle][key] = NULL;
-        destructor(value);
-        called = true;
-      }
-    }
-    if (!called) {
-      break;
-    }
-  }
-  runtime_tls_clear(handle);
+  runtime_tls_finish_row(key_table, co_tsd[(size_t)handle], RUNTIME_MAX_KEYS,
+                         RUNTIME_TSD_DESTRUCTOR_PASSES);
 }

@@ -24,6 +24,7 @@
 #include "runtime_config.h"
 #include "runtime_console.h"
 #include "runtime_deadline.h"
+#include "runtime_epoll_table.h"
 #include "runtime_fd.h"
 #include "runtime_network.h"
 #include "runtime_syscall_handlers.h"
@@ -51,23 +52,17 @@ static_assert(EPOLLIN == POLLIN);
 static_assert(EPOLLOUT == POLLOUT);
 static_assert(EPOLLERR == POLLERR);
 static_assert(EPOLLHUP == POLLHUP);
+static_assert(EPOLLIN == runtime_epoll_in);
+static_assert(EPOLLOUT == runtime_epoll_out);
+static_assert(EPOLLERR == runtime_epoll_err);
+static_assert(EPOLLHUP == runtime_epoll_hup);
+static_assert(EPOLLONESHOT == runtime_epoll_oneshot);
+/* epoll_data is reported through its 64-bit member. */
+static_assert(sizeof(epoll_data_t) == sizeof(uint64_t));
 
 static constexpr size_t epoll_max_fds = 64;
 
-struct epoll_entry {
-  int fd;
-  /* Returned verbatim by epoll_pwait: ERTS identifies the I/O source by it. */
-  struct epoll_event ev;
-  bool active;
-  /* EPOLLONESHOT: cleared after one report, set again by EPOLL_CTL_MOD. */
-  bool armed;
-  /* Readiness comes from tcp.c when set, otherwise only fd 0 can be ready. */
-  bool is_sock;
-  /* tcp.c socket index, valid when is_sock is set. */
-  int sock_handle;
-};
-
-static struct epoll_entry epoll_table[epoll_max_fds];
+static runtime_epoll_entry epoll_table[epoll_max_fds];
 
 /* True when fd is an open descriptor whose fstat reports S_IFSOCK. Safe for
  * any fd value. socket_index_of_fd indexes its table without a bounds check
@@ -127,72 +122,44 @@ long runtime_sys_epoll_ctl(va_list ap) {
     if (posix_fd_entry(fd) == nullptr) {
       return -EBADF;
     }
-    struct epoll_entry *entry = nullptr;
-    for (size_t i = 0; i < epoll_max_fds; i++) {
-      if (epoll_table[i].active && epoll_table[i].fd == fd) {
-        entry = &epoll_table[i];
-        break;
-      }
-    }
-    if (entry == nullptr) {
-      for (size_t i = 0; i < epoll_max_fds; i++) {
-        if (!epoll_table[i].active) {
-          entry = &epoll_table[i];
-          break;
-        }
-      }
-    }
-    if (entry == nullptr) {
+    const bool is_sock = fd_is_socket(fd);
+    if (runtime_epoll_table_set(epoll_table, epoll_max_fds, fd, event->events,
+                                event->data.u64, is_sock,
+                                is_sock ? socket_index_of_fd(fd) : -1) !=
+        runtime_epoll_ok) {
       return -ENOSPC;
     }
-    const bool is_sock = fd_is_socket(fd);
-    *entry = (struct epoll_entry){
-        .fd = fd,
-        .ev = *event,
-        .active = true,
-        .armed = true,
-        .is_sock = is_sock,
-        .sock_handle = is_sock ? socket_index_of_fd(fd) : -1,
-    };
   } else if (op == EPOLL_CTL_DEL) {
-    for (size_t i = 0; i < epoll_max_fds; i++) {
-      if (epoll_table[i].active && epoll_table[i].fd == fd) {
-        epoll_table[i].active = false;
-        break;
-      }
-    }
+    runtime_epoll_table_remove(epoll_table, epoll_max_fds, fd);
   }
   return 0;
 }
 
-static int epoll_scan(struct epoll_event *events, int maxevents) {
-  int n = 0;
-  for (size_t i = 0; i < epoll_max_fds && n < maxevents; i++) {
-    struct epoll_entry *entry = &epoll_table[i];
-    if (!entry->active || !entry->armed) {
-      continue;
-    }
-    uint32_t revents = 0;
-    if (entry->is_sock) {
-      revents = socket_revents(entry->sock_handle);
-    } else if (entry->fd == 0 && runtime_console_readable()) {
-      revents = EPOLLIN;
-    }
-    revents &= entry->ev.events | EPOLLERR | EPOLLHUP;
-    if (revents == 0) {
-      continue;
-    }
-    events[n].events = revents;
-    events[n].data = entry->ev.data;
-    n++;
-    /* EPOLLONESHOT: stay silent until ERTS re-arms with EPOLL_CTL_MOD. This
-     * keeps the scheduler from spinning on one event and lets the dirty-IO
-     * cothread run read(0). */
-    if (entry->ev.events & EPOLLONESHOT) {
-      entry->armed = false;
-    }
+static uint32_t epoll_readiness(void *context,
+                                const runtime_epoll_entry *entry) {
+  (void)context;
+  if (entry->is_sock) {
+    return socket_revents(entry->sock_handle);
   }
-  return n;
+  return entry->fd == 0 && runtime_console_readable() ? EPOLLIN : 0;
+}
+
+static void epoll_report(void *context, size_t index, uint32_t events,
+                         uint64_t data) {
+  struct epoll_event *out = context;
+  out[index] = (struct epoll_event){.events = events, .data.u64 = data};
+}
+
+/* events must hold maxevents entries, and maxevents must be positive. */
+static int epoll_scan(struct epoll_event *events, int maxevents) {
+  const runtime_epoll_scan_ops ops = {
+      .readiness = epoll_readiness,
+      .report = epoll_report,
+      .context = events,
+  };
+  /* The count is at most maxevents, so it fits back into int. */
+  return (int)runtime_epoll_table_scan(epoll_table, epoll_max_fds, &ops,
+                                       (size_t)maxevents);
 }
 
 long runtime_sys_epoll_pwait(va_list ap) {
@@ -210,7 +177,7 @@ long runtime_sys_epoll_pwait(va_list ap) {
   int n = epoll_scan(events, maxevents);
   if (n == 0 && timeout != 0) {
     if (timeout > 0) {
-      arm_timeout((uint64_t)timeout * 1000000);
+      arm_timeout(runtime_timeout_ms_ns(timeout));
     }
     thread_io_wait();
     beam_net_pump();
@@ -239,8 +206,7 @@ static int poll_scan(struct pollfd *fds, nfds_t nfds) {
     } else if (fd_is_socket(p->fd)) {
       /* Only requested IN/OUT conditions are reported. HUP and ERR always
        * are, as poll(2) specifies. */
-      const uint32_t wanted =
-          ((uint32_t)p->events & (POLLIN | POLLOUT)) | POLLHUP | POLLERR;
+      const uint32_t wanted = runtime_poll_wanted_mask((uint32_t)p->events);
       /* The mask holds only the four low poll bits, so it fits in short. */
       p->revents = (short)(socket_revents(socket_index_of_fd(p->fd)) & wanted);
     }
@@ -273,8 +239,7 @@ long runtime_sys_ppoll(va_list ap) {
   beam_net_pump();
 
   int ready = poll_scan(fds, nfds);
-  const bool zero_timeout =
-      tmo != nullptr && tmo->tv_sec == 0 && tmo->tv_nsec == 0;
+  const bool zero_timeout = tmo != nullptr && runtime_timespec_is_zero(tmo);
   if (ready == 0 && !zero_timeout) {
     if (tmo != nullptr) {
       arm_timeout(runtime_timespec_ns(tmo));
@@ -299,7 +264,7 @@ long runtime_sys_pselect6(va_list ap) {
   const struct timespec *timeout = runtime_sys_arg_pointer(va_arg(ap, long));
   (void)va_arg(ap, long); /* sigmask */
 
-  if (nfds < 0 || nfds > FD_SETSIZE) {
+  if (!runtime_select_nfds_valid(nfds, FD_SETSIZE)) {
     return -EINVAL;
   }
   if (timeout != nullptr && !runtime_timespec_valid(timeout)) {
@@ -310,7 +275,7 @@ long runtime_sys_pselect6(va_list ap) {
   const bool want_stdin =
       nfds > 0 && readfds != nullptr && FD_ISSET(0, readfds);
   const bool zero_timeout =
-      timeout != nullptr && timeout->tv_sec == 0 && timeout->tv_nsec == 0;
+      timeout != nullptr && runtime_timespec_is_zero(timeout);
 
   int ready = want_stdin && runtime_console_readable() ? 1 : 0;
   if (ready == 0 && !zero_timeout) {

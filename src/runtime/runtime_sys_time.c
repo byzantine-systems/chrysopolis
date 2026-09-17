@@ -63,10 +63,8 @@ long runtime_sys_clock_nanosleep(va_list ap) {
    * deadline back first. Unshifted it is ~56 years away and the sleep never
    * returns. Relative sleeps and monotonic deadlines pass through. */
   if (absolute && clockid == CLOCK_REALTIME) {
-    const uint64_t epoch_ns =
-        (RNG_REALTIME_BASE_EPOCH + rng_realtime_offset_sec) *
-        runtime_ns_per_sec;
-    reqns = reqns > epoch_ns ? reqns - epoch_ns : 0;
+    reqns = runtime_realtime_to_monotonic_ns(
+        reqns, RNG_REALTIME_BASE_EPOCH + rng_realtime_offset_sec);
   }
   const uint64_t target =
       absolute ? reqns : runtime_deadline_after(sddf_timer_time_now(ch), reqns);

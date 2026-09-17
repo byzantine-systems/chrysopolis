@@ -49,6 +49,18 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - run: nix build .#checks.x86_64-linux.test-modules --print-build-logs
 
+  # Host tests for the pure runtime logic in src/runtime (tests/host). A native
+  # Zig build with no cross inputs, so it also runs beside the image build and
+  # fails in seconds on a broken boundary or state transition.
+  runtime-host-tests:
+    name: "[Nix] Runtime host tests"
+    needs: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-nix
+      - run: nix build .#checks.x86_64-linux.runtime-host-tests --print-build-logs
+
   image:
     name: "[Nix] Build images + disk"
     needs: format
@@ -61,6 +73,19 @@ jobs:
       # the FAT disk they all attach. Built once here so the fanned-out test jobs
       # restore them from the cache instead of each rebuilding them.
       - run: nix build .#test-image .#default .#disk .#restart-image --print-build-logs
+
+  # Root's restart topology read from the Microkit tool's report.txt for both
+  # the production and restart images: entries, priorities, fault endpoints,
+  # TCB cap slots and restart channels. No QEMU, but it needs the images, so it
+  # restores them from the cache after the image job.
+  restart-topology:
+    name: "[Nix] Restart topology"
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-nix
+      - run: nix build .#checks.x86_64-linux.restart-topology --print-build-logs
 
   test:
     name: "[QEMU] ${{ matrix.check }}"

@@ -8,6 +8,7 @@
 #include <libmicrokitco.h>
 
 #include "runtime_network.h"
+#include "runtime_tcp_logic.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -47,18 +48,6 @@
 
 static int socket_refcount[MAX_SOCKETS];
 
-typedef enum {
-    socket_state_unallocated,
-    socket_state_allocated,
-    socket_state_bound,
-    socket_state_connecting,
-    socket_state_connected,
-    socket_state_closing,
-    socket_state_closed_by_peer,
-    socket_state_error,
-    socket_state_listening,
-} socket_state_t;
-
 static ssize_t lwip_err_to_errno[20] = {
     [ERR_OK] = 0,
 
@@ -80,6 +69,11 @@ static ssize_t lwip_err_to_errno[20] = {
     [-ERR_CLSD] = ENOTCONN,
     [-ERR_ARG] = EINVAL,
 };
+
+static ssize_t lwip_errno(err_t err) {
+    return tcp_lwip_err_in_table(err, sizeof(lwip_err_to_errno) / sizeof(lwip_err_to_errno[0]))
+        ? lwip_err_to_errno[-err] : 0;
+}
 
 typedef struct {
     int pending_socket_indices[MAX_LISTEN_BACKLOG];
@@ -184,7 +178,7 @@ static void socket_err_func(void *arg, err_t err) {
 
         socket_state_t prev_state = socket->state;
         socket->state = socket_state_error;
-        socket->last_error = lwip_err_to_errno[-err];
+        socket->last_error = lwip_errno(err);
 
         // Wake up any blocked connect() call
         if (prev_state == socket_state_connecting) {
@@ -210,13 +204,13 @@ static err_t socket_recv_callback(void *arg, struct tcp_pcb *tpcb, struct pbuf *
         if (p != NULL) {
             int capacity = SOCKET_BUF_SIZE - socket->rx_len;
             if (capacity < p->tot_len) {
-                return -lwip_err_to_errno[-ERR_MEM];
+                return -lwip_errno(ERR_MEM);
             }
 
             int copied = 0, remaining = p->tot_len;
             while (remaining != 0) {
-                int rx_tail = (socket->rx_head + socket->rx_len) % SOCKET_BUF_SIZE;
-                int to_copy = MIN(remaining, SOCKET_BUF_SIZE - MAX(socket->rx_len, rx_tail));
+                int rx_tail = tcp_rx_tail(socket->rx_head, socket->rx_len, SOCKET_BUF_SIZE);
+                int to_copy = MIN(remaining, (int)tcp_rx_free_span(socket->rx_head, socket->rx_len, SOCKET_BUF_SIZE));
                 pbuf_copy_partial(p, socket->rx_buf + rx_tail, to_copy, copied);
                 socket->rx_len += to_copy;
                 copied += to_copy;
@@ -369,7 +363,7 @@ static int tcp_socket_connect(int index, uint32_t addr, uint16_t port, int flags
     err_t err = tcp_connect(sock->sock_tpcb, &ipaddr, port, socket_connected);
     if (err != ERR_OK) {
         dlog("error connecting (%d)", err);
-        return -lwip_err_to_errno[-err];
+        return -lwip_errno(err);
     }
 
     if (flags & O_NONBLOCK) {
@@ -396,19 +390,18 @@ static int tcp_socket_close_int(int index) {
     socket_t *socket = &sockets[index];
 
     tcp_trace("close", index, socket->state, 0);
-    switch (socket->state) {
-    case socket_state_listening:
-    case socket_state_connected: {
+    switch (tcp_close_action(socket->state)) {
+    case tcp_close_begin: {
         socket->state = socket_state_closing;
         int err = tcp_close(socket->sock_tpcb);
         if (err != ERR_OK) {
             dlog("error closing socket (%d)", err);
-            return -lwip_err_to_errno[-err];
+            return -lwip_errno(err);
         }
         return SOCK_SUCC;
     }
 
-    case socket_state_connecting: {
+    case tcp_close_abort_connecting: {
         tcp_arg(socket->sock_tpcb, NULL);  // Prevent error callback noise
         tcp_abort(socket->sock_tpcb);
         socket->state = socket_state_unallocated;
@@ -419,7 +412,7 @@ static int tcp_socket_close_int(int index) {
         return SOCK_SUCC;
     }
 
-    case socket_state_closed_by_peer: {
+    case tcp_close_release_peer_closed: {
         /* Peer already sent FIN but the PCB is still open on our side (we
          * keep it alive for half-close writes). Detach the arg AND the
          * callbacks: ACKs for data we just wrote (an echo reply, e.g.) can
@@ -441,9 +434,7 @@ static int tcp_socket_close_int(int index) {
         return SOCK_SUCC;
     }
 
-    case socket_state_allocated:
-    case socket_state_bound:
-    case socket_state_error: {
+    case tcp_close_release_idle: {
         socket->state = socket_state_unallocated;
         socket->sock_tpcb = NULL;
         socket->rx_head = 0;
@@ -452,6 +443,7 @@ static int tcp_socket_close_int(int index) {
         return SOCK_SUCC;
     }
 
+    case tcp_close_invalid:
     default:
         dlog("called on invalid socket state: %d", socket->state);
         assert(false);
@@ -513,12 +505,12 @@ static ssize_t tcp_socket_write(int index, const char *buf, size_t len, int flag
     err_t err = tcp_write(sock->sock_tpcb, (void *)buf, (u16_t)to_write, 1);
     if (err != ERR_OK) {
         dlog("tcp_write failed (%d)", err);
-        return -lwip_err_to_errno[-err];
+        return -lwip_errno(err);
     }
     err = tcp_output(sock->sock_tpcb);
     if (err != ERR_OK) {
         dlog("tcp_output failed (%d)", err);
-        return -lwip_err_to_errno[-err];
+        return -lwip_errno(err);
     }
     tcp_trace("write-out", index, sock->state, (long)to_write);
     return to_write;
@@ -549,12 +541,12 @@ static ssize_t tcp_socket_recv(int index, char *buf, size_t len, int flags) {
 
     ssize_t copied = 0;
     while (copied != len) {
-        ssize_t to_copy = MIN(len - copied, MIN(sock->rx_len, SOCKET_BUF_SIZE - sock->rx_head));
+        ssize_t to_copy = MIN(len - copied, tcp_rx_read_span(sock->rx_head, sock->rx_len, SOCKET_BUF_SIZE));
         if (to_copy == 0) {
             break;
         }
         memcpy(buf + copied, sock->rx_buf + sock->rx_head, to_copy);
-        sock->rx_head = (sock->rx_head + to_copy) % SOCKET_BUF_SIZE;
+        sock->rx_head = tcp_rx_advance(sock->rx_head, to_copy, SOCKET_BUF_SIZE);
         sock->rx_len -= to_copy;
         copied += to_copy;
     }
@@ -567,7 +559,7 @@ static int tcp_socket_readable(int index) {
     // For listening sockets, "readable" means pending connections
     if (socket->state == socket_state_listening) {
         accept_queue_t *q = &socket->accept_queue;
-        return q->head != q->tail;
+        return !tcp_backlog_empty(q->head, q->tail);
     }
 
     // For connected sockets, "readable" means data available to read
@@ -633,7 +625,7 @@ static err_t tcp_socket_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) 
     assert(listen_socket->state == socket_state_listening);
 
     if (err != ERR_OK) {
-        return -lwip_err_to_errno[-err];
+        return -lwip_errno(err);
     }
 
     /* Pre-allocate a socket so we can register the recv/sent/err callbacks on
@@ -659,9 +651,7 @@ static err_t tcp_socket_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) 
 
     accept_queue_t *q = &listen_socket->accept_queue;
 
-    int next_head = (q->head + 1) % MAX_LISTEN_BACKLOG;
-
-    if (next_head == q->tail) {
+    if (!tcp_backlog_push(q->pending_socket_indices, MAX_LISTEN_BACKLOG, &q->head, q->tail, new_index)) {
         /* Backlog full: tear down the socket we just allocated. */
         socket->state = socket_state_unallocated;
         socket->sock_tpcb = NULL;
@@ -674,9 +664,6 @@ static err_t tcp_socket_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) 
         }
         return ERR_MEM;
     }
-
-    q->pending_socket_indices[q->head] = new_index;
-    q->head = next_head;
 
     // printf("DIAG|%lu|accept_cb queued sock=%d waiter=%d\n", diag_ms(), new_index,
     //        !microkit_cothread_semaphore_is_queue_empty(
@@ -713,7 +700,7 @@ static int tcp_socket_accept(int listen_index, int flags) {
 
     accept_queue_t *q = &listen_socket->accept_queue;
 
-    if (q->head == q->tail) {
+    if (tcp_backlog_empty(q->head, q->tail)) {
         if (flags & O_NONBLOCK) {
             // static unsigned long eagain_count;
             // if ((eagain_count++ & 0x3f) == 0) {
@@ -726,15 +713,14 @@ static int tcp_socket_accept(int listen_index, int flags) {
         // printf("DIAG|%lu|accept sem-woke\n", diag_ms());
     }
 
-    if (q->head == q->tail) {
+    int new_index = 0;
+    if (!tcp_backlog_pop(q->pending_socket_indices, MAX_LISTEN_BACKLOG, q->head, &q->tail, &new_index)) {
         return -ENOMEM;
     }
 
     /* The accept callback already allocated the socket and registered all
      * callbacks (recv/sent/err) on the new PCB before enqueuing this index.
      * We just dequeue, bump the refcount, and return. */
-    int new_index = q->pending_socket_indices[q->tail];
-    q->tail = (q->tail + 1) % MAX_LISTEN_BACKLOG;
 
     socket_refcount[new_index]++;
 
@@ -770,7 +756,7 @@ static int tcp_socket_bind(int index, uint32_t addr, uint16_t port) {
 
     err_t err = tcp_bind(sock->sock_tpcb, &ipaddr, port);
     if (err != ERR_OK) {
-        return -lwip_err_to_errno[-err];
+        return -lwip_errno(err);
     }
 
     sock->state = socket_state_bound;

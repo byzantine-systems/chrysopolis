@@ -1,6 +1,8 @@
 #ifndef CHRYSOPOLIS_RUNTIME_COTHREAD_STATE_H
 #define CHRYSOPOLIS_RUNTIME_COTHREAD_STATE_H 1
 
+#include "runtime_stack.h"
+
 #include <libmicrokitco.h>
 
 #include <stdbool.h>
@@ -21,15 +23,11 @@ enum { RUNTIME_CO_STACK_SIZE = 512U * 1024U };
 /* Yields to the cooperative scheduler after initialization, seL4 before it. */
 void runtime_co_yield_once(void);
 
-typedef void *(*runtime_stack_alloc_fn)(size_t bytes, void *context);
-typedef void (*runtime_stack_free_fn)(void *pointer, void *context);
-/* Prepare exactly LIBMICROKITCO_MAX_COTHREADS - 1 stack addresses. allocate
- * must return a distinct allocation of at least bytes for each successful
- * call; release accepts every such pointer. Both callbacks run synchronously
- * and context is never retained. On invalid arguments, return false without
- * changing stacks. On allocation failure, release all acquired allocations
- * and clear every output slot. On success, the caller owns every allocation
- * until it passes the complete array to microkit_cothread_init. */
+/* runtime_stack_prepare_n (runtime_stack.h) with count fixed at exactly
+ * LIBMICROKITCO_MAX_COTHREADS - 1. Any other count is an invalid argument and
+ * returns false without calling either callback or writing stacks. On
+ * success, the caller owns every allocation until it passes the complete
+ * array to microkit_cothread_init. */
 [[nodiscard]] bool runtime_stack_prepare(uintptr_t *stacks, size_t count,
                                          size_t bytes,
                                          runtime_stack_alloc_fn allocate,

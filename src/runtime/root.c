@@ -31,7 +31,26 @@
  *     state, so it resets that memory itself before re-entering the normal boot
  *     path. Root's part is only knowing which of the two entry points to use;
  *     the mechanism lives in src/runtime/restart.c.
+ *
+ * Identifiers:
+ *   - Microkit child ids and channel ids are separate id spaces
+ *     (BASE_TCB_CAP versus BASE_OUTPUT_NOTIFICATION_CAP) that are both plain
+ *     unsigned ints. Past the entry points Root carries them as root_child and
+ *     root_channel (root_policy.h), and a root_child exists only once the raw
+ *     id has been checked against the set of children runtime-abi.json
+ *     declares. An id outside that set never reaches a capability invocation.
+ *
+ * Child lifecycle:
+ *   - Every child starts live with a zero restart count. Each restart, whether
+ *     from a fault or a debug request, spends one unit of a lifetime budget;
+ *     there is no time window that refills it.
+ *   - When the budget is spent (or there is no entry to restart at) Root stops
+ *     the child, marks it gone and tells its dependents once. Gone is
+ *     terminal: later faults, debug restarts and fault injections for that
+ *     child are logged as ignored and make no Microkit call.
  */
+#include "root_policy.h"
+
 #include <runtime_abi.h>
 
 #include <microkit.h>
@@ -81,8 +100,6 @@ _Static_assert(offsetof(root_restart_config_t, beam_reset_entry) ==
                "BEAM reset entry must be the second patch word");
 _Static_assert(sizeof(seL4_Word) == ROOT_RESTART_CONFIG_WORD_BYTES,
                "restart entries must have the target word width");
-_Static_assert(ROOT_CHILD_BEAM < ROOT_MAX_CHILDREN,
-               "BEAM child id must fit the restart budget table");
 
 __attribute__((__section__(ROOT_RESTART_CONFIG_SECTION),
                used)) volatile root_restart_config_t restart_config = {
@@ -92,6 +109,41 @@ __attribute__((__section__(ROOT_RESTART_CONFIG_SECTION),
 
 #define restart_entry (restart_config.restart_entry)
 #define beam_reset_entry (restart_config.beam_reset_entry)
+
+/*
+ * The children runtime-abi.json declares, one bit per child id. fault() only
+ * turns a raw id into a root_child when its bit is set, so the budget table is
+ * never indexed and BASE_TCB_CAP + id is never invoked for anything else.
+ * The crasher's bit is set in every image; in production no PD holds that
+ * badge, so no fault can arrive with it.
+ */
+static constexpr uint64_t root_known_children =
+    (UINT64_C(1) << ROOT_CHILD_SERIAL) | (UINT64_C(1) << ROOT_CHILD_TIMER) |
+    (UINT64_C(1) << ROOT_CHILD_BLK) | (UINT64_C(1) << ROOT_CHILD_ETH) |
+    (UINT64_C(1) << ROOT_CHILD_CRASHER) | (UINT64_C(1) << ROOT_CHILD_BEAM);
+
+static_assert(ROOT_MAX_CHILDREN <= root_child_mask_bits,
+              "every child id must have a bit in the known-child mask");
+static_assert(ROOT_CHILD_SERIAL < ROOT_MAX_CHILDREN &&
+                  ROOT_CHILD_TIMER < ROOT_MAX_CHILDREN &&
+                  ROOT_CHILD_BLK < ROOT_MAX_CHILDREN &&
+                  ROOT_CHILD_ETH < ROOT_MAX_CHILDREN &&
+                  ROOT_CHILD_CRASHER < ROOT_MAX_CHILDREN &&
+                  ROOT_CHILD_BEAM < ROOT_MAX_CHILDREN,
+              "every child id must fit the restart budget table");
+/* A sum of distinct powers of two equals their OR; a repeated id carries. */
+static_assert((UINT64_C(1) << ROOT_CHILD_SERIAL) +
+                      (UINT64_C(1) << ROOT_CHILD_TIMER) +
+                      (UINT64_C(1) << ROOT_CHILD_BLK) +
+                      (UINT64_C(1) << ROOT_CHILD_ETH) +
+                      (UINT64_C(1) << ROOT_CHILD_CRASHER) +
+                      (UINT64_C(1) << ROOT_CHILD_BEAM) ==
+                  root_known_children,
+              "child ids must be distinct");
+/* microkit_pd_restart and microkit_pd_stop invoke BASE_TCB_CAP + id. Past the
+ * TCB block the slots hold VM TCB caps, which must be unreachable. */
+static_assert(BASE_TCB_CAP + ROOT_MAX_CHILDREN <= BASE_VM_TCB_CAP,
+              "every child id must address a TCB cap slot");
 
 /*
  * Test-only debug-restart channels (present only in the restart image, which
@@ -109,6 +161,48 @@ __attribute__((__section__(ROOT_RESTART_CONFIG_SECTION),
  * microkit_child ids they map to (BASE_OUTPUT_NOTIFICATION_CAP vs
  * BASE_TCB_CAP).
  */
+static constexpr root_channel_layout root_channels = {
+    .debug_first = ROOT_DEBUG_CH_SERIAL,
+    .fault_first = ROOT_FAULT_CH_SERIAL,
+    .count = ROOT_DEBUG_CH_MAX - ROOT_DEBUG_CH_SERIAL + 1,
+};
+
+/* The rules root_channel_layout_valid checks, held against the constants. */
+static_assert(ROOT_DEBUG_CH_TIMER == ROOT_DEBUG_CH_SERIAL + 1 &&
+                  ROOT_DEBUG_CH_BLK == ROOT_DEBUG_CH_SERIAL + 2 &&
+                  ROOT_DEBUG_CH_ETH == ROOT_DEBUG_CH_SERIAL + 3 &&
+                  ROOT_DEBUG_CH_MAX == ROOT_DEBUG_CH_ETH,
+              "debug-restart channels must be dense in driver-class order");
+static_assert(ROOT_FAULT_CH_TIMER == ROOT_FAULT_CH_SERIAL + 1 &&
+                  ROOT_FAULT_CH_BLK == ROOT_FAULT_CH_SERIAL + 2 &&
+                  ROOT_FAULT_CH_ETH == ROOT_FAULT_CH_SERIAL + 3 &&
+                  ROOT_FAULT_CH_MAX == ROOT_FAULT_CH_ETH,
+              "fault-injection channels must be dense in driver-class order");
+static_assert(ROOT_DEBUG_CH_MAX < MICROKIT_MAX_CHANNELS &&
+                  ROOT_FAULT_CH_MAX < MICROKIT_MAX_CHANNELS,
+              "restart channels must be valid Microkit channel ids");
+static_assert(ROOT_DEBUG_CH_MAX < ROOT_FAULT_CH_SERIAL ||
+                  ROOT_FAULT_CH_MAX < ROOT_DEBUG_CH_SERIAL,
+              "debug-restart and fault-injection channels must not overlap");
+static_assert((ROOT_GONE_CH_BLK < ROOT_DEBUG_CH_SERIAL ||
+               ROOT_GONE_CH_BLK > ROOT_DEBUG_CH_MAX) &&
+                  (ROOT_GONE_CH_BLK < ROOT_FAULT_CH_SERIAL ||
+                   ROOT_GONE_CH_BLK > ROOT_FAULT_CH_MAX),
+              "the give-up channel must not be a restart channel");
+static_assert(ROOT_GONE_CH_BLK < MICROKIT_MAX_CHANNELS &&
+                  ROOT_GONE_CH_NONE >= MICROKIT_MAX_CHANNELS,
+              "the give-up channel must be valid and its sentinel must not");
+
+/* Driver-class index -> child id, for both channel groups. Built from the ABI
+ * constants checked above rather than through root_child_from_raw. */
+static const root_child
+    root_class_child[ROOT_DEBUG_CH_MAX - ROOT_DEBUG_CH_SERIAL + 1] = {
+        {.value = ROOT_CHILD_SERIAL},
+        {.value = ROOT_CHILD_TIMER},
+        {.value = ROOT_CHILD_BLK},
+        {.value = ROOT_CHILD_ETH},
+};
+
 /*
  * Give-up notification channels, shared through runtime-abi.json.
  *
@@ -132,25 +226,6 @@ __attribute__((__section__(ROOT_RESTART_CONFIG_SECTION),
  * console is silent, a dead NIC drops traffic), so they are left unwired rather
  * than given a channel with no listener.
  */
-/* Debug channel -> child id. Indexed by channel, so it must stay dense and in
- * ROOT_DEBUG_CH_* order. */
-static const microkit_child debug_restart_child[ROOT_DEBUG_CH_MAX + 1] = {
-    [ROOT_DEBUG_CH_SERIAL] = ROOT_CHILD_SERIAL,
-    [ROOT_DEBUG_CH_TIMER] = ROOT_CHILD_TIMER,
-    [ROOT_DEBUG_CH_BLK] = ROOT_CHILD_BLK,
-    [ROOT_DEBUG_CH_ETH] = ROOT_CHILD_ETH,
-};
-
-/* Fault-injection channel -> child id. Indexed after subtracting
- * ROOT_FAULT_CH_SERIAL, so it stays in driver-class order. */
-static const microkit_child
-    fault_inject_child[ROOT_FAULT_CH_MAX - ROOT_FAULT_CH_SERIAL + 1] = {
-        [ROOT_FAULT_CH_SERIAL - ROOT_FAULT_CH_SERIAL] = ROOT_CHILD_SERIAL,
-        [ROOT_FAULT_CH_TIMER - ROOT_FAULT_CH_SERIAL] = ROOT_CHILD_TIMER,
-        [ROOT_FAULT_CH_BLK - ROOT_FAULT_CH_SERIAL] = ROOT_CHILD_BLK,
-        [ROOT_FAULT_CH_ETH - ROOT_FAULT_CH_SERIAL] = ROOT_CHILD_ETH,
-};
-
 /*
  * Which channel to signal when a given child is stopped for good, or
  * ROOT_GONE_CH_NONE for a child whose dependents have nothing to recover.
@@ -165,12 +240,12 @@ static const microkit_child
  * up on beam_server the giveup log line is the system's obituary, because the
  * component that would have reported anything is the one that just stopped.
  */
-static microkit_channel root_gone_channel(microkit_child child) {
-  switch (child) {
+static root_channel root_gone_channel(root_child child) {
+  switch (child.value) {
   case ROOT_CHILD_BLK:
-    return ROOT_GONE_CH_BLK;
+    return (root_channel){.value = ROOT_GONE_CH_BLK};
   default:
-    return ROOT_GONE_CH_NONE;
+    return (root_channel){.value = ROOT_GONE_CH_NONE};
   }
 }
 
@@ -182,7 +257,8 @@ static microkit_channel root_gone_channel(microkit_child child) {
  * driver restart always means a driver went wrong, but a BEAM PD restart is
  * also what an ordinary `init:stop()` at the shell produces, and eight of those
  * should not permanently stop the system. The budget still exists: an ERTS that
- * faults on every boot is exactly the runaway this bounds. */
+ * faults on every boot is exactly the runaway this bounds, and so is a
+ * snapshot that fails validation at _reset. */
 /*
  * A switch rather than a table, for the same reason root_gone_channel above is
  * one: with a designated-initialiser array every unlisted child would default
@@ -190,8 +266,8 @@ static microkit_channel root_gone_channel(microkit_child child) {
  * the first fault". The default has to be the driver budget, and only a switch
  * makes that the default.
  */
-static unsigned int root_restart_budget(microkit_child child) {
-  switch (child) {
+static unsigned int root_restart_budget(root_child child) {
+  switch (child.value) {
   case ROOT_CHILD_BEAM:
     return ROOT_BEAM_RESTART_BUDGET;
   default:
@@ -203,16 +279,18 @@ static unsigned int root_restart_budget(microkit_child child) {
  * Where to resume a given child. Drivers re-enter at the shared ELF entry point
  * and re-run their idempotent init(); beam_server re-enters at its _reset
  * trampoline, which restores its memory image first. Returns 0 when the child
- * has no usable entry, which the caller treats as "cannot restart this one".
+ * has no usable entry, which the decision treats as "cannot restart this one".
  */
-static seL4_Word root_restart_entry(microkit_child child) {
-  if (child == ROOT_CHILD_BEAM) {
+static seL4_Word root_restart_entry(root_child child) {
+  if (child.value == ROOT_CHILD_BEAM) {
     return (seL4_Word)beam_reset_entry;
   }
   return (seL4_Word)restart_entry;
 }
 
-static unsigned int restart_count[ROOT_MAX_CHILDREN];
+/* Indexed by root_child.value, which root_child_from_raw bounds by
+ * ROOT_MAX_CHILDREN. */
+static root_child_record child_records[ROOT_MAX_CHILDREN];
 
 /* --- tiny dependency-free formatters (no libc/printf in the Root PD) --- */
 
@@ -240,15 +318,15 @@ static void put_hex(seL4_Word v) {
 }
 
 void init(void) {
-  /* Zero the budget table EXPLICITLY rather than relying on it being .bss.
+  /* Reset every record EXPLICITLY rather than relying on it being .bss.
    * Root is the parent of every restartable driver and is not itself
    * restarted today, so the static zero would in fact do. The explicit loop is
    * here because a warm restart does not re-zero .bss (see the file header),
    * so "init() resets everything it relies on" is the invariant every PD in
    * this system is expected to hold; root should not be the exception that
    * teaches the wrong pattern. */
-  for (unsigned int i = 0; i < ROOT_MAX_CHILDREN; i++) {
-    restart_count[i] = 0;
+  for (size_t i = 0; i < ROOT_MAX_CHILDREN; i++) {
+    child_records[i] = (root_child_record){};
   }
   microkit_dbg_puts("ROOT|init|budget=");
   put_dec(ROOT_RESTART_BUDGET);
@@ -262,32 +340,28 @@ void init(void) {
 }
 
 /*
- * Apply the restart policy to one child: either restart it to a clean entry or
- * give up and stop it. Returns nothing, because neither caller has anything to
- * decide afterwards; the outcome is reported entirely through the log.
- *
- * Shared by BOTH the fault path (fault(), a child crashed) and the debug path
- * (notified(), a test asked for a restart) so that a single budget governs the
- * two. That matters: if the debug path had its own budget, a test could restart
- * a driver more times than a genuinely faulting one ever could, and would then
- * be exercising a recovery path production can never reach.
- *
- * `tag` is the log prefix ("ROOT|restart" / "ROOT|debug-restart") and is the
- * only thing distinguishing the two callers in the console output, which is
- * what the integration tests key on.
- *
- * The restart itself is microkit_pd_restart(child, restart_entry): it rewrites
- * the child's PC to the ELF entry point and resumes it, so the child re-runs
- * _start -> main -> init(). It does NOT re-zero .bss or reload .data (that
- * happens once, at boot, in the Microkit loader), which is why each driver's
- * init() has to be idempotent.
+ * A request for a child Root has already given up on. Logged so a test or an
+ * operator can see the request arrived, and nothing else: the child stays
+ * stopped and its dependents are not told a second time.
  */
+static void root_log_ignored(root_child child, const char *request) {
+  microkit_dbg_puts("ROOT|gone|child=");
+  put_dec(child.value);
+  microkit_dbg_puts("|ignored=");
+  microkit_dbg_puts(request);
+  microkit_dbg_puts("\n");
+}
+
 /*
  * Stop a child permanently and tell whoever depended on it.
  *
- * The stop comes first and the notification second, so a dependent can never
- * observe "gone" while the child is still briefly running and able to publish a
- * state change that would contradict it.
+ * The record is marked gone before anything else, so any path that reaches
+ * this child afterwards (a queued fault, a debug request) takes the ignored
+ * branch instead of stopping or notifying again.
+ *
+ * The stop comes next and the notification after it, so a dependent can never
+ * observe "gone" while the child is still briefly running and able to publish
+ * a state change that would contradict it.
  *
  * Logging is last because it is the least important of the three: the console
  * is a debug-kernel affordance, and on a release build microkit_dbg_puts
@@ -298,7 +372,8 @@ void init(void) {
  * back afterwards, which is the behaviour blk-giveup-smoke pins. Microkit 2.3.0
  * adds microkit_pd_resume(), the primitive an operator-triggered revive would
  * be built on, and that is the concrete thing the 2.3.0 bump unblocks. Wiring
- * it is deliberately follow-up work rather than part of the version bump.
+ * it is deliberately follow-up work rather than part of the version bump, and
+ * it would have to clear the gone state too.
  *
  * The notify below is the IMMEDIATE microkit_notify rather than the deferred
  * form, and that is deliberate. microkit_deferred_notify has a single pending
@@ -310,66 +385,88 @@ void init(void) {
  * byte-identical between the 2.2.0 and 2.3.0 SDK headers, so a bump neither
  * enables nor blocks the change.
  */
-static void root_giveup(microkit_child child, const char *reason) {
-  microkit_pd_stop(child);
+static void root_giveup(root_child child, const char *reason) {
+  root_record_give_up(&child_records[child.value]);
+  microkit_pd_stop(child.value);
 
-  microkit_channel gone = root_gone_channel(child);
-  if (gone != ROOT_GONE_CH_NONE) {
-    microkit_notify(gone);
+  const root_channel gone = root_gone_channel(child);
+  if (gone.value != ROOT_GONE_CH_NONE) {
+    microkit_notify(gone.value);
   }
 
   microkit_dbg_puts("ROOT|giveup|child=");
-  put_dec(child);
+  put_dec(child.value);
   microkit_dbg_puts("|reason=");
   microkit_dbg_puts(reason);
   microkit_dbg_puts("\n");
 }
 
-static void root_restart_child(microkit_child child, const char *tag) {
-  /* Guard the restart_count[] index before touching it. A child id past the
-   * table means we cannot account for its budget, and a child we cannot
-   * account for could spin in a restart loop forever, so refuse to restart it
-   * at all and stop it instead. In practice this is unreachable (child ids are
-   * pinned small in tools/sdf/system.zig); it exists so a future topology
-   * change fails loudly and safely rather than corrupting memory past the
-   * array. */
-  if (child >= ROOT_MAX_CHILDREN) {
-    root_giveup(child, "out-of-range");
+/*
+ * Apply the restart policy to one child: either restart it to a clean entry,
+ * give up and stop it, or ignore a child that is already gone. Returns
+ * nothing, because neither caller has anything to decide afterwards; the
+ * outcome is reported entirely through the log.
+ *
+ * Shared by BOTH the fault path (fault(), a child crashed) and the debug path
+ * (notified(), a test asked for a restart) so that a single budget governs the
+ * two. That matters: if the debug path had its own budget, a test could restart
+ * a driver more times than a genuinely faulting one ever could, and would then
+ * be exercising a recovery path production can never reach.
+ *
+ * `request` names the caller ("restart" / "debug-restart") and is the only
+ * thing distinguishing the two in the console output, which is what the
+ * integration tests key on.
+ *
+ * The decision runs its checks in a fixed order (root_restart_decide):
+ *
+ * Gone: Root already stopped this child and told its dependents. Doing either
+ * again, or resuming it, would contradict what they were told.
+ *
+ * Budget exhausted: this child has already spent its whole allowance and is
+ * evidently not recovering. This is the reliability talk's "giving up"
+ * decision, and it keeps one sick driver from livelocking the system: a
+ * stopped driver degrades the service it provides, an endlessly restarting
+ * one burns CPU at a priority above every client.
+ *
+ * No entry point: the image was assembled without one (an un-patched
+ * .restart_config, so beam_reset_entry is still 0). Resuming at address 0
+ * would fault instantly and burn the whole budget doing it.
+ *
+ * The restart itself is microkit_pd_restart(child, entry): it rewrites the
+ * child's PC and resumes it, so the child re-runs _start -> main -> init() (or
+ * _reset first, for beam_server). It does NOT re-zero .bss or reload .data
+ * (that happens once, at boot, in the Microkit loader), which is why each
+ * driver's init() has to be idempotent.
+ */
+static void root_restart_child(root_child child, const char *request) {
+  root_child_record *record = &child_records[child.value];
+  const seL4_Word entry = root_restart_entry(child);
+  const root_restart_action action =
+      root_restart_decide(record, root_restart_budget(child), entry);
+  switch (action) {
+  case root_restart_ignore_gone:
+    root_log_ignored(child, request);
     return;
-  }
-
-  /* Budget exhausted: this child has already spent its whole allowance and is
-   * evidently not recovering. Stop it rather than restart it forever. This is
-   * the reliability talk's "giving up" decision, and it is what keeps one sick
-   * driver from livelocking the system: a stopped driver degrades the service
-   * it provides, an endlessly restarting one burns CPU at a priority above
-   * every client. */
-  if (restart_count[child] >= root_restart_budget(child)) {
-    root_giveup(child, "budget-exhausted");
+  case root_restart_giveup_budget_exhausted:
+  case root_restart_giveup_no_entry:
+    root_giveup(child, root_restart_giveup_reason(action));
     return;
-  }
-
-  /* No entry point for this child means the image was assembled without one
-   * (an un-patched .restart_config, so beam_reset_entry is still 0). Resuming
-   * at address 0 would fault instantly and burn the whole budget doing it, so
-   * stop the child instead and say why. */
-  seL4_Word entry = root_restart_entry(child);
-  if (entry == 0) {
-    root_giveup(child, "no-restart-entry");
-    return;
+  case root_restart_resume:
+    break;
   }
 
   /* Budget remains: spend one and restart. The count is incremented BEFORE the
    * restart so that if the child faults again immediately (the crasher PD
    * does exactly this, re-faulting inside init()), the re-entrant fault()
    * observes the already-charged count and the budget still converges. */
-  restart_count[child]++;
-  microkit_pd_restart(child, entry);
-  microkit_dbg_puts(tag);
+  root_record_charge(record);
+  microkit_pd_restart(child.value, entry);
+  microkit_dbg_puts("ROOT|");
+  microkit_dbg_puts(request);
   microkit_dbg_puts("|child=");
-  put_dec(child);
+  put_dec(child.value);
   microkit_dbg_puts("|count=");
-  put_dec(restart_count[child]);
+  put_dec(record->count);
   microkit_dbg_puts("\n");
 }
 
@@ -384,26 +481,41 @@ static void root_restart_child(microkit_child child, const char *tag) {
  * system.zig wires one restart and one fault channel per restartable class.
  */
 void notified(microkit_channel ch) {
-  /* A debug-restart request for a known driver class. Unlike fault(), nothing
-   * has gone wrong here: a test is asking us to restart a HEALTHY driver so it
-   * can isolate the recovery behavior. This path deliberately involves no
-   * fault at all. */
-  if (ch <= ROOT_DEBUG_CH_MAX) {
-    root_restart_child(debug_restart_child[ch], "ROOT|debug-restart");
+  size_t index = 0;
+  switch (
+      root_notify_route((root_channel){.value = ch}, &root_channels, &index)) {
+  case root_notify_debug_restart:
+    /* A debug-restart request for a known driver class. Unlike fault(),
+     * nothing has gone wrong here: a test is asking us to restart a HEALTHY
+     * driver so it can isolate the recovery behavior. This path deliberately
+     * involves no fault at all. */
+    root_restart_child(root_class_child[index], "debug-restart");
+    return;
+
+  case root_notify_fault_inject: {
+    /* Resume the real driver at an unmapped instruction address. Do not spend
+     * a budget slot here: the resulting seL4 fault enters fault(), and that
+     * path charges exactly one restart through root_restart_child(). Logging
+     * precedes the restart because the child may fault as soon as it is
+     * resumed.
+     *
+     * microkit_pd_restart also RESUMES the TCB, so a gone child is refused
+     * here: injecting a fault into it would bring a stopped driver back to
+     * life for one instruction and charge a budget that is already spent. */
+    const root_child child = root_class_child[index];
+    if (child_records[child.value].state == root_child_gone) {
+      root_log_ignored(child, "fault-inject");
+      return;
+    }
+    microkit_dbg_puts("ROOT|fault-inject|child=");
+    put_dec(child.value);
+    microkit_dbg_puts("\n");
+    microkit_pd_restart(child.value, 0);
     return;
   }
 
-  /* Resume the real driver at an unmapped instruction address. Do not spend a
-   * budget slot here: the resulting seL4 fault enters fault(), and that path
-   * charges exactly one restart through root_restart_child(). Logging precedes
-   * the restart because the child may fault as soon as it is resumed. */
-  if (ch >= ROOT_FAULT_CH_SERIAL && ch <= ROOT_FAULT_CH_MAX) {
-    microkit_child child = fault_inject_child[ch - ROOT_FAULT_CH_SERIAL];
-    microkit_dbg_puts("ROOT|fault-inject|child=");
-    put_dec(child);
-    microkit_dbg_puts("\n");
-    microkit_pd_restart(child, 0);
-    return;
+  case root_notify_unexpected:
+    break;
   }
 
   /* Anything else is a wiring bug: some PD holds a notification cap to root
@@ -430,7 +542,7 @@ microkit_msginfo protected(microkit_channel ch, microkit_msginfo msginfo) {
  * We resume the child ourselves via microkit_pd_restart, so we return
  * seL4_False to tell libmicrokit NOT to reply-to-resume the faulting thread.
  */
-seL4_Bool fault(microkit_child child, microkit_msginfo msginfo,
+seL4_Bool fault(microkit_child raw_child, microkit_msginfo msginfo,
                 microkit_msginfo *reply_msginfo) {
   (void)reply_msginfo;
 
@@ -441,7 +553,7 @@ seL4_Bool fault(microkit_child child, microkit_msginfo msginfo,
    * if the restart below wedges. Format is deliberately compact and
    * machine-parseable: the integration tests grep these exact fields. */
   microkit_dbg_puts("ROOT|fault|child=");
-  put_dec(child);
+  put_dec(raw_child);
   microkit_dbg_puts("|label=");
   put_hex(label);
 
@@ -463,14 +575,30 @@ seL4_Bool fault(microkit_child child, microkit_msginfo msginfo,
   }
   microkit_dbg_puts("\n");
 
+  /* A child id the ABI does not declare has no budget slot, and
+   * BASE_TCB_CAP + id may not be its TCB (or any TCB), so no capability is
+   * invoked for it: no restart, no stop. Returning seL4_False sends no reply,
+   * so the faulting thread stays blocked on its fault and never runs again.
+   * In practice this is unreachable, because only children carry a fault
+   * badge; it exists so a future topology change fails visibly and safely. */
+  root_child child = {};
+  if (!root_child_from_raw(raw_child, ROOT_MAX_CHILDREN, root_known_children,
+                           &child)) {
+    microkit_dbg_puts("ROOT|reject|child=");
+    put_dec(raw_child);
+    microkit_dbg_puts("|reason=out-of-range\n");
+    return seL4_False;
+  }
+
   /* Apply the restart policy. Identical to what a debug-restart request gets,
    * and sharing one budget between the two (see root_restart_child). */
-  root_restart_child(child, "ROOT|restart");
+  root_restart_child(child, "restart");
 
   /* seL4_False tells libmicrokit NOT to reply to the fault IPC. Replying is
    * the other way to resume a faulting thread (it restarts it at the faulting
    * instruction, which for a driver that just dereferenced NULL would simply
    * fault again). We have already resumed the child ourselves at a clean
-   * entry, or stopped it, so there is nothing left for libmicrokit to do. */
+   * entry, or stopped it, or left a gone child stopped, so there is nothing
+   * left for libmicrokit to do. */
   return seL4_False;
 }
