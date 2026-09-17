@@ -253,9 +253,84 @@ long runtime_sys_ppoll(va_list ap) {
   return ready;
 }
 
-/* pselect6: ERTS uses epoll for stdin, but other paths such as select()-based
- * timeout sleeps reach this. Only stdin readability is reported. The write
- * and exception sets are always returned empty. */
+/* What one pselect6 call was asked to watch. select reports its answer in the
+ * same sets it was given, so the request has to be copied before any of them
+ * is cleared. */
+typedef struct {
+  fd_set read;
+  fd_set write;
+  bool watch_read;
+  bool watch_write;
+} select_request;
+
+static select_request select_request_of(int nfds, const fd_set *readfds,
+                                        const fd_set *writefds) {
+  select_request req = {};
+  req.watch_read = nfds > 0 && readfds != nullptr;
+  req.watch_write = nfds > 0 && writefds != nullptr;
+  if (req.watch_read) {
+    req.read = *readfds;
+  }
+  if (req.watch_write) {
+    req.write = *writefds;
+  }
+  return req;
+}
+
+/* Collect the descriptors below nfds that are ready now, into the caller's
+ * sets, and return how many bits were set across all of them. select counts
+ * one descriptor once per set it appears in. */
+static int select_scan(int nfds, const select_request *req, fd_set *readfds,
+                       fd_set *writefds) {
+  int ready = 0;
+
+  if (readfds != nullptr) {
+    FD_ZERO(readfds);
+  }
+  if (writefds != nullptr) {
+    FD_ZERO(writefds);
+  }
+
+  for (int fd = 0; fd < nfds; fd++) {
+    const bool want_read = req->watch_read && FD_ISSET(fd, &req->read);
+    const bool want_write = req->watch_write && FD_ISSET(fd, &req->write);
+    if (!want_read && !want_write) {
+      continue;
+    }
+
+    runtime_select_ready state = {};
+    if (fd == 0) {
+      /* Readability only, as before. Whether the console should report a
+       * write side is a separate question from socket readiness and is left
+       * as it was. */
+      state.read = runtime_console_readable();
+    } else if (fd_is_socket(fd)) {
+      state =
+          runtime_select_from_revents(socket_revents(socket_index_of_fd(fd)));
+    } else {
+      continue;
+    }
+
+    if (want_read && state.read) {
+      FD_SET(fd, readfds);
+      ready++;
+    }
+    if (want_write && state.write) {
+      FD_SET(fd, writefds);
+      ready++;
+    }
+  }
+  return ready;
+}
+
+/*
+ * pselect6: ERTS uses epoll for stdin, but other paths such as select()-based
+ * timeout sleeps reach this. Sockets are reported the way ppoll and epoll
+ * report them, through the same socket_revents funnel.
+ *
+ * The exception set is always returned empty: select raises it for
+ * out-of-band data, which this stack's TCP does not deliver.
+ */
 long runtime_sys_pselect6(va_list ap) {
   const int nfds = runtime_sys_arg_int(va_arg(ap, long));
   fd_set *readfds = runtime_sys_arg_pointer(va_arg(ap, long));
@@ -272,32 +347,21 @@ long runtime_sys_pselect6(va_list ap) {
   }
 
   /* select examines only descriptors below nfds. */
-  const bool want_stdin =
-      nfds > 0 && readfds != nullptr && FD_ISSET(0, readfds);
+  const select_request req = select_request_of(nfds, readfds, writefds);
   const bool zero_timeout =
       timeout != nullptr && runtime_timespec_is_zero(timeout);
 
-  int ready = want_stdin && runtime_console_readable() ? 1 : 0;
+  beam_net_pump();
+  int ready = select_scan(nfds, &req, readfds, writefds);
   if (ready == 0 && !zero_timeout) {
-    beam_net_pump();
     if (timeout != nullptr) {
       arm_timeout(runtime_timespec_ns(timeout));
     }
     thread_io_wait();
-    if (want_stdin && runtime_console_readable()) {
-      ready = 1;
-    }
+    beam_net_pump();
+    ready = select_scan(nfds, &req, readfds, writefds);
   }
 
-  if (readfds != nullptr) {
-    FD_ZERO(readfds);
-    if (ready) {
-      FD_SET(0, readfds);
-    }
-  }
-  if (writefds != nullptr) {
-    FD_ZERO(writefds);
-  }
   if (exceptfds != nullptr) {
     FD_ZERO(exceptfds);
   }

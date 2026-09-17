@@ -49,6 +49,7 @@ const suites = [_]Suite{
     .{ .name = "restart_layout", .units = &.{} },
     .{ .name = "rng_select", .units = &.{"rng_select.c"} },
     .{ .name = "tcp_logic", .units = &.{} },
+    .{ .name = "tcp_state", .units = &.{} },
 };
 
 const Variant = struct {

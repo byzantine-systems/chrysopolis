@@ -1,5 +1,6 @@
-/* runtime_tcp_logic.h: receive ring spans, accept backlog, lwIP error table
- * bounds and close transitions. */
+/* runtime_tcp_logic.h: receive ring spans, checked narrowing for the lwIP
+ * calls that take a u16_t or a u8_t, accept backlog, and error table bounds.
+ * The socket lifecycle it now includes is covered by suite_tcp_state.c. */
 #include "check.h"
 
 #include "runtime_tcp_logic.h"
@@ -184,32 +185,147 @@ static void test_lwip_err_bounds(void) {
   CHECK(!tcp_lwip_err_in_table(0, 0));
 }
 
-static void test_close_actions(void) {
-  CHECK(tcp_close_action(socket_state_listening) == tcp_close_begin);
-  CHECK(tcp_close_action(socket_state_connected) == tcp_close_begin);
-  CHECK(tcp_close_action(socket_state_connecting) ==
-        tcp_close_abort_connecting);
-  CHECK(tcp_close_action(socket_state_closed_by_peer) ==
-        tcp_close_release_peer_closed);
-  CHECK(tcp_close_action(socket_state_allocated) == tcp_close_release_idle);
-  CHECK(tcp_close_action(socket_state_bound) == tcp_close_release_idle);
-  CHECK(tcp_close_action(socket_state_error) == tcp_close_release_idle);
-  CHECK(tcp_close_action(socket_state_unallocated) == tcp_close_invalid);
-  CHECK(tcp_close_action(socket_state_closing) == tcp_close_invalid);
-  CHECK(tcp_close_action((socket_state_t)42) == tcp_close_invalid);
+/* The socket buffer tcp.c actually uses, so the boundary cases below are the
+ * ones the running system hits. */
+enum : size_t { socket_buf_size = 0x200000 };
 
-  /* The upstream ordinal values are what TCP_DEBUG traces print. */
-  CHECK(socket_state_unallocated == 0);
-  CHECK(socket_state_closed_by_peer == 6);
-  CHECK(socket_state_listening == 8);
+static void test_rx_can_accept(void) {
+  /* An empty ring takes anything up to its capacity, and nothing past it. */
+  CHECK(tcp_rx_can_accept(0, 0, socket_buf_size));
+  CHECK(tcp_rx_can_accept(0, socket_buf_size, socket_buf_size));
+  CHECK(!tcp_rx_can_accept(0, socket_buf_size + 1, socket_buf_size));
+
+  /* A full ring takes nothing but a zero-length segment. */
+  CHECK(tcp_rx_can_accept(socket_buf_size, 0, socket_buf_size));
+  CHECK(!tcp_rx_can_accept(socket_buf_size, 1, socket_buf_size));
+
+  /* The exact fit, and one byte past it. */
+  CHECK(tcp_rx_can_accept(socket_buf_size - 1, 1, socket_buf_size));
+  CHECK(!tcp_rx_can_accept(socket_buf_size - 1, 2, socket_buf_size));
+
+  /* The free space used to be narrowed to an int. A capacity larger than
+   * INT_MAX must still answer correctly. */
+  static constexpr size_t huge = (size_t)INT_MAX + 4096;
+  CHECK(tcp_rx_can_accept(0, huge, huge));
+  CHECK(!tcp_rx_can_accept(1, huge, huge));
+
+  /* Neither side may wrap: an incoming length near SIZE_MAX is refused, not
+   * accepted through an overflowed sum. */
+  CHECK(!tcp_rx_can_accept(1, SIZE_MAX, socket_buf_size));
+  CHECK(!tcp_rx_can_accept(SIZE_MAX, 1, socket_buf_size));
+  CHECK(!tcp_rx_can_accept(SIZE_MAX, SIZE_MAX, socket_buf_size));
+
+  /* Agreement with the ring arithmetic: whatever fits is what the free
+   * span can absorb over successive copies. */
+  for (size_t capacity = 1; capacity <= 9; capacity++) {
+    for (size_t len = 0; len <= capacity; len++) {
+      for (size_t incoming = 0; incoming <= capacity + 1; incoming++) {
+        CHECK(tcp_rx_can_accept(len, incoming, capacity) ==
+              (incoming <= capacity - len));
+      }
+    }
+  }
+}
+
+/* A window update of any size is reported in full across repeated chunks. */
+static void test_recved_chunk(void) {
+  CHECK_EQ_U64(tcp_recved_chunk(0), 0);
+  CHECK_EQ_U64(tcp_recved_chunk(1), 1);
+  CHECK_EQ_U64(tcp_recved_chunk(UINT16_MAX - 1), UINT16_MAX - 1);
+  CHECK_EQ_U64(tcp_recved_chunk(UINT16_MAX), UINT16_MAX);
+  CHECK_EQ_U64(tcp_recved_chunk((size_t)UINT16_MAX + 1), UINT16_MAX);
+  CHECK_EQ_U64(tcp_recved_chunk(SIZE_MAX), UINT16_MAX);
+
+  /* The lengths that spelled trouble: a plain (u16_t)len truncates 65536 to
+   * 0 and leaves the receive window shut. */
+  static const size_t lengths[] = {
+      0,
+      1,
+      1024,
+      UINT16_MAX - 1,
+      UINT16_MAX,
+      (size_t)UINT16_MAX + 1,
+      (size_t)UINT16_MAX * 2,
+      131072,
+      socket_buf_size,
+  };
+  for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+    size_t remaining = lengths[i];
+    size_t reported = 0;
+    size_t steps = 0;
+    while (remaining != 0) {
+      const uint16_t chunk = tcp_recved_chunk(remaining);
+      CHECK(chunk != 0);
+      CHECK(chunk <= remaining);
+      remaining -= chunk;
+      reported += chunk;
+      steps++;
+      CHECK(steps <= lengths[i] / UINT16_MAX + 1);
+    }
+    CHECK_EQ_U64(reported, lengths[i]);
+  }
+}
+
+static void test_write_chunk(void) {
+  /* Bounded by both sides, and zero exactly when either side is zero. */
+  CHECK_EQ_U64(tcp_write_chunk(0, 0), 0);
+  CHECK_EQ_U64(tcp_write_chunk(0, 100), 0);
+  CHECK_EQ_U64(tcp_write_chunk(100, 0), 0);
+  CHECK_EQ_U64(tcp_write_chunk(10, 100), 10);
+  CHECK_EQ_U64(tcp_write_chunk(100, 10), 10);
+  CHECK_EQ_U64(tcp_write_chunk(100, 100), 100);
+  CHECK_EQ_U64(tcp_write_chunk(UINT16_MAX, UINT16_MAX), UINT16_MAX);
+  /* A caller asking for more than a u16 gets the send buffer, never a
+   * truncated remainder. */
+  CHECK_EQ_U64(tcp_write_chunk((size_t)UINT16_MAX + 1, UINT16_MAX), UINT16_MAX);
+  CHECK_EQ_U64(tcp_write_chunk(socket_buf_size, 1460), 1460);
+  CHECK_EQ_U64(tcp_write_chunk(SIZE_MAX, 1), 1);
+
+  for (size_t want = 0; want <= 300; want++) {
+    for (uint16_t sndbuf = 0; sndbuf <= 300; sndbuf++) {
+      const uint16_t got = tcp_write_chunk(want, sndbuf);
+      CHECK(got <= sndbuf);
+      CHECK((size_t)got <= want);
+      /* Whatever both sides allow is taken, never less. */
+      CHECK_EQ_U64(got, want < sndbuf ? want : sndbuf);
+    }
+  }
+}
+
+static void test_listen_backlog(void) {
+  /* tcp_listen_with_backlog takes a u8_t: 256 arrived as 0 and refused
+   * every connection. */
+  CHECK_EQ_U64(tcp_listen_backlog(256), UINT8_MAX);
+  CHECK_EQ_U64(tcp_listen_backlog(255), 255);
+  CHECK_EQ_U64(tcp_listen_backlog(254), 254);
+  CHECK_EQ_U64(tcp_listen_backlog(INT_MAX), UINT8_MAX);
+
+  /* A non-positive backlog still has to accept one connection. */
+  CHECK_EQ_U64(tcp_listen_backlog(1), 1);
+  CHECK_EQ_U64(tcp_listen_backlog(0), 1);
+  CHECK_EQ_U64(tcp_listen_backlog(-1), 1);
+  CHECK_EQ_U64(tcp_listen_backlog(INT_MIN), 1);
+
+  /* Never zero, never above the u8 range, monotonic in between. */
+  uint8_t previous = tcp_listen_backlog(INT_MIN);
+  for (int backlog = -4; backlog <= 300; backlog++) {
+    const uint8_t got = tcp_listen_backlog(backlog);
+    CHECK(got >= 1);
+    CHECK(got >= previous);
+    previous = got;
+  }
+  CHECK_EQ_U64(previous, UINT8_MAX);
 }
 
 int main(void) {
   test_ring_spans_exhaustive();
   test_ring_fifo_cycles();
+  test_rx_can_accept();
+  test_recved_chunk();
+  test_write_chunk();
+  test_listen_backlog();
   test_backlog_fill_and_drain();
   test_backlog_wraparound();
   test_lwip_err_bounds();
-  test_close_actions();
   return check_finish("tcp_logic");
 }
