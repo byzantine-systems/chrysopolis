@@ -66,11 +66,11 @@
  * a stack inside the very arena libc_init is about to re-hand-out. It switches
  * to a stack inside the snapshot region before it calls any C.
  */
+#include "beam_restart_layout.h"
 #include "beam_snapshot_codec.h"
 #include "runtime_restart.h"
 
 #include <microkit.h>
-#include <sel4/sel4.h>
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -92,44 +92,43 @@
  * assembly, where offsetof() is not available.
  *
  * The values come from runtime-abi.json, which also configures the matching
- * SDF memory region; modules/images.nix asserts at build time that the data
- * area is big enough for this ELF's writable segment.
+ * SDF memory region. tools/sdf/abi.zig rejects a JSON that breaks these rules
+ * when the SDF is generated, modules/images.nix asserts at build time that the
+ * data area is big enough for this ELF's writable segment, and the checks
+ * below hold the same rules against the constants this file compiled with.
+ *
+ * The header (beam_snapshot_hdr_t) and the survivor records are laid out in
+ * beam_snapshot_codec.h, which pins their offsets. The magic is written last
+ * on the cold-boot path, so a torn capture reads as "cold" and is simply
+ * retaken rather than half-restored. seL4 zeroes fresh frames, so an untouched
+ * region reads 0 here, which is what makes "no magic" a reliable cold-boot
+ * test with nothing to initialise first.
  */
-_Static_assert(BEAM_RESET_STACK_TOP ==
-                   BEAM_RESET_STACK_OFF + BEAM_RESET_STACK_SIZE,
-               "reset stack top must be the end of the reset stack");
-_Static_assert(BEAM_SURVIVORS_OFF >= BEAM_RESET_STACK_TOP,
-               "the survivor area must not overlap the reset stack");
-_Static_assert(BEAM_DATA_OFF >= BEAM_SURVIVORS_OFF + BEAM_SURVIVORS_SIZE,
-               "the data area must not overlap the survivor area");
+static constexpr size_t beam_page_bytes = 4096;
 
-/* The magic (beam_snapshot_magic) is written last on the cold-boot path, so a
- * torn capture reads as "cold" and is simply retaken rather than
- * half-restored. seL4 zeroes fresh frames, so an untouched region reads 0
- * here, which is what makes "no magic" a reliable cold-boot test with nothing
- * to initialise first. */
-typedef struct {
-  uint64_t magic;
-  uint64_t generation;     /* 1 on cold boot, incremented by every reset */
-  uint64_t saved_sp;       /* the cold-boot SP, so a reset can restore it */
-  uint64_t data_bytes;     /* used length of the data area */
-  uint64_t survivor_bytes; /* used length of the survivor area */
-} beam_snapshot_hdr_t;
-
-_Static_assert(sizeof(beam_snapshot_hdr_t) == 5 * sizeof(uint64_t),
-               "snapshot header must remain five packed 64-bit words");
-_Static_assert(_Alignof(beam_snapshot_hdr_t) == _Alignof(uint64_t),
-               "snapshot header must remain 64-bit aligned");
-_Static_assert(offsetof(beam_snapshot_hdr_t, magic) == 0 &&
-                   offsetof(beam_snapshot_hdr_t, generation) == 8 &&
-                   offsetof(beam_snapshot_hdr_t, saved_sp) == 16 &&
-                   offsetof(beam_snapshot_hdr_t, data_bytes) == 24 &&
-                   offsetof(beam_snapshot_hdr_t, survivor_bytes) == 32,
-               "snapshot header field offsets are part of the restart ABI");
-
-_Static_assert(offsetof(beam_survivor_hdr_t, offset) == 0 &&
-                   offsetof(beam_survivor_hdr_t, len) == 4,
-               "survivor record offsets are part of the restart ABI");
+static_assert(BEAM_SNAPSHOT_SIZE % beam_page_bytes == 0,
+              "the snapshot region must be whole pages");
+static_assert(sizeof(beam_snapshot_hdr_t) <= BEAM_RESET_STACK_OFF,
+              "the snapshot header must end before the reset stack");
+static_assert(BEAM_RESET_STACK_TOP ==
+                  BEAM_RESET_STACK_OFF + BEAM_RESET_STACK_SIZE,
+              "reset stack top must be the end of the reset stack");
+/* AAPCS64 requires SP to be a multiple of 16 whenever C code runs, and _reset
+ * installs this offset as SP before calling beam_reset_restore. */
+static_assert(BEAM_RESET_STACK_TOP % 16 == 0,
+              "the reset stack top must be 16-byte aligned");
+/* _reset loads the offset with a plain `mov x10, #imm`, a 16-bit immediate. */
+static_assert(BEAM_RESET_STACK_TOP <= 0xffff,
+              "the reset stack top must fit a 16-bit mov immediate");
+static_assert(BEAM_SURVIVORS_OFF >= BEAM_RESET_STACK_TOP,
+              "the survivor area must not overlap the reset stack");
+static_assert(BEAM_DATA_OFF >= BEAM_SURVIVORS_OFF + BEAM_SURVIVORS_SIZE,
+              "the data area must not overlap the survivor area");
+static_assert(BEAM_DATA_OFF < BEAM_SNAPSHOT_SIZE,
+              "the data area must lie inside the snapshot region");
+/* Every exit code is a byte added to the base, so all 256 must fault. */
+static_assert(BEAM_EXIT_FAULT_SIZE >= 256,
+              "the exit-fault range must cover every exit code");
 
 /*
  * Zero words this many apart or closer are kept inside one run rather than
@@ -170,6 +169,20 @@ static inline beam_snapshot_hdr_t *snapshot_hdr(uint8_t *base) {
   return (beam_snapshot_hdr_t *)base;
 }
 
+/* The layout both the capture and the restore check before writing. */
+static beam_restart_layout current_layout(uint8_t *base) {
+  return (beam_restart_layout){
+      .snapshot_base = (uintptr_t)base,
+      .snapshot_size = BEAM_SNAPSHOT_SIZE,
+      .data_off = BEAM_DATA_OFF,
+      .segment_start = (uintptr_t)__init_array_start,
+      .bss_start = (uintptr_t)_bss,
+      .bss_end = (uintptr_t)_bss_end,
+      .exit_fault_base = BEAM_EXIT_FAULT_BASE,
+      .exit_fault_size = BEAM_EXIT_FAULT_SIZE,
+  };
+}
+
 /* ---- tiny dependency-free formatters (the console is not up yet) ---- */
 
 static void put_dec(uint64_t v) {
@@ -197,23 +210,25 @@ static void put_hex(uint64_t v) {
 
 /*
  * Unrecoverable: we cannot produce a pristine image, so we must not pretend to.
- * Failing loudly here turns a capacity problem into an early-boot stop instead
- * of memory corruption thousands of instructions later.
+ * Failing loudly here turns a layout or snapshot problem into a stopped PD
+ * instead of memory corruption thousands of instructions later.
  *
- * This parks, which is what this issue removed from the exit syscall, because a
- * restart cannot help here: it re-runs the same code over the same too-small
- * region and fails identically, so spending root's budget on it would replace a
- * legible stop with a restart loop. modules/images.nix asserts these same
- * bounds at build time, so reaching this means the ELF and the image were built
- * inconsistently.
+ * It faults (brk) rather than parking. Root sees the fault like any other,
+ * charges beam_server's budget and resumes it at _reset, which finds the same
+ * problem and faults again, so the budget runs out and Root stops the PD with
+ * a ROOT|giveup line. A park would instead leave Root believing the restart
+ * worked while the PD spun forever. modules/images.nix asserts the static
+ * bounds at build time, so reaching this means the ELF and the image were
+ * built inconsistently or the snapshot region was overwritten.
+ *
+ * Callers reach this before their first write to the writable segment, so the
+ * image is still whatever it was and microkit_dbg_puts is safe to call.
  */
-static void restart_panic(const char *why) {
+[[__noreturn__]] static void restart_fail(const char *why) {
   microkit_dbg_puts("BEAM|restart|FATAL|");
   microkit_dbg_puts(why);
   microkit_dbg_puts("\n");
-  for (;;) {
-    seL4_Yield();
-  }
+  __builtin_trap();
 }
 
 /*
@@ -223,19 +238,13 @@ static void restart_panic(const char *why) {
  */
 static uint64_t capture_survivors(uint8_t *base) {
   size_t used = 0;
-  switch (beam_survivors_encode(
+  const beam_snapshot_status status = beam_survivors_encode(
       (const uint8_t *)_bss, (size_t)(_bss_end - _bss), beam_survivor_gap_words,
-      base + BEAM_SURVIVORS_OFF, BEAM_SURVIVORS_SIZE, &used)) {
-  case beam_snapshot_ok:
-    return used;
-  case beam_snapshot_survivor_overflow:
-    restart_panic("survivor-area-overflow");
-    break;
-  case beam_snapshot_bss_too_large:
-    restart_panic("bss-too-large");
-    break;
+      base + BEAM_SURVIVORS_OFF, BEAM_SURVIVORS_SIZE, &used);
+  if (status != beam_snapshot_ok) {
+    restart_fail(beam_snapshot_status_name(status));
   }
-  return 0;
+  return used;
 }
 
 /*
@@ -267,10 +276,13 @@ void beam_boot_capture(uintptr_t sp) {
     return;
   }
 
-  size_t data_len = (size_t)(_bss - __init_array_start);
-  if (data_len > BEAM_DATA_SIZE) {
-    restart_panic("data-area-overflow");
+  const beam_restart_layout layout = current_layout(base);
+  const beam_restart_layout_status layout_status =
+      beam_restart_layout_check(&layout);
+  if (layout_status != beam_restart_layout_ok) {
+    restart_fail(beam_restart_layout_status_name(layout_status));
   }
+  const size_t data_len = layout.bss_start - layout.segment_start;
   memcpy(base + BEAM_DATA_OFF, __init_array_start, data_len);
 
   hdr->saved_sp = sp;
@@ -288,39 +300,55 @@ void beam_boot_capture(uintptr_t sp) {
  * The ordering is the whole point of this function:
  *
  *   1. Read everything we need out of .bss FIRST (the snapshot pointer). After
- *      step 3 that global is zero, and a re-read would dereference NULL.
- *   2. Restore the file-backed part of the writable segment.
- *   3. Zero .bss, which is what the Microkit loader did at boot.
- *   4. Replay the discovered survivors, putting the Microkit tool's patches
+ *      step 4 that global is zero, and a re-read would dereference NULL.
+ *   2. Validate the layout and the whole snapshot: magic, generation, lengths,
+ *      the saved SP and every survivor record's bounds. A failure faults to
+ *      Root here, while nothing has been written, so it is the only step that
+ *      may log.
+ *   3. Restore the file-backed part of the writable segment.
+ *   4. Zero .bss, which is what the Microkit loader did at boot.
+ *   5. Replay the discovered survivors, putting the Microkit tool's patches
  *      back on top of the zeros.
  *
  * Locals live on the reset stack inside the snapshot region, which is a
- * separate MR and therefore not in any restored range. memcpy/memset come from
- * musl, and the snapshot codec is first-party; both are pure code with no
- * writable global state, so they are safe to call while the image is
- * mid-restore. Nothing else may be called here, which is why there is no
- * logging in this function.
+ * separate MR and therefore not in any restored range (the layout check
+ * proves that too). memcpy/memset come from musl, and the snapshot codec is
+ * first-party; both are pure code with no writable global state, so they are
+ * safe to call while the image is mid-restore. Nothing else may be called
+ * after step 2.
  */
 uintptr_t beam_reset_restore(void) {
   uint8_t *base = snapshot_base();
-  beam_snapshot_hdr_t *hdr = snapshot_hdr(base);
-
-  if (!beam_snapshot_captured(hdr->magic)) {
-    restart_panic("reset-without-snapshot");
+  const beam_restart_layout layout = current_layout(base);
+  const beam_restart_layout_status layout_status =
+      beam_restart_layout_check(&layout);
+  if (layout_status != beam_restart_layout_ok) {
+    restart_fail(beam_restart_layout_status_name(layout_status));
   }
 
-  uintptr_t sp = (uintptr_t)hdr->saved_sp;
-  size_t data_len = (size_t)hdr->data_bytes;
-  size_t survivor_len = (size_t)hdr->survivor_bytes;
+  beam_snapshot_hdr_t *hdr = snapshot_hdr(base);
+  const uint8_t *survivors = base + BEAM_SURVIVORS_OFF;
+  const beam_snapshot_status status =
+      beam_snapshot_validate(hdr, survivors, BEAM_SURVIVORS_SIZE, &layout);
+  if (status != beam_snapshot_ok) {
+    restart_fail(beam_snapshot_status_name(status));
+  }
+
+  const uintptr_t sp = (uintptr_t)hdr->saved_sp;
+  const size_t data_len = (size_t)hdr->data_bytes;
+  const size_t survivor_len = (size_t)hdr->survivor_bytes;
+  const size_t bss_len = layout.bss_end - layout.bss_start;
 
   memcpy(__init_array_start, base + BEAM_DATA_OFF, data_len);
-  memset(_bss, 0, (size_t)(_bss_end - _bss));
+  memset(_bss, 0, bss_len);
 
-  const uint8_t *in = base + BEAM_SURVIVORS_OFF;
+  /* Validation walked these same records, so the loop can only end at
+   * beam_survivor_end. */
   size_t cursor = 0;
   beam_survivor_hdr_t run = {};
   const uint8_t *payload = nullptr;
-  while (beam_survivor_next(in, survivor_len, &cursor, &run, &payload)) {
+  while (beam_survivor_read(survivors, survivor_len, bss_len, &cursor, &run,
+                            &payload) == beam_survivor_record) {
     memcpy(_bss + run.offset, payload, run.len);
   }
 
@@ -398,12 +426,15 @@ static void beam_restart_report(void) {
   put_dec((uint64_t)(_bss_end - _bss));
   microkit_dbg_puts("\n");
 
+  /* The capture that just ran bounded survivor_bytes by the area size. */
   const uint8_t *in = base + BEAM_SURVIVORS_OFF;
-  size_t survivor_len = (size_t)hdr->survivor_bytes;
+  const size_t survivor_len = (size_t)hdr->survivor_bytes;
+  const size_t bss_len = (size_t)(_bss_end - _bss);
   size_t cursor = 0;
   beam_survivor_hdr_t run = {};
   const uint8_t *payload = nullptr;
-  while (beam_survivor_next(in, survivor_len, &cursor, &run, &payload)) {
+  while (beam_survivor_read(in, survivor_len, bss_len, &cursor, &run,
+                            &payload) == beam_survivor_record) {
     microkit_dbg_puts("BEAM|snapshot|survivor|vaddr=");
     put_hex((uint64_t)(uintptr_t)(_bss + run.offset));
     microkit_dbg_puts("|len=");
@@ -467,6 +498,11 @@ _Noreturn void beam_request_restart(int status) {
  * beam_snapshot_start is addressed with adrp/add rather than a literal-pool
  * load, so neither entry point depends on a literal pool being reachable from
  * its own section.
+ *
+ * A zero beam_snapshot_start means the SDF mapped no snapshot region. _reset
+ * then faults with brk before moving SP, because the reset stack would be at
+ * a small unmapped address and the first push inside beam_reset_restore would
+ * fault somewhere far less legible. Root handles the brk like any other fault.
  */
 __asm__(".section .text.start,\"ax\",%progbits\n"
         ".global _start\n"
@@ -486,6 +522,7 @@ __asm__(
     "    adrp x9, beam_snapshot_start\n"
     "    add  x9, x9, :lo12:beam_snapshot_start\n"
     "    ldr  x9, [x9]\n"
+    "    cbz  x9, .Lreset_no_snapshot\n"
     /* Stack inside the snapshot region: the incoming SP points at whatever
      * cothread stack ERTS happened to be on, inside the arena libc_init is
      * about to re-hand-out. */
@@ -494,4 +531,6 @@ __asm__(
     "    bl   beam_reset_restore\n"
     "    mov  sp, x0\n"
     "    b    main\n"
+    ".Lreset_no_snapshot:\n"
+    "    brk  #0\n"
     ".size _reset, . - _reset\n");

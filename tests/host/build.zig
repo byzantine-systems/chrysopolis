@@ -46,6 +46,7 @@ const suites = [_]Suite{
     .{ .name = "pthread", .units = &.{"runtime_tls_row.c"} },
     .{ .name = "root_policy", .units = &.{} },
     .{ .name = "snapshot", .units = &.{"beam_snapshot_codec.c"} },
+    .{ .name = "restart_layout", .units = &.{} },
     .{ .name = "rng_select", .units = &.{"rng_select.c"} },
     .{ .name = "tcp_logic", .units = &.{} },
 };

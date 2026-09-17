@@ -793,6 +793,7 @@ pub fn build(b: *std.Build) void {
             "rng_select.h",
             "root_policy.h",
             "beam_snapshot_codec.h",
+            "beam_restart_layout.h",
             "runtime_tcp_logic.h",
         };
         for (runtime_contract_headers) |header| {

@@ -8,13 +8,40 @@
 # restart-test affordances stay out of the production topology.
 {
   perSystem =
-    { pkgs, config, ... }:
+    {
+      pkgs,
+      config,
+      chryso,
+      ...
+    }:
     let
       runtimeAbi = builtins.fromJSON (builtins.readFile ../tools/sdf/runtime-abi.json);
       drivers = runtimeAbi.drivers;
       hex = value: "0x${pkgs.lib.toHexString value}";
+
+      # Runs one image's report.txt through the topology checker, against the
+      # SDF that image was synthesised from.
+      checkTopology = mode: image: sdf: ''
+        ${pkgs.lib.getExe config.packages.check-restart-topology} \
+          ${image}/report.txt ${sdf}/system.sdf \
+          ${chryso.boardDir}/include/microkit.h ${../tools/sdf/runtime-abi.json} \
+          ${mode}
+      '';
     in
     {
+      # The report.txt parser behind the restart-topology check, exposed so it
+      # can be run by hand against a modified report or SDF.
+      packages.check-restart-topology = pkgs.writeShellApplication {
+        name = "check-restart-topology";
+        runtimeInputs = [
+          pkgs.gawk
+          pkgs.gnugrep
+          pkgs.jq
+          pkgs.coreutils
+        ];
+        text = builtins.readFile ../nix/check-restart-topology.sh;
+      };
+
       checks = {
         # Compile gate for the console-driving probes in tests/. Exposed as a
         # named check, not left as a transitive dependency of .#disk, so that a
@@ -196,6 +223,18 @@
       // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
         {
           c23-diagnostic = config.packages.beam-zig-diagnostic;
+
+          # Root's restart topology as the Microkit tool actually built it:
+          # which PDs fault to Root, their entry and priority, Root's TCB caps
+          # and the notification caps between Root and its peers, read from
+          # report.txt and cross-checked against the generated SDF and
+          # runtime-abi.json. Both images, because the restart image adds the
+          # crasher and the debug channels and production must have neither.
+          restart-topology = pkgs.runCommand "chrysopolis-restart-topology" { } ''
+            ${checkTopology "production" config.packages.default config.packages.sdf}
+            ${checkTopology "restart" config.packages.restart-image config.packages.sdf-restart}
+            touch $out
+          '';
         }
         // import ../tests.nix {
           inherit pkgs;

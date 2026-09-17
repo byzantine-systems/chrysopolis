@@ -8,10 +8,14 @@
  */
 #include "beam_snapshot_codec.h"
 
+#include <stdckdint.h>
 #include <string.h>
 
 static constexpr size_t word_bytes = sizeof(uint64_t);
 static constexpr size_t header_bytes = sizeof(beam_survivor_hdr_t);
+
+static_assert(UINTPTR_MAX == UINT64_MAX,
+              "the snapshot header stores addresses as 64-bit words");
 
 static uint64_t load_word(const uint8_t *bss, size_t index) {
   uint64_t word = 0;
@@ -85,13 +89,129 @@ beam_snapshot_status beam_survivors_encode(const uint8_t *bss, size_t bss_len,
   return beam_snapshot_ok;
 }
 
-bool beam_survivor_next(const uint8_t *in, size_t len, size_t *cursor,
-                        beam_survivor_hdr_t *run, const uint8_t **payload) {
-  if (*cursor > len || len - *cursor < header_bytes) {
-    return false;
+beam_survivor_read_status beam_survivor_read(const uint8_t *in, size_t len,
+                                             size_t bss_len, size_t *cursor,
+                                             beam_survivor_hdr_t *run,
+                                             const uint8_t **payload) {
+  if (*cursor == len) {
+    return beam_survivor_end;
   }
-  memcpy(run, in + *cursor, header_bytes);
+  if (*cursor > len || len - *cursor < header_bytes) {
+    return beam_survivor_truncated;
+  }
+  beam_survivor_hdr_t hdr = {};
+  memcpy(&hdr, in + *cursor, header_bytes);
+  if (len - *cursor - header_bytes < hdr.len) {
+    return beam_survivor_truncated;
+  }
+  size_t end = 0;
+  if (ckd_add(&end, (size_t)hdr.offset, (size_t)hdr.len) || end > bss_len) {
+    return beam_survivor_out_of_bounds;
+  }
+  *run = hdr;
   *payload = in + *cursor + header_bytes;
-  *cursor += header_bytes + run->len;
-  return true;
+  *cursor += header_bytes + hdr.len;
+  return beam_survivor_record;
+}
+
+/* A usable cold-boot SP: non-zero, aligned as AAPCS64 requires at a public
+ * interface, and not the top of a stack inside the writable segment the
+ * reset rewrites or the snapshot region the reset runs on. */
+static bool stack_top_is_valid(uintptr_t sp,
+                               const beam_restart_layout *layout) {
+  return sp != 0 && sp % 16 == 0 &&
+         !beam_range_holds_stack_top(layout->snapshot_base,
+                                     layout->snapshot_size, sp) &&
+         !beam_range_holds_stack_top(layout->segment_start,
+                                     layout->bss_end - layout->segment_start,
+                                     sp);
+}
+
+beam_snapshot_status beam_snapshot_validate(const beam_snapshot_hdr_t *hdr,
+                                            const uint8_t *survivors,
+                                            size_t survivors_size,
+                                            const beam_restart_layout *layout) {
+  if (!beam_snapshot_captured(hdr->magic)) {
+    return beam_snapshot_not_captured;
+  }
+  if (hdr->generation == 0 || hdr->generation == UINT64_MAX) {
+    return beam_snapshot_bad_generation;
+  }
+  if (hdr->data_bytes != layout->bss_start - layout->segment_start) {
+    return beam_snapshot_data_length_mismatch;
+  }
+  if (hdr->survivor_bytes > survivors_size) {
+    return beam_snapshot_survivor_length_too_large;
+  }
+  if (!stack_top_is_valid((uintptr_t)hdr->saved_sp, layout)) {
+    return beam_snapshot_bad_stack_pointer;
+  }
+
+  const size_t used = (size_t)hdr->survivor_bytes;
+  const size_t bss_len = layout->bss_end - layout->bss_start;
+  const size_t tail_offset = bss_len - bss_len % word_bytes;
+  size_t cursor = 0;
+  size_t previous_end = 0;
+  for (;;) {
+    beam_survivor_hdr_t run = {};
+    const uint8_t *payload = nullptr;
+    switch (
+        beam_survivor_read(survivors, used, bss_len, &cursor, &run, &payload)) {
+    case beam_survivor_end:
+      return beam_snapshot_ok;
+    case beam_survivor_truncated:
+      return beam_snapshot_survivor_truncated;
+    case beam_survivor_out_of_bounds:
+      return beam_snapshot_survivor_out_of_bounds;
+    case beam_survivor_record:
+      break;
+    }
+    if (run.len == 0) {
+      return beam_snapshot_survivor_empty;
+    }
+    /* Word runs start and end on word boundaries. Only the sub-word tail may
+     * end elsewhere, and it always ends exactly at the end of .bss. */
+    const bool is_tail =
+        run.offset == tail_offset && (size_t)run.offset + run.len == bss_len;
+    if (run.offset % word_bytes != 0 ||
+        (run.len % word_bytes != 0 && !is_tail)) {
+      return beam_snapshot_survivor_misaligned;
+    }
+    if (run.offset < previous_end) {
+      return beam_snapshot_survivor_out_of_order;
+    }
+    previous_end = (size_t)run.offset + run.len;
+  }
+}
+
+const char *beam_snapshot_status_name(beam_snapshot_status status) {
+  switch (status) {
+  case beam_snapshot_ok:
+    return "ok";
+  case beam_snapshot_survivor_overflow:
+    return "survivor-area-overflow";
+  case beam_snapshot_bss_too_large:
+    return "bss-too-large";
+  case beam_snapshot_not_captured:
+    return "reset-without-snapshot";
+  case beam_snapshot_bad_generation:
+    return "bad-generation";
+  case beam_snapshot_data_length_mismatch:
+    return "data-length-mismatch";
+  case beam_snapshot_survivor_length_too_large:
+    return "survivor-length-too-large";
+  case beam_snapshot_bad_stack_pointer:
+    return "bad-stack-pointer";
+  case beam_snapshot_survivor_truncated:
+    return "survivor-truncated";
+  case beam_snapshot_survivor_out_of_bounds:
+    return "survivor-out-of-bounds";
+  case beam_snapshot_survivor_empty:
+    return "survivor-empty";
+  case beam_snapshot_survivor_misaligned:
+    return "survivor-misaligned";
+  case beam_snapshot_survivor_out_of_order:
+    return "survivor-out-of-order";
+  }
+  return "unknown";
 }

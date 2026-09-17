@@ -261,6 +261,82 @@
             fi
             echo "restart-snapshot: data=$data_len/$data_capacity bytes"
 
+            # Layout gates for the restart mechanism, taken from the linked ELF
+            # rather than trusted from the runtime's own constants. restart.c
+            # checks the same layout again at boot before it writes anything;
+            # these catch a bad link before an image exists at all.
+            #
+            # PT_LOAD rows as "vaddr memsz flags" in hex, flags squeezed so
+            # "R E" reads RE. Relative to LOAD, like section_property above.
+            load_segments() {
+              llvm-readelf -lW "build/$1" | awk '
+                $1 == "LOAD" {
+                  flags = ""
+                  for (i = 7; i < NF; i++) flags = flags $i
+                  print $3, $6, flags
+                }
+              '
+            }
+            if ! bss_end=$(sym_of beam_server.elf _bss_end); then
+              echo "restart-layout: beam_server.elf has no _bss_end symbol" >&2
+              exit 1
+            fi
+            if [ $(( bss_end - bss_start )) -gt 4294967295 ]; then
+              echo "restart-layout: beam_server's .bss is $(( bss_end - bss_start ))" \
+                   "bytes, past the 32-bit survivor record offsets" >&2
+              exit 1
+            fi
+
+            reset_executable=0
+            segment_writable=0
+            loads=$(load_segments beam_server.elf)
+            if [ -z "$loads" ]; then
+              echo "restart-layout: beam_server.elf has no PT_LOAD segments" >&2
+              exit 1
+            fi
+            while read -r load_start load_size load_flags; do
+              load_end=$(( load_start + load_size ))
+              case $load_flags in
+                *E*)
+                  if [ $(( beam_reset >= load_start && beam_reset < load_end )) -eq 1 ]; then
+                    reset_executable=1
+                  fi
+                  ;;
+              esac
+              case $load_flags in
+                *W*)
+                  if [ $(( seg_start >= load_start && bss_end <= load_end )) -eq 1 ]; then
+                    segment_writable=1
+                  fi
+                  ;;
+              esac
+              # The heap and snapshot are SDF maps, and the exit-fault range
+              # must stay unmapped: none of them may land on the ELF image.
+              for range in \
+                "heap ${toString runtimeAbi.memory.heap.vaddr} ${toString runtimeAbi.memory.heap.size}" \
+                "snapshot ${toString runtimeAbi.memory.snapshot.vaddr} ${toString runtimeAbi.memory.snapshot.size}" \
+                "exit-fault ${toString runtimeAbi.restart.exit_fault_base} ${toString runtimeAbi.restart.exit_fault_size}"; do
+                read -r range_name range_start range_size <<< "$range"
+                if [ $(( range_start < load_end && load_start < range_start + range_size )) -eq 1 ]; then
+                  echo "restart-layout: beam_server.elf PT_LOAD $load_start+$load_size" \
+                       "overlaps the $range_name range at $range_start" >&2
+                  exit 1
+                fi
+              done
+            done <<< "$loads"
+            if [ "$reset_executable" -ne 1 ]; then
+              echo "restart-layout: _reset ($beam_reset) is not inside an" \
+                   "executable PT_LOAD of beam_server.elf" >&2
+              exit 1
+            fi
+            if [ "$segment_writable" -ne 1 ]; then
+              echo "restart-layout: [__init_array_start, _bss_end) is not inside" \
+                   "one writable PT_LOAD of beam_server.elf" >&2
+              exit 1
+            fi
+            echo "restart-layout: _reset=$beam_reset executable," \
+                 "writable segment $seg_start..$bss_end"
+
             : > restart_entry.bin
             emit_u64 restart_entry.bin "$se"          # shared child _start
             emit_u64 restart_entry.bin "$beam_reset"  # beam_server _reset
@@ -269,6 +345,17 @@
               ${toString runtimeAbi.restart.word_bytes}
             llvm-objcopy --update-section \
               ${runtimeAbi.restart.config_section}=restart_entry.bin build/root.elf
+            # Read the section back: Root trusts these two words as the only
+            # places it will ever resume a child.
+            llvm-objcopy \
+              --dump-section ${runtimeAbi.restart.config_section}=restart_entry.readback \
+              build/root.elf restart_entry.readback.elf
+            if ! cmp -s restart_entry.bin restart_entry.readback; then
+              echo "restart-entry: root.elf ${runtimeAbi.restart.config_section}" \
+                   "does not hold the patched entries after objcopy" >&2
+              exit 1
+            fi
+            rm restart_entry.readback restart_entry.readback.elf
 
             ${pkgs.lib.optionalString restartDebug ''
               # Test-only /dev/pd-restart trigger: patch the beam_server-side
