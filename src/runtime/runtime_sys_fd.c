@@ -21,32 +21,49 @@
  * implement socketpair.
  */
 #include "runtime_fd.h"
+#include "runtime_fd_pair.h"
 #include "runtime_syscall_handlers.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
+
+/* The pipe2 flags for the read end. */
+typedef struct {
+  int flags;
+} pipe_context;
+
+static int pipe_alloc(void *context, size_t which) {
+  const pipe_context *request = context;
+  if (which == 0) {
+    /* Keep O_NONBLOCK so the read end blocks or returns -EAGAIN as asked. */
+    return runtime_fd_alloc(runtime_fd_empty_read, nullptr, nullptr,
+                            O_RDONLY | (request->flags & O_NONBLOCK));
+  }
+  return runtime_fd_alloc(nullptr, runtime_fd_discard_write, nullptr, O_WRONLY);
+}
+
+static int socketpair_alloc(void *context, size_t which) {
+  (void)context;
+  (void)which;
+  return runtime_fd_alloc(runtime_fd_empty_read, runtime_fd_discard_write,
+                          nullptr, O_RDWR | O_NONBLOCK);
+}
+
+static int pair_close(void *context, int fd) {
+  (void)context;
+  return runtime_fd_close(fd);
+}
 
 long runtime_sys_pipe2(va_list ap) {
   int *pipefd = runtime_sys_arg_pointer(va_arg(ap, long));
-  const int flags = runtime_sys_arg_int(va_arg(ap, long));
+  pipe_context request = {.flags = runtime_sys_arg_int(va_arg(ap, long))};
   if (pipefd == nullptr) {
     return -EFAULT;
   }
-  /* Keep O_NONBLOCK so the read end blocks or returns -EAGAIN as asked. */
-  const int rfd = runtime_fd_alloc(runtime_fd_empty_read, nullptr, nullptr,
-                                   O_RDONLY | (flags & O_NONBLOCK));
-  if (rfd < 0) {
-    return rfd;
-  }
-  const int wfd =
-      runtime_fd_alloc(nullptr, runtime_fd_discard_write, nullptr, O_WRONLY);
-  if (wfd < 0) {
-    (void)runtime_fd_close(rfd);
-    return wfd;
-  }
-  pipefd[0] = rfd;
-  pipefd[1] = wfd;
-  return 0;
+  const runtime_fd_pair_ops ops = {
+      .alloc = pipe_alloc, .close = pair_close, .context = &request};
+  return runtime_fd_alloc_pair(&ops, pipefd);
 }
 
 long runtime_sys_timerfd_create(va_list ap) {
@@ -63,20 +80,7 @@ long runtime_sys_socketpair(va_list ap) {
   if (sv == nullptr) {
     return -EFAULT;
   }
-  const int a =
-      runtime_fd_alloc(runtime_fd_empty_read, runtime_fd_discard_write, nullptr,
-                       O_RDWR | O_NONBLOCK);
-  if (a < 0) {
-    return a;
-  }
-  const int b =
-      runtime_fd_alloc(runtime_fd_empty_read, runtime_fd_discard_write, nullptr,
-                       O_RDWR | O_NONBLOCK);
-  if (b < 0) {
-    (void)runtime_fd_close(a);
-    return b;
-  }
-  sv[0] = a;
-  sv[1] = b;
-  return 0;
+  const runtime_fd_pair_ops ops = {
+      .alloc = socketpair_alloc, .close = pair_close, .context = nullptr};
+  return runtime_fd_alloc_pair(&ops, sv);
 }

@@ -6,6 +6,7 @@
  * reused within a boot, even when libmicrokitco recycles a cothread slot.
  */
 #include "runtime_pthread_handle.h"
+#include "runtime_token_counter.h"
 
 #include <libmicrokitco.h>
 
@@ -13,7 +14,7 @@
 
 /* Reserve 1 for root and 2..MAX for cothreads spawned outside pthread_create.
  */
-static uintptr_t next_token = LIBMICROKITCO_MAX_COTHREADS + 1;
+static runtime_token_counter tokens = {.next = LIBMICROKITCO_MAX_COTHREADS + 1};
 static_assert(sizeof(pthread_t) == sizeof(uintptr_t));
 
 pthread_t runtime_thread_root_token(void) { return (pthread_t)(uintptr_t)1; }
@@ -23,10 +24,11 @@ bool runtime_thread_token_is_root(pthread_t token) {
 }
 
 bool runtime_thread_token_next(pthread_t *token) {
-  if (token == NULL || next_token == UINTPTR_MAX) {
+  uintptr_t value = 0;
+  if (token == NULL || !runtime_token_counter_next(&tokens, &value)) {
     return false;
   }
-  *token = (pthread_t)next_token;
-  next_token++;
+  /* pthread_t is pointer-sized (asserted above) and never dereferenced. */
+  *token = (pthread_t)value;
   return true;
 }

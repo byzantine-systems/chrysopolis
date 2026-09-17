@@ -23,6 +23,12 @@
         # skipped. rebar.config sets warnings_as_errors, so a warning fails here.
         test-modules = config.packages.test-modules;
 
+        # Host tests for the pure runtime logic: ID and range checks, timeout
+        # arithmetic, ownership rollback and state transitions that the QEMU
+        # checks cannot drive into their invalid or boundary cases. Seconds to
+        # run and platform-independent, like test-modules above.
+        runtime-host-tests = config.packages.runtime-host-tests;
+
         # The Zig parser rejects malformed, overlapping and out-of-range ABI
         # values while producing both SDF variants. This check then verifies
         # that the rendered topology and config-blob set reflect those values.

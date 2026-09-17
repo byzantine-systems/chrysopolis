@@ -66,6 +66,7 @@
  * a stack inside the very arena libc_init is about to re-hand-out. It switches
  * to a stack inside the snapshot region before it calls any C.
  */
+#include "beam_snapshot_codec.h"
 #include "runtime_restart.h"
 
 #include <microkit.h>
@@ -102,12 +103,11 @@ _Static_assert(BEAM_SURVIVORS_OFF >= BEAM_RESET_STACK_TOP,
 _Static_assert(BEAM_DATA_OFF >= BEAM_SURVIVORS_OFF + BEAM_SURVIVORS_SIZE,
                "the data area must not overlap the survivor area");
 
-/* Written last on the cold-boot path, so a torn capture reads as "cold" and is
- * simply retaken rather than half-restored. seL4 zeroes fresh frames, so an
- * untouched region reads 0 here, which is what makes "no magic" a reliable
- * cold-boot test with nothing to initialise first. */
-#define BEAM_SNAPSHOT_MAGIC 0x43485259534E5031ull /* "CHRYSNP1" */
-
+/* The magic (beam_snapshot_magic) is written last on the cold-boot path, so a
+ * torn capture reads as "cold" and is simply retaken rather than
+ * half-restored. seL4 zeroes fresh frames, so an untouched region reads 0
+ * here, which is what makes "no magic" a reliable cold-boot test with nothing
+ * to initialise first. */
 typedef struct {
   uint64_t magic;
   uint64_t generation;     /* 1 on cold boot, incremented by every reset */
@@ -127,17 +127,6 @@ _Static_assert(offsetof(beam_snapshot_hdr_t, magic) == 0 &&
                    offsetof(beam_snapshot_hdr_t, survivor_bytes) == 32,
                "snapshot header field offsets are part of the restart ABI");
 
-/* One discovered non-zero run in .bss, followed in the survivor area by `len`
- * bytes of payload padded up to 8. */
-typedef struct {
-  uint32_t offset; /* from _bss */
-  uint32_t len;
-} beam_survivor_hdr_t;
-
-_Static_assert(sizeof(beam_survivor_hdr_t) == 8,
-               "survivor record header must remain eight bytes");
-_Static_assert(_Alignof(beam_survivor_hdr_t) == _Alignof(uint32_t),
-               "survivor record header must remain 32-bit aligned");
 _Static_assert(offsetof(beam_survivor_hdr_t, offset) == 0 &&
                    offsetof(beam_survivor_hdr_t, len) == 4,
                "survivor record offsets are part of the restart ABI");
@@ -150,7 +139,7 @@ _Static_assert(offsetof(beam_survivor_hdr_t, offset) == 0 &&
  * capturing a few zero bytes is harmless, since they are being restored to the
  * value the zero-fill would have given them anyway.
  */
-#define BEAM_SURVIVOR_GAP_WORDS 8u
+static constexpr size_t beam_survivor_gap_words = 8;
 
 /*
  * The snapshot region base, patched by the Microkit tool at synthesis time
@@ -228,77 +217,25 @@ static void restart_panic(const char *why) {
 }
 
 /*
- * Record every non-zero run in [_bss, _bss_end) into the survivor area.
- *
- * Scanned a word at a time: .bss is tens of megabytes and all but a few dozen
- * bytes of it are zero, so a byte-wise scan would spend most of a second under
- * TCG for no extra precision (runs are recorded at word granularity anyway).
- * The tail bytes below the last whole word are checked separately so a .bss
- * whose length is not a multiple of 8 cannot hide a patched byte at the end.
+ * Record every non-zero run in [_bss, _bss_end) into the survivor area. The
+ * codec scans a word at a time and checks the sub-word tail separately; .bss
+ * is ALIGN(4)-terminated by microkit.ld, so that tail is at most four bytes.
  */
 static uint64_t capture_survivors(uint8_t *base) {
-  const uint64_t *words = (const uint64_t *)(void *)_bss;
-  size_t total = (size_t)(_bss_end - _bss);
-  size_t nwords = total / sizeof(uint64_t);
-  uint8_t *out = base + BEAM_SURVIVORS_OFF;
   size_t used = 0;
-
-  for (size_t i = 0; i < nwords;) {
-    if (words[i] == 0) {
-      i++;
-      continue;
-    }
-
-    /* Extend the run while the next non-zero word is within the coalescing
-     * gap, so one patched struct stays one entry. */
-    size_t start = i;
-    size_t last = i;
-    i++;
-    while (i < nwords && (i - last) <= BEAM_SURVIVOR_GAP_WORDS) {
-      if (words[i] != 0) {
-        last = i;
-      }
-      i++;
-    }
-
-    size_t off = start * sizeof(uint64_t);
-    size_t len = (last - start + 1) * sizeof(uint64_t);
-    if (used + sizeof(beam_survivor_hdr_t) + len > BEAM_SURVIVORS_SIZE) {
-      restart_panic("survivor-area-overflow");
-    }
-
-    beam_survivor_hdr_t hdr = {.offset = (uint32_t)off, .len = (uint32_t)len};
-    memcpy(out + used, &hdr, sizeof(hdr));
-    memcpy(out + used + sizeof(hdr), _bss + off, len);
-    used += sizeof(hdr) + len;
+  switch (beam_survivors_encode(
+      (const uint8_t *)_bss, (size_t)(_bss_end - _bss), beam_survivor_gap_words,
+      base + BEAM_SURVIVORS_OFF, BEAM_SURVIVORS_SIZE, &used)) {
+  case beam_snapshot_ok:
+    return used;
+  case beam_snapshot_survivor_overflow:
+    restart_panic("survivor-area-overflow");
+    break;
+  case beam_snapshot_bss_too_large:
+    restart_panic("bss-too-large");
+    break;
   }
-
-  /* The sub-word tail. .bss is ALIGN(4)-terminated by microkit.ld, so this is
-   * at most four bytes, but a patched value ending there would be lost without
-   * it and the failure would look like a random symbol coming back zero. */
-  size_t tail_off = nwords * sizeof(uint64_t);
-  if (tail_off < total) {
-    size_t tail_len = total - tail_off;
-    bool nonzero = false;
-    for (size_t i = 0; i < tail_len; i++) {
-      if (((const uint8_t *)_bss)[tail_off + i] != 0) {
-        nonzero = true;
-        break;
-      }
-    }
-    if (nonzero) {
-      if (used + sizeof(beam_survivor_hdr_t) + tail_len > BEAM_SURVIVORS_SIZE) {
-        restart_panic("survivor-area-overflow");
-      }
-      beam_survivor_hdr_t hdr = {.offset = (uint32_t)tail_off,
-                                 .len = (uint32_t)tail_len};
-      memcpy(out + used, &hdr, sizeof(hdr));
-      memcpy(out + used + sizeof(hdr), _bss + tail_off, tail_len);
-      used += sizeof(hdr) + tail_len;
-    }
-  }
-
-  return used;
+  return 0;
 }
 
 /*
@@ -326,7 +263,7 @@ void beam_boot_capture(uintptr_t sp) {
   }
 
   beam_snapshot_hdr_t *hdr = snapshot_hdr(base);
-  if (hdr->magic == BEAM_SNAPSHOT_MAGIC) {
+  if (beam_snapshot_captured(hdr->magic)) {
     return;
   }
 
@@ -340,7 +277,7 @@ void beam_boot_capture(uintptr_t sp) {
   hdr->data_bytes = data_len;
   hdr->survivor_bytes = capture_survivors(base);
   hdr->generation = 1;
-  hdr->magic = BEAM_SNAPSHOT_MAGIC;
+  hdr->magic = beam_snapshot_magic;
 }
 
 /*
@@ -359,15 +296,16 @@ void beam_boot_capture(uintptr_t sp) {
  *
  * Locals live on the reset stack inside the snapshot region, which is a
  * separate MR and therefore not in any restored range. memcpy/memset come from
- * musl and are pure code with no writable global state, so they are safe to
- * call while the image is mid-restore; nothing else here may be, which is why
- * there is no logging in this function.
+ * musl, and the snapshot codec is first-party; both are pure code with no
+ * writable global state, so they are safe to call while the image is
+ * mid-restore. Nothing else may be called here, which is why there is no
+ * logging in this function.
  */
 uintptr_t beam_reset_restore(void) {
   uint8_t *base = snapshot_base();
   beam_snapshot_hdr_t *hdr = snapshot_hdr(base);
 
-  if (hdr->magic != BEAM_SNAPSHOT_MAGIC) {
+  if (!beam_snapshot_captured(hdr->magic)) {
     restart_panic("reset-without-snapshot");
   }
 
@@ -379,11 +317,11 @@ uintptr_t beam_reset_restore(void) {
   memset(_bss, 0, (size_t)(_bss_end - _bss));
 
   const uint8_t *in = base + BEAM_SURVIVORS_OFF;
-  for (size_t used = 0; used + sizeof(beam_survivor_hdr_t) <= survivor_len;) {
-    beam_survivor_hdr_t run;
-    memcpy(&run, in + used, sizeof(run));
-    memcpy(_bss + run.offset, in + used + sizeof(run), run.len);
-    used += sizeof(run) + run.len;
+  size_t cursor = 0;
+  beam_survivor_hdr_t run = {};
+  const uint8_t *payload = nullptr;
+  while (beam_survivor_next(in, survivor_len, &cursor, &run, &payload)) {
+    memcpy(_bss + run.offset, payload, run.len);
   }
 
   hdr->generation++;
@@ -400,7 +338,7 @@ bool beam_warm_start(void) {
     return false;
   }
   beam_snapshot_hdr_t *hdr = snapshot_hdr(base);
-  return hdr->magic == BEAM_SNAPSHOT_MAGIC && hdr->generation > 1;
+  return beam_snapshot_warm(hdr->magic, hdr->generation);
 }
 
 /*
@@ -462,15 +400,15 @@ static void beam_restart_report(void) {
 
   const uint8_t *in = base + BEAM_SURVIVORS_OFF;
   size_t survivor_len = (size_t)hdr->survivor_bytes;
-  for (size_t used = 0; used + sizeof(beam_survivor_hdr_t) <= survivor_len;) {
-    beam_survivor_hdr_t run;
-    memcpy(&run, in + used, sizeof(run));
+  size_t cursor = 0;
+  beam_survivor_hdr_t run = {};
+  const uint8_t *payload = nullptr;
+  while (beam_survivor_next(in, survivor_len, &cursor, &run, &payload)) {
     microkit_dbg_puts("BEAM|snapshot|survivor|vaddr=");
     put_hex((uint64_t)(uintptr_t)(_bss + run.offset));
     microkit_dbg_puts("|len=");
     put_dec(run.len);
     microkit_dbg_puts("\n");
-    used += sizeof(run) + run.len;
   }
 }
 
@@ -507,8 +445,7 @@ _Noreturn void beam_request_restart(int status) {
   put_dec((uint64_t)(unsigned int)status);
   microkit_dbg_puts("|requesting-restart\n");
 
-  *(volatile uint8_t *)(uintptr_t)(BEAM_EXIT_FAULT_BASE +
-                                   (unsigned int)(status & 0xff)) = 0;
+  *(volatile uint8_t *)beam_exit_fault_addr(BEAM_EXIT_FAULT_BASE, status) = 0;
   __builtin_trap();
 }
 

@@ -32,6 +32,8 @@
  *     path. Root's part is only knowing which of the two entry points to use;
  *     the mechanism lives in src/runtime/restart.c.
  */
+#include "root_policy.h"
+
 #include <runtime_abi.h>
 
 #include <microkit.h>
@@ -326,36 +328,31 @@ static void root_giveup(microkit_child child, const char *reason) {
 }
 
 static void root_restart_child(microkit_child child, const char *tag) {
-  /* Guard the restart_count[] index before touching it. A child id past the
-   * table means we cannot account for its budget, and a child we cannot
-   * account for could spin in a restart loop forever, so refuse to restart it
-   * at all and stop it instead. In practice this is unreachable (child ids are
-   * pinned small in tools/sdf/system.zig); it exists so a future topology
-   * change fails loudly and safely rather than corrupting memory past the
-   * array. */
-  if (child >= ROOT_MAX_CHILDREN) {
-    root_giveup(child, "out-of-range");
-    return;
-  }
-
-  /* Budget exhausted: this child has already spent its whole allowance and is
-   * evidently not recovering. Stop it rather than restart it forever. This is
-   * the reliability talk's "giving up" decision, and it is what keeps one sick
-   * driver from livelocking the system: a stopped driver degrades the service
-   * it provides, an endlessly restarting one burns CPU at a priority above
-   * every client. */
-  if (restart_count[child] >= root_restart_budget(child)) {
-    root_giveup(child, "budget-exhausted");
-    return;
-  }
-
-  /* No entry point for this child means the image was assembled without one
-   * (an un-patched .restart_config, so beam_reset_entry is still 0). Resuming
-   * at address 0 would fault instantly and burn the whole budget doing it, so
-   * stop the child instead and say why. */
-  seL4_Word entry = root_restart_entry(child);
-  if (entry == 0) {
-    root_giveup(child, "no-restart-entry");
+  /* The decision runs its checks in a fixed order, each explained here.
+   *
+   * Out of range: a child id past restart_count[] cannot have its budget
+   * accounted for, and a child we cannot account for could spin in a restart
+   * loop forever, so it is stopped instead. In practice this is unreachable
+   * (child ids are pinned small in tools/sdf/system.zig); it exists so a future
+   * topology change fails loudly and safely rather than corrupting memory past
+   * the array.
+   *
+   * Budget exhausted: this child has already spent its whole allowance and is
+   * evidently not recovering. This is the reliability talk's "giving up"
+   * decision, and it keeps one sick driver from livelocking the system: a
+   * stopped driver degrades the service it provides, an endlessly restarting
+   * one burns CPU at a priority above every client.
+   *
+   * No entry point: the image was assembled without one (an un-patched
+   * .restart_config, so beam_reset_entry is still 0). Resuming at address 0
+   * would fault instantly and burn the whole budget doing it. */
+  const seL4_Word entry =
+      child < ROOT_MAX_CHILDREN ? root_restart_entry(child) : 0;
+  const root_restart_action action = root_restart_decide(
+      child, ROOT_MAX_CHILDREN, restart_count,
+      child < ROOT_MAX_CHILDREN ? root_restart_budget(child) : 0, entry);
+  if (action != root_restart_resume) {
+    root_giveup(child, root_restart_giveup_reason(action));
     return;
   }
 
@@ -388,8 +385,11 @@ void notified(microkit_channel ch) {
    * has gone wrong here: a test is asking us to restart a HEALTHY driver so it
    * can isolate the recovery behavior. This path deliberately involves no
    * fault at all. */
-  if (ch <= ROOT_DEBUG_CH_MAX) {
-    root_restart_child(debug_restart_child[ch], "ROOT|debug-restart");
+  size_t index = 0;
+  const root_notify_kind kind = root_notify_route(
+      ch, ROOT_DEBUG_CH_MAX, ROOT_FAULT_CH_SERIAL, ROOT_FAULT_CH_MAX, &index);
+  if (kind == root_notify_debug_restart) {
+    root_restart_child(debug_restart_child[index], "ROOT|debug-restart");
     return;
   }
 
@@ -397,8 +397,8 @@ void notified(microkit_channel ch) {
    * budget slot here: the resulting seL4 fault enters fault(), and that path
    * charges exactly one restart through root_restart_child(). Logging precedes
    * the restart because the child may fault as soon as it is resumed. */
-  if (ch >= ROOT_FAULT_CH_SERIAL && ch <= ROOT_FAULT_CH_MAX) {
-    microkit_child child = fault_inject_child[ch - ROOT_FAULT_CH_SERIAL];
+  if (kind == root_notify_fault_inject) {
+    microkit_child child = fault_inject_child[index];
     microkit_dbg_puts("ROOT|fault-inject|child=");
     put_dec(child);
     microkit_dbg_puts("\n");

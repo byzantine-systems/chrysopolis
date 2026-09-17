@@ -145,14 +145,46 @@
         test-modules = pkgs.beamPackages.buildRebar3 {
           name = "chryso_test";
           version = "0.1.0";
+          # Only the Erlang sources: tests/host holds the C harness below, and
+          # editing it must not rebuild the probes.
           src = pkgs.lib.fileset.toSource {
             root = ../.;
             fileset = pkgs.lib.fileset.unions [
               ../rebar.config
-              ../tests
+              (pkgs.lib.fileset.fileFilter (
+                file: file.hasExt "erl" || file.name == "chryso_test.app.src"
+              ) ../tests)
             ];
           };
           beamDeps = [ ];
+        };
+
+        # Host tests for the pure runtime units (tests/host). Native build with
+        # the same Zig, and therefore the same clang, as the cross build; no
+        # Microkit, sDDF or LionsOS input, so it runs on every platform in
+        # seconds. The derivation succeeds only if every suite passes in every
+        # variant (see tests/host/build.zig).
+        runtime-host-tests = pkgs.stdenvNoCC.mkDerivation {
+          name = "chrysopolis-runtime-host-tests";
+          src = pkgs.lib.fileset.toSource {
+            root = ../.;
+            fileset = pkgs.lib.fileset.unions [
+              ../tests/host
+              ../src/runtime
+            ];
+          };
+          nativeBuildInputs = [ inputs'.zig2nix.packages."zig-0_15_2" ];
+          dontConfigure = true;
+          dontInstall = true;
+          dontFixup = true;
+          buildPhase = ''
+            runHook preBuild
+            export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+            cd tests/host
+            zig build test --summary all
+            touch $out
+            runHook postBuild
+          '';
         };
 
         # Every aarch64 cross artifact, built by the one root build.zig:

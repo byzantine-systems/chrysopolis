@@ -8,6 +8,7 @@
  */
 #include "runtime_timer.h"
 #include "runtime_config.h"
+#include "runtime_timer_slot.h"
 
 #include <sddf/timer/client.h>
 
@@ -15,16 +16,13 @@ static uint64_t beam_timer_deadline;
 
 void beam_timer_arm(uint64_t deadline_ns) {
   const uint64_t now = sddf_timer_time_now(timer_config.driver_id);
-  if (deadline_ns <= now) {
-    deadline_ns = now + 1;
-  }
-
   /* A restarted timer driver notifies clients whose timeouts it discarded.
    * That notification clears this slot, so an elapsed deadline must not be
    * cleared here: it may already be pending delivery. */
-  if (beam_timer_deadline == 0 || deadline_ns < beam_timer_deadline) {
-    beam_timer_deadline = deadline_ns;
-    sddf_timer_set_timeout(timer_config.driver_id, deadline_ns - now);
+  uint64_t relative_ns = 0;
+  if (runtime_timer_slot_update(&beam_timer_deadline, now, deadline_ns,
+                                &relative_ns)) {
+    sddf_timer_set_timeout(timer_config.driver_id, relative_ns);
   }
 }
 

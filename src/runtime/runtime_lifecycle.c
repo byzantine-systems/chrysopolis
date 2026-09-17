@@ -99,104 +99,18 @@ void runtime_lifecycle_notified(microkit_channel ch) {
   microkit_cothread_yield();
 }
 
-static bool status_is_config_failure(runtime_status_t status) {
-  return status >= RUNTIME_STATUS_CONFIG_SERIAL &&
-         status <= RUNTIME_STATUS_CONFIG_NET_PAIR;
-}
-
-static const char *status_stage(runtime_status_t status) {
-  if (status_is_config_failure(status)) {
-    return "config";
-  }
-  switch (status) {
-  case RUNTIME_STATUS_CONFIG_SERIAL:
-  case RUNTIME_STATUS_CONFIG_TIMER:
-  case RUNTIME_STATUS_CONFIG_FS:
-  case RUNTIME_STATUS_CONFIG_NET:
-  case RUNTIME_STATUS_CONFIG_LWIP:
-  case RUNTIME_STATUS_CONFIG_NET_PAIR:
-    return "config";
-  case RUNTIME_STATUS_COTHREAD_ALLOC:
-    return "cothread";
-  case RUNTIME_STATUS_FS_COMMAND:
-  case RUNTIME_STATUS_FS_MOUNT:
-    return "filesystem";
-  case RUNTIME_STATUS_CLOCK:
-    return "timer";
-  case RUNTIME_STATUS_ENVIRONMENT:
-  case RUNTIME_STATUS_PAYLOAD_SPAWN:
-    return "erts";
-  case RUNTIME_STATUS_PROBE_SPAWN:
-  case RUNTIME_STATUS_THREAD_PROBE:
-    return "probe";
-  case RUNTIME_STATUS_OK:
-    return "none";
-  }
-  return "unknown";
-}
-
-static const char *status_name(runtime_status_t status) {
-  switch (status) {
-  case RUNTIME_STATUS_OK:
-    return "ok";
-  case RUNTIME_STATUS_CONFIG_SERIAL:
-    return "config-serial";
-  case RUNTIME_STATUS_CONFIG_TIMER:
-    return "config-timer";
-  case RUNTIME_STATUS_CONFIG_FS:
-    return "config-fs";
-  case RUNTIME_STATUS_CONFIG_NET:
-    return "config-net";
-  case RUNTIME_STATUS_CONFIG_LWIP:
-    return "config-lwip";
-  case RUNTIME_STATUS_CONFIG_NET_PAIR:
-    return "config-net-pair";
-  case RUNTIME_STATUS_COTHREAD_ALLOC:
-    return "cothread-alloc";
-  case RUNTIME_STATUS_FS_COMMAND:
-    return "fs-command";
-  case RUNTIME_STATUS_FS_MOUNT:
-    return "fs-mount";
-  case RUNTIME_STATUS_CLOCK:
-    return "clock";
-  case RUNTIME_STATUS_ENVIRONMENT:
-    return "environment";
-  case RUNTIME_STATUS_PAYLOAD_SPAWN:
-    return "payload-spawn";
-  case RUNTIME_STATUS_PROBE_SPAWN:
-    return "probe-spawn";
-  case RUNTIME_STATUS_THREAD_PROBE:
-    return "thread-probe";
-  }
-  return "unknown";
-}
-
-static void debug_put_status(runtime_status_t status) {
-  char reversed[4] = {};
-  unsigned value = (unsigned)status;
-  size_t length = 0;
-  do {
-    reversed[length++] = (char)('0' + value % 10);
-    value /= 10;
-  } while (value != 0);
-
-  char output[4] = {};
-  for (size_t i = 0; i < length; i++) {
-    output[i] = reversed[length - i - 1];
-  }
-  microkit_dbg_puts(output);
-}
-
 void runtime_lifecycle_fail(runtime_status_t status) {
   microkit_dbg_puts("BEAM|lifecycle|FATAL|stage=");
-  microkit_dbg_puts(status_stage(status));
+  microkit_dbg_puts(runtime_status_stage(status));
   microkit_dbg_puts("|status=");
-  microkit_dbg_puts(status_name(status));
+  microkit_dbg_puts(runtime_status_name(status));
   microkit_dbg_puts("|code=");
-  debug_put_status(status);
+  char code[runtime_status_code_text_size] = {};
+  (void)runtime_status_format_code(status, code);
+  microkit_dbg_puts(code);
   microkit_dbg_puts("\n");
 
-  if (!status_is_config_failure(status)) {
+  if (!runtime_status_is_config_failure(status)) {
     beam_request_restart((int)status);
   }
 
