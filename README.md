@@ -23,6 +23,26 @@ Chrysopolis aims to run the BEAM on the [seL4 microkernel](https://sel4.systems/
         - the root [build.zig](build.zig) builds [libmicrokitco](https://github.com/au-ts/libmicrokitco), the sDDF driver/virtualiser PDs, and compiles and links the `beam_server` PD (ERTS glue) from [src/runtime](src/runtime). 
     - ERTS loads its OTP modules and boot script from a FAT filesystem (`fatfs` PD -> sDDF block subsystem), the result is a hermetic, reproducible `sel4-beam.img`.
 
+### Build-time ABI
+
+[`tools/sdf/runtime-abi.json`](tools/sdf/runtime-abi.json) is currently the shared value authority
+for child and channel IDs, restart limits, fixed virtual-memory regions, ELF config sections, and
+the mapping from generated sDDF blobs to PD images. [`tools/sdf/abi.zig`](tools/sdf/abi.zig)
+deserializes it into a concrete Zig `Contract` and rejects invalid versions, layouts, ranges,
+collisions, and section mappings. Nix reads the same JSON during evaluation, while both Zig builds
+consume the validated contract.
+
+```mermaid
+flowchart LR
+    abi["runtime-abi.json<br/>shared values"] --> validator["abi.zig<br/>typed parse + invariants"]
+    validator --> sdf["tools/sdf<br/>system.sdf + config blobs"]
+    validator --> native["build.zig<br/>runtime_abi.h + PD ELFs"]
+    abi --> nix["Nix evaluation<br/>section injection + checks"]
+    sdf --> image["Microkit image"]
+    native --> image
+    nix --> image
+```
+
 ## Architecture
 
 ```mermaid
@@ -76,7 +96,9 @@ nix flake check -L
 nix build .#checks.x86_64-linux.boot-smoke -L
 ```
 
-All QEMU checks gate the build (each boots an image under emulation and asserts on the serial trace), plus two pure checks that run on every platform.
+All QEMU checks gate the build. Each boots an image under emulation and asserts on the serial
+trace or drives an external peer. Host-only checks validate pure runtime logic, ABI values,
+generated topology, ELF layout, test modules, diagnostics, and formatting.
 
 Core function:
 
@@ -96,9 +118,20 @@ Crash and restart:
 - **`serial-fault-smoke`**, **`timer-fault-smoke`**, **`blk-fault-smoke`**, **`net-fault-smoke`**: Each real driver is forced to take a genuine seL4 fault, Root catches and restarts it, and its subsystem must recover. The block case includes a client request in flight.
 - **`blk-giveup-smoke`**: Genuine block-driver faults spend the entire restart budget, Root stops the driver for good, and the system must degrade rather than wedge.
 
-Pure (non-QEMU): 
-- **`production-sdf-gate`** asserts the test-only restart affordances stay out of the shipped topology.
+Pure and generated-artifact gates include:
+
+- **`runtime-host-tests`** runs every pure runtime suite with Debug/UBSan and ReleaseFast.
+- **`abi-contract`** proves both generated SDF variants represent the declared ABI and emit every
+  configured data blob.
+- **`production-sdf-gate`** asserts test-only restart affordances stay out of the shipped topology.
+- **`restart-topology`** checks Root's children, entries, priorities, fault endpoints, and relevant
+  capability slots against the SDF and ABI.
 - **`test-modules`** compiles the guest-side probes in `tests/`.
+- **`c23-diagnostic`** compiles first-party C with stricter diagnostics and warnings as errors.
+- **`treefmt`** checks Nix, Gleam, Erlang, C, and Zig formatting.
+- **`phase-zero-baseline`** compares the current normalized SDF, Microkit report, ELF, image,
+  toolchain, host-test, and behavioral-contract facts with the checked snapshot in
+  [`baselines/phase-zero`](baselines/phase-zero).
 
 ### Running the BEAM shell
 

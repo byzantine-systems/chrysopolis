@@ -1,0 +1,308 @@
+{
+  "abi-contract": {
+    "kind": "generated-artifact",
+    "protects": [
+      "ABI values are represented in both SDF variants",
+      "every declared configuration blob is emitted"
+    ]
+  },
+  "beam-restart-smoke": {
+    "forbidden_markers": [
+      "BEAM_MARK_AFTER|present"
+    ],
+    "kind": "qemu",
+    "protects": [
+      "ERTS exits reach Root",
+      "beam_server restarts with fresh writable state",
+      "the Erlang shell becomes ready after each restart"
+    ],
+    "required_markers": [
+      "BEAM|exit|code=0|requesting-restart",
+      "ROOT|restart|child=5|count=1",
+      "BEAM|boot|generation=2|bss-counter=1",
+      "BEAM_MARK_AFTER|absent"
+    ]
+  },
+  "blk-fault-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "a genuine block-driver fault reaches Root",
+      "the virtualiser reconciles idle and in-flight requests",
+      "filesystem service recovers"
+    ],
+    "required_markers": [
+      "ROOT|fault|child=2",
+      "ROOT|restart|child=2|count=1",
+      "driver restarted, reconciling",
+      "FS_AFTER_INFLIGHT|"
+    ]
+  },
+  "blk-giveup-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "the block-driver lifetime budget is finite",
+      "Root stops a permanently failing child",
+      "blk_virt degrades without wedging",
+      "later requests for a gone child are ignored"
+    ],
+    "required_markers": [
+      "ROOT|giveup|child=2|reason=budget-exhausted",
+      "driver stopped, reconciling outstanding requests",
+      "ROOT|gone|child=2|ignored=fault-inject",
+      "ROOT|gone|child=2|ignored=debug-restart",
+      "BLKGONE_ALIVE|42"
+    ]
+  },
+  "blk-restart-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "a requested healthy block-driver restart is authorized",
+      "idle and in-flight filesystem requests reconcile",
+      "filesystem service remains usable"
+    ],
+    "required_markers": [
+      "PD_RESTART|request|class=blk",
+      "ROOT|debug-restart|child=2",
+      "driver restarted, reconciling",
+      "FS_AFTER_INFLIGHT|"
+    ]
+  },
+  "boot-smoke": {
+    "forbidden_markers": [
+      "unexpected PD fault",
+      "unexpected beam_server fault"
+    ],
+    "kind": "qemu",
+    "protects": [
+      "ERTS starts",
+      "FAT is detected",
+      "the sDDF monotonic clock works",
+      "the Erlang shell becomes ready"
+    ],
+    "required_markers": [
+      "beam_server up on the LionsOS reference stack.",
+      "monotonic clock via sDDF timer:",
+      "Handing off to ERTS core loop...",
+      "MBR partitioning detected",
+      "Eshell"
+    ]
+  },
+  "c23-diagnostic": {
+    "kind": "compile",
+    "protects": [
+      "first-party C compiles under the diagnostic warning policy",
+      "tcp.c retains its dedicated diagnostic object boundary"
+    ]
+  },
+  "cothread-smoke": {
+    "forbidden_markers": [
+      "COTHREAD_PROBE|FAIL"
+    ],
+    "kind": "qemu",
+    "protects": [
+      "pthread compatibility runs over libmicrokitco",
+      "cothread slots and synchronization primitives remain usable"
+    ],
+    "required_markers": [
+      "COTHREAD_PROBE|PASS"
+    ]
+  },
+  "lifecycle-config-failure-smoke": {
+    "forbidden_markers": [
+      "BEAM|boot|",
+      "Microkit event loop live",
+      "ROOT|fault|child=5"
+    ],
+    "kind": "qemu",
+    "protects": [
+      "malformed injected configuration fails before partial initialization",
+      "persistent configuration errors do not consume restart budget"
+    ],
+    "required_markers": [
+      "BEAM|lifecycle|FATAL|stage=config|status=config-serial|code=1"
+    ]
+  },
+  "net-fault-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "a genuine network-driver fault reaches Root",
+      "network queues are reclaimed",
+      "outbound TCP service recovers"
+    ],
+    "required_markers": [
+      "ROOT|fault|child=3",
+      "ROOT|restart|child=3|count=1",
+      "ETH|restart|reclaimed|",
+      "NET_OK|"
+    ]
+  },
+  "net-restart-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "a requested healthy network-driver restart is authorized",
+      "network queues are reclaimed",
+      "outbound TCP service recovers"
+    ],
+    "required_markers": [
+      "PD_RESTART|request|class=eth",
+      "ROOT|debug-restart|child=3",
+      "ETH|restart|reclaimed|",
+      "NET_OK|"
+    ]
+  },
+  "phase-zero-baseline": {
+    "kind": "artifact-comparison",
+    "protects": [
+      "phase-zero topology and runtime artifacts remain unchanged",
+      "every current flake check has a documented contract",
+      "baseline extraction is deterministic"
+    ]
+  },
+  "production-sdf-gate": {
+    "kind": "generated-artifact",
+    "protects": [
+      "restart debug channels do not enter production",
+      "the crasher PD does not enter production",
+      "beam_server remains a Root child",
+      "the Root to blk_virt give-up channel remains present"
+    ]
+  },
+  "restart-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "Root catches a deliberately faulting child",
+      "restart counts are monotonic",
+      "Root gives up after the configured budget"
+    ],
+    "required_markers": [
+      "CRASHER|init|n=",
+      "ROOT|restart|child=4|count=",
+      "ROOT|giveup|child=4|reason=budget-exhausted"
+    ]
+  },
+  "restart-topology": {
+    "kind": "generated-artifact",
+    "protects": [
+      "Root child TCB capabilities occupy the expected slots",
+      "fault endpoints, priorities, entries, badges, and notification caps match the SDF and ABI"
+    ]
+  },
+  "rng-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "RNG initialization succeeds",
+      "RNG fingerprints, rand bytes, references, and urandom bytes differ across boots"
+    ],
+    "required_markers": [
+      "RNG|source=",
+      "RNG_BYTES|",
+      "RNG_REF|",
+      "RNG_URANDOM|"
+    ]
+  },
+  "runtime-host-tests": {
+    "kind": "host-test",
+    "protects": [
+      "pure runtime policies pass in Debug with UBSan trap mode",
+      "pure runtime policies pass in ReleaseFast"
+    ]
+  },
+  "serial-fault-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "a genuine serial-driver fault reaches Root",
+      "serial transmit and receive recover"
+    ],
+    "required_markers": [
+      "ROOT|fault|child=0",
+      "ROOT|restart|child=0|count=1",
+      "SERIAL_AFTER|42",
+      "SERIAL_RX|3"
+    ]
+  },
+  "serial-restart-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "a requested healthy serial-driver restart is authorized",
+      "serial transmit and receive recover"
+    ],
+    "required_markers": [
+      "PD_RESTART|request|class=serial",
+      "ROOT|debug-restart|child=0",
+      "SERIAL_AFTER|42",
+      "SERIAL_RX|3"
+    ]
+  },
+  "shell-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "guest Erlang test modules load from FAT",
+      "interactive Eshell input and output work"
+    ],
+    "required_markers": [
+      "TEST_MODULES|",
+      "SHELL_EVAL|2"
+    ]
+  },
+  "socket-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "lwIP receives a DHCP lease",
+      "native socket bind, listen, connect, and transfer work before ERTS"
+    ],
+    "required_markers": [
+      "SOCKET_SMOKE|DHCP:",
+      "SOCKET_SMOKE|PASS"
+    ]
+  },
+  "tcp-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "guest gen_tcp accepts host connections",
+      "guest gen_tcp connects to a host listener",
+      "TCP payloads survive in both directions"
+    ],
+    "required_markers": [
+      "LISTENER_UP",
+      "ECHOED",
+      "NET_OK|CHRYSO_PING"
+    ]
+  },
+  "test-modules": {
+    "kind": "compile",
+    "protects": [
+      "guest Erlang probes compile with warnings as errors"
+    ]
+  },
+  "timer-fault-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "a genuine timer-driver fault reaches Root",
+      "monotonic time and delayed sends recover"
+    ],
+    "required_markers": [
+      "ROOT|fault|child=1",
+      "ROOT|restart|child=1|count=1",
+      "TIMER_AFTER|"
+    ]
+  },
+  "timer-restart-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "a requested healthy timer-driver restart is authorized",
+      "monotonic time and delayed sends recover"
+    ],
+    "required_markers": [
+      "PD_RESTART|request|class=timer",
+      "ROOT|debug-restart|child=1",
+      "TIMER_AFTER|"
+    ]
+  },
+  "treefmt": {
+    "kind": "formatting",
+    "protects": [
+      "Nix, Erlang, Gleam, C, and Zig formatting remains reproducible",
+      "vendored tcp.c remains outside automatic formatting"
+    ]
+  }
+}

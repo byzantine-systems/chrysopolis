@@ -1,0 +1,4400 @@
+{
+  "abi": {
+    "children": {
+      "beam": 5,
+      "crasher": 4
+    },
+    "config_sections": [
+      {
+        "blob": "serial_driver_device_resources.data",
+        "elf": "serial_driver.elf",
+        "section": ".device_resources"
+      },
+      {
+        "blob": "serial_driver_config.data",
+        "elf": "serial_driver.elf",
+        "section": ".serial_driver_config"
+      },
+      {
+        "blob": "serial_virt_tx.data",
+        "elf": "serial_virt_tx.elf",
+        "section": ".serial_virt_tx_config"
+      },
+      {
+        "blob": "serial_virt_rx.data",
+        "elf": "serial_virt_rx.elf",
+        "section": ".serial_virt_rx_config"
+      },
+      {
+        "blob": "timer_driver_device_resources.data",
+        "elf": "timer_driver.elf",
+        "section": ".device_resources"
+      },
+      {
+        "blob": "serial_client_beam_server.data",
+        "elf": "beam_server.elf",
+        "section": ".serial_client_config"
+      },
+      {
+        "blob": "timer_client_beam_server.data",
+        "elf": "beam_server.elf",
+        "section": ".timer_client_config"
+      },
+      {
+        "blob": "blk_driver_device_resources.data",
+        "elf": "blk_driver.elf",
+        "section": ".device_resources"
+      },
+      {
+        "blob": "blk_driver.data",
+        "elf": "blk_driver.elf",
+        "section": ".blk_driver_config"
+      },
+      {
+        "blob": "blk_virt.data",
+        "elf": "blk_virt.elf",
+        "section": ".blk_virt_config"
+      },
+      {
+        "blob": "blk_client_fatfs.data",
+        "elf": "fat.elf",
+        "section": ".blk_client_config"
+      },
+      {
+        "blob": "fs_server_fatfs.data",
+        "elf": "fat.elf",
+        "section": ".fs_server_config"
+      },
+      {
+        "blob": "fs_client_beam_server.data",
+        "elf": "beam_server.elf",
+        "section": ".fs_client_config"
+      },
+      {
+        "blob": "eth_driver_device_resources.data",
+        "elf": "eth_driver.elf",
+        "section": ".device_resources"
+      },
+      {
+        "blob": "net_driver.data",
+        "elf": "eth_driver.elf",
+        "section": ".net_driver_config"
+      },
+      {
+        "blob": "net_virt_rx.data",
+        "elf": "net_virt_rx.elf",
+        "section": ".net_virt_rx_config"
+      },
+      {
+        "blob": "net_virt_tx.data",
+        "elf": "net_virt_tx.elf",
+        "section": ".net_virt_tx_config"
+      },
+      {
+        "blob": "net_copy_net_copy.data",
+        "elf": "net_copy.elf",
+        "section": ".net_copy_config"
+      },
+      {
+        "blob": "net_client_beam_server.data",
+        "elf": "beam_server.elf",
+        "section": ".net_client_config"
+      },
+      {
+        "blob": "lib_sddf_lwip_config_beam_server.data",
+        "elf": "beam_server.elf",
+        "section": ".lib_sddf_lwip_config"
+      }
+    ],
+    "drivers": [
+      {
+        "beam_debug_channel": 58,
+        "beam_fault_channel": 54,
+        "child": 0,
+        "name": "serial",
+        "root_debug_channel": 0,
+        "root_fault_channel": 4
+      },
+      {
+        "beam_debug_channel": 59,
+        "beam_fault_channel": 55,
+        "child": 1,
+        "name": "timer",
+        "root_debug_channel": 1,
+        "root_fault_channel": 5
+      },
+      {
+        "beam_debug_channel": 60,
+        "beam_fault_channel": 56,
+        "child": 2,
+        "name": "blk",
+        "root_debug_channel": 2,
+        "root_fault_channel": 6
+      },
+      {
+        "beam_debug_channel": 61,
+        "beam_fault_channel": 57,
+        "child": 3,
+        "name": "eth",
+        "root_debug_channel": 3,
+        "root_fault_channel": 7
+      }
+    ],
+    "giveup": {
+      "blk_virt_channel": 61,
+      "root_blk_channel": 10
+    },
+    "memory": {
+      "heap": {
+        "setvar": "beam_heap_start",
+        "size": 536870912,
+        "vaddr": 1073741824
+      },
+      "snapshot": {
+        "data_offset": 24576,
+        "reset_stack_offset": 4096,
+        "reset_stack_size": 16384,
+        "setvar": "beam_snapshot_start",
+        "size": 524288,
+        "survivors_offset": 20480,
+        "survivors_size": 4096,
+        "vaddr": 805306368
+      }
+    },
+    "microkit": {
+      "absent_id": 255,
+      "id_count": 62
+    },
+    "restart": {
+      "beam_budget": 64,
+      "config_section": ".restart_config",
+      "config_words": 2,
+      "driver_budget": 8,
+      "entry_fallback": 2097152,
+      "exit_fault_base": 3198156800,
+      "exit_fault_size": 4096,
+      "pd_config_section": ".pd_restart_config",
+      "pd_modes": 2,
+      "word_bytes": 8
+    },
+    "sections": {
+      "fs_client": ".fs_client_config",
+      "lwip": ".lib_sddf_lwip_config",
+      "net_client": ".net_client_config",
+      "serial_client": ".serial_client_config",
+      "timer_client": ".timer_client_config"
+    },
+    "version": 1
+  },
+  "capacity": {
+    "production": {
+      "channels": 14,
+      "config_blob_bytes": 185406,
+      "declared_memory_bytes": 613740544,
+      "fixed_physical_memory_bytes": 6471680,
+      "id_count_per_pd": 62,
+      "id_usage": {
+        "beam_server": {
+          "free_count": 56,
+          "maximum_used": 5,
+          "used": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "used_count": 6
+        },
+        "blk_driver": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "blk_virt": {
+          "free_count": 59,
+          "maximum_used": 61,
+          "used": [
+            0,
+            1,
+            61
+          ],
+          "used_count": 3
+        },
+        "eth_driver": {
+          "free_count": 59,
+          "maximum_used": 2,
+          "used": [
+            0,
+            1,
+            2
+          ],
+          "used_count": 3
+        },
+        "fatfs": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "net_copy": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "net_virt_rx": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "net_virt_tx": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "root": {
+          "free_count": 61,
+          "maximum_used": 10,
+          "used": [
+            10
+          ],
+          "used_count": 1
+        },
+        "serial_driver": {
+          "free_count": 59,
+          "maximum_used": 2,
+          "used": [
+            0,
+            1,
+            2
+          ],
+          "used_count": 3
+        },
+        "serial_virt_rx": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "serial_virt_tx": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "timer_driver": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        }
+      },
+      "memory_regions": 45,
+      "protection_domains": 13,
+      "root_child_count": 5,
+      "root_child_ids": [
+        0,
+        1,
+        2,
+        3,
+        5
+      ]
+    },
+    "restart": {
+      "channels": 22,
+      "config_blob_bytes": 185406,
+      "declared_memory_bytes": 613740544,
+      "fixed_physical_memory_bytes": 6471680,
+      "id_count_per_pd": 62,
+      "id_usage": {
+        "beam_server": {
+          "free_count": 48,
+          "maximum_used": 61,
+          "used": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            54,
+            55,
+            56,
+            57,
+            58,
+            59,
+            60,
+            61
+          ],
+          "used_count": 14
+        },
+        "blk_driver": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "blk_virt": {
+          "free_count": 59,
+          "maximum_used": 61,
+          "used": [
+            0,
+            1,
+            61
+          ],
+          "used_count": 3
+        },
+        "crasher": {
+          "free_count": 62,
+          "maximum_used": null,
+          "used": [],
+          "used_count": 0
+        },
+        "eth_driver": {
+          "free_count": 59,
+          "maximum_used": 2,
+          "used": [
+            0,
+            1,
+            2
+          ],
+          "used_count": 3
+        },
+        "fatfs": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "net_copy": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "net_virt_rx": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "net_virt_tx": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "root": {
+          "free_count": 53,
+          "maximum_used": 10,
+          "used": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            10
+          ],
+          "used_count": 9
+        },
+        "serial_driver": {
+          "free_count": 59,
+          "maximum_used": 2,
+          "used": [
+            0,
+            1,
+            2
+          ],
+          "used_count": 3
+        },
+        "serial_virt_rx": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "serial_virt_tx": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        },
+        "timer_driver": {
+          "free_count": 60,
+          "maximum_used": 1,
+          "used": [
+            0,
+            1
+          ],
+          "used_count": 2
+        }
+      },
+      "memory_regions": 45,
+      "protection_domains": 14,
+      "root_child_count": 6,
+      "root_child_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    }
+  },
+  "checks": {
+    "contracts": {
+      "abi-contract": {
+        "kind": "generated-artifact",
+        "protects": [
+          "ABI values are represented in both SDF variants",
+          "every declared configuration blob is emitted"
+        ]
+      },
+      "beam-restart-smoke": {
+        "forbidden_markers": [
+          "BEAM_MARK_AFTER|present"
+        ],
+        "kind": "qemu",
+        "protects": [
+          "ERTS exits reach Root",
+          "beam_server restarts with fresh writable state",
+          "the Erlang shell becomes ready after each restart"
+        ],
+        "required_markers": [
+          "BEAM|exit|code=0|requesting-restart",
+          "ROOT|restart|child=5|count=1",
+          "BEAM|boot|generation=2|bss-counter=1",
+          "BEAM_MARK_AFTER|absent"
+        ]
+      },
+      "blk-fault-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "a genuine block-driver fault reaches Root",
+          "the virtualiser reconciles idle and in-flight requests",
+          "filesystem service recovers"
+        ],
+        "required_markers": [
+          "ROOT|fault|child=2",
+          "ROOT|restart|child=2|count=1",
+          "driver restarted, reconciling",
+          "FS_AFTER_INFLIGHT|"
+        ]
+      },
+      "blk-giveup-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "the block-driver lifetime budget is finite",
+          "Root stops a permanently failing child",
+          "blk_virt degrades without wedging",
+          "later requests for a gone child are ignored"
+        ],
+        "required_markers": [
+          "ROOT|giveup|child=2|reason=budget-exhausted",
+          "driver stopped, reconciling outstanding requests",
+          "ROOT|gone|child=2|ignored=fault-inject",
+          "ROOT|gone|child=2|ignored=debug-restart",
+          "BLKGONE_ALIVE|42"
+        ]
+      },
+      "blk-restart-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "a requested healthy block-driver restart is authorized",
+          "idle and in-flight filesystem requests reconcile",
+          "filesystem service remains usable"
+        ],
+        "required_markers": [
+          "PD_RESTART|request|class=blk",
+          "ROOT|debug-restart|child=2",
+          "driver restarted, reconciling",
+          "FS_AFTER_INFLIGHT|"
+        ]
+      },
+      "boot-smoke": {
+        "forbidden_markers": [
+          "unexpected PD fault",
+          "unexpected beam_server fault"
+        ],
+        "kind": "qemu",
+        "protects": [
+          "ERTS starts",
+          "FAT is detected",
+          "the sDDF monotonic clock works",
+          "the Erlang shell becomes ready"
+        ],
+        "required_markers": [
+          "beam_server up on the LionsOS reference stack.",
+          "monotonic clock via sDDF timer:",
+          "Handing off to ERTS core loop...",
+          "MBR partitioning detected",
+          "Eshell"
+        ]
+      },
+      "c23-diagnostic": {
+        "kind": "compile",
+        "protects": [
+          "first-party C compiles under the diagnostic warning policy",
+          "tcp.c retains its dedicated diagnostic object boundary"
+        ]
+      },
+      "cothread-smoke": {
+        "forbidden_markers": [
+          "COTHREAD_PROBE|FAIL"
+        ],
+        "kind": "qemu",
+        "protects": [
+          "pthread compatibility runs over libmicrokitco",
+          "cothread slots and synchronization primitives remain usable"
+        ],
+        "required_markers": [
+          "COTHREAD_PROBE|PASS"
+        ]
+      },
+      "lifecycle-config-failure-smoke": {
+        "forbidden_markers": [
+          "BEAM|boot|",
+          "Microkit event loop live",
+          "ROOT|fault|child=5"
+        ],
+        "kind": "qemu",
+        "protects": [
+          "malformed injected configuration fails before partial initialization",
+          "persistent configuration errors do not consume restart budget"
+        ],
+        "required_markers": [
+          "BEAM|lifecycle|FATAL|stage=config|status=config-serial|code=1"
+        ]
+      },
+      "net-fault-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "a genuine network-driver fault reaches Root",
+          "network queues are reclaimed",
+          "outbound TCP service recovers"
+        ],
+        "required_markers": [
+          "ROOT|fault|child=3",
+          "ROOT|restart|child=3|count=1",
+          "ETH|restart|reclaimed|",
+          "NET_OK|"
+        ]
+      },
+      "net-restart-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "a requested healthy network-driver restart is authorized",
+          "network queues are reclaimed",
+          "outbound TCP service recovers"
+        ],
+        "required_markers": [
+          "PD_RESTART|request|class=eth",
+          "ROOT|debug-restart|child=3",
+          "ETH|restart|reclaimed|",
+          "NET_OK|"
+        ]
+      },
+      "phase-zero-baseline": {
+        "kind": "artifact-comparison",
+        "protects": [
+          "phase-zero topology and runtime artifacts remain unchanged",
+          "every current flake check has a documented contract",
+          "baseline extraction is deterministic"
+        ]
+      },
+      "production-sdf-gate": {
+        "kind": "generated-artifact",
+        "protects": [
+          "restart debug channels do not enter production",
+          "the crasher PD does not enter production",
+          "beam_server remains a Root child",
+          "the Root to blk_virt give-up channel remains present"
+        ]
+      },
+      "restart-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "Root catches a deliberately faulting child",
+          "restart counts are monotonic",
+          "Root gives up after the configured budget"
+        ],
+        "required_markers": [
+          "CRASHER|init|n=",
+          "ROOT|restart|child=4|count=",
+          "ROOT|giveup|child=4|reason=budget-exhausted"
+        ]
+      },
+      "restart-topology": {
+        "kind": "generated-artifact",
+        "protects": [
+          "Root child TCB capabilities occupy the expected slots",
+          "fault endpoints, priorities, entries, badges, and notification caps match the SDF and ABI"
+        ]
+      },
+      "rng-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "RNG initialization succeeds",
+          "RNG fingerprints, rand bytes, references, and urandom bytes differ across boots"
+        ],
+        "required_markers": [
+          "RNG|source=",
+          "RNG_BYTES|",
+          "RNG_REF|",
+          "RNG_URANDOM|"
+        ]
+      },
+      "runtime-host-tests": {
+        "kind": "host-test",
+        "protects": [
+          "pure runtime policies pass in Debug with UBSan trap mode",
+          "pure runtime policies pass in ReleaseFast"
+        ]
+      },
+      "serial-fault-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "a genuine serial-driver fault reaches Root",
+          "serial transmit and receive recover"
+        ],
+        "required_markers": [
+          "ROOT|fault|child=0",
+          "ROOT|restart|child=0|count=1",
+          "SERIAL_AFTER|42",
+          "SERIAL_RX|3"
+        ]
+      },
+      "serial-restart-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "a requested healthy serial-driver restart is authorized",
+          "serial transmit and receive recover"
+        ],
+        "required_markers": [
+          "PD_RESTART|request|class=serial",
+          "ROOT|debug-restart|child=0",
+          "SERIAL_AFTER|42",
+          "SERIAL_RX|3"
+        ]
+      },
+      "shell-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "guest Erlang test modules load from FAT",
+          "interactive Eshell input and output work"
+        ],
+        "required_markers": [
+          "TEST_MODULES|",
+          "SHELL_EVAL|2"
+        ]
+      },
+      "socket-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "lwIP receives a DHCP lease",
+          "native socket bind, listen, connect, and transfer work before ERTS"
+        ],
+        "required_markers": [
+          "SOCKET_SMOKE|DHCP:",
+          "SOCKET_SMOKE|PASS"
+        ]
+      },
+      "tcp-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "guest gen_tcp accepts host connections",
+          "guest gen_tcp connects to a host listener",
+          "TCP payloads survive in both directions"
+        ],
+        "required_markers": [
+          "LISTENER_UP",
+          "ECHOED",
+          "NET_OK|CHRYSO_PING"
+        ]
+      },
+      "test-modules": {
+        "kind": "compile",
+        "protects": [
+          "guest Erlang probes compile with warnings as errors"
+        ]
+      },
+      "timer-fault-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "a genuine timer-driver fault reaches Root",
+          "monotonic time and delayed sends recover"
+        ],
+        "required_markers": [
+          "ROOT|fault|child=1",
+          "ROOT|restart|child=1|count=1",
+          "TIMER_AFTER|"
+        ]
+      },
+      "timer-restart-smoke": {
+        "kind": "qemu",
+        "protects": [
+          "a requested healthy timer-driver restart is authorized",
+          "monotonic time and delayed sends recover"
+        ],
+        "required_markers": [
+          "PD_RESTART|request|class=timer",
+          "ROOT|debug-restart|child=1",
+          "TIMER_AFTER|"
+        ]
+      },
+      "treefmt": {
+        "kind": "formatting",
+        "protects": [
+          "Nix, Erlang, Gleam, C, and Zig formatting remains reproducible",
+          "vendored tcp.c remains outside automatic formatting"
+        ]
+      }
+    },
+    "count": 26
+  },
+  "elf": {
+    "beam_server.elf": {
+      "allocated_sections": [
+        {
+          "address": "0x200000",
+          "alignment": 16,
+          "flags": "AX",
+          "name": ".text",
+          "size": 228792,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x242000",
+          "alignment": 1,
+          "flags": "A",
+          "name": ".init_array",
+          "size": 0,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x242000",
+          "alignment": 1,
+          "flags": "WA",
+          "name": ".data.rel.ro",
+          "size": 0,
+          "type": "NOBITS"
+        },
+        {
+          "address": "0x242000",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".got",
+          "size": 56,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x242038",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".data",
+          "size": 58648,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x250550",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".serial_client_config",
+          "size": 88,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x2505a8",
+          "alignment": 1,
+          "flags": "WA",
+          "name": ".timer_client_config",
+          "size": 6,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x2505b0",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".fs_client_config",
+          "size": 64,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x2505f0",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".net_client_config",
+          "size": 128,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x250670",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".lib_sddf_lwip_config",
+          "size": 32,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x250690",
+          "alignment": 1,
+          "flags": "WA",
+          "name": ".pd_restart_config",
+          "size": 8,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x250880",
+          "alignment": 16,
+          "flags": "WA",
+          "name": ".bss",
+          "size": 29270480,
+          "type": "NOBITS"
+        }
+      ],
+      "header": {
+        "class": "ELF64",
+        "data": "2's complement, little endian",
+        "entry": "0x200000",
+        "machine": "AArch64",
+        "type": "EXEC (Executable file)"
+      },
+      "load_segments": [
+        {
+          "alignment": "0x10000",
+          "file_size": 268976,
+          "flags": "RE",
+          "memory_size": 268976,
+          "offset": "0x10000",
+          "physical_address": "0x200000",
+          "virtual_address": "0x200000"
+        },
+        {
+          "alignment": "0x10000",
+          "file_size": 59520,
+          "flags": "RW",
+          "memory_size": 29330000,
+          "offset": "0x52000",
+          "physical_address": "0x242000",
+          "virtual_address": "0x242000"
+        }
+      ],
+      "symbols": {
+        "__init_array_start": "0x242000",
+        "_bss": "0x250880",
+        "_bss_end": "0x1e3aa50",
+        "_reset": "0x207174",
+        "_start": "0x200000"
+      }
+    },
+    "beam_test.elf": {
+      "allocated_sections": [
+        {
+          "address": "0x200000",
+          "alignment": 32,
+          "flags": "AX",
+          "name": ".text",
+          "size": 4310536,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6ba000",
+          "alignment": 1,
+          "flags": "A",
+          "name": ".init_array",
+          "size": 0,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6ba000",
+          "alignment": 16,
+          "flags": "WA",
+          "name": ".data.rel.ro",
+          "size": 107648,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6d4480",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".got",
+          "size": 3704,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6d5300",
+          "alignment": 16,
+          "flags": "WA",
+          "name": ".data",
+          "size": 78856,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6e8708",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".serial_client_config",
+          "size": 88,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6e8760",
+          "alignment": 1,
+          "flags": "WA",
+          "name": ".timer_client_config",
+          "size": 6,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6e8768",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".fs_client_config",
+          "size": 64,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6e87a8",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".net_client_config",
+          "size": 128,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6e8828",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".lib_sddf_lwip_config",
+          "size": 32,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6e8848",
+          "alignment": 1,
+          "flags": "WA",
+          "name": ".pd_restart_config",
+          "size": 8,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6e8850",
+          "alignment": 8,
+          "flags": "WA",
+          "name": "ERTS_LOW_WRITE",
+          "size": 1320,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x6e9080",
+          "alignment": 64,
+          "flags": "WA",
+          "name": ".bss",
+          "size": 29524032,
+          "type": "NOBITS"
+        }
+      ],
+      "header": {
+        "class": "ELF64",
+        "data": "2's complement, little endian",
+        "entry": "0x200000",
+        "machine": "AArch64",
+        "type": "EXEC (Executable file)"
+      },
+      "load_segments": [
+        {
+          "alignment": "0x10000",
+          "file_size": 4952640,
+          "flags": "RE",
+          "memory_size": 4952640,
+          "offset": "0x10000",
+          "physical_address": "0x200000",
+          "virtual_address": "0x200000"
+        },
+        {
+          "alignment": "0x10000",
+          "file_size": 192608,
+          "flags": "RW",
+          "memory_size": 29716672,
+          "offset": "0x4ca000",
+          "physical_address": "0x6ba000",
+          "virtual_address": "0x6ba000"
+        }
+      ],
+      "symbols": {
+        "__init_array_start": "0x6ba000",
+        "_bss": "0x6e9080",
+        "_bss_end": "0x23110c0",
+        "_reset": "0x207174",
+        "_start": "0x200000"
+      }
+    },
+    "root.elf": {
+      "allocated_sections": [
+        {
+          "address": "0x200000",
+          "alignment": 16,
+          "flags": "AX",
+          "name": ".text",
+          "size": 4748,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x202000",
+          "alignment": 1,
+          "flags": "A",
+          "name": ".init_array",
+          "size": 0,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x202000",
+          "alignment": 1,
+          "flags": "WA",
+          "name": ".data.rel.ro",
+          "size": 0,
+          "type": "NOBITS"
+        },
+        {
+          "address": "0x202000",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".data",
+          "size": 8,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x202008",
+          "alignment": 8,
+          "flags": "WA",
+          "name": ".restart_config",
+          "size": 16,
+          "type": "PROGBITS"
+        },
+        {
+          "address": "0x202020",
+          "alignment": 16,
+          "flags": "WA",
+          "name": ".bss",
+          "size": 616,
+          "type": "NOBITS"
+        }
+      ],
+      "header": {
+        "class": "ELF64",
+        "data": "2's complement, little endian",
+        "entry": "0x200000",
+        "machine": "AArch64",
+        "type": "EXEC (Executable file)"
+      },
+      "load_segments": [
+        {
+          "alignment": "0x10000",
+          "file_size": 5748,
+          "flags": "RE",
+          "memory_size": 5748,
+          "offset": "0x10000",
+          "physical_address": "0x200000",
+          "virtual_address": "0x200000"
+        },
+        {
+          "alignment": "0x10000",
+          "file_size": 24,
+          "flags": "RW",
+          "memory_size": 648,
+          "offset": "0x12000",
+          "physical_address": "0x202000",
+          "virtual_address": "0x202000"
+        }
+      ],
+      "symbols": {
+        "_start": "0x200000"
+      }
+    }
+  },
+  "generated": {
+    "production": {
+      "config_blobs": [
+        {
+          "bytes": 80,
+          "json_sha256": "8e58fdbdfa63765760695acc598c40dc9aa0983e46a418fa5b1663fcf2e1d893",
+          "json_shape": {
+            "keys": [
+              "data",
+              "magic",
+              "virt"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0002"
+            }
+          },
+          "name": "blk_client_fatfs.data",
+          "sha256": "aeec0d107afe20f561905b673cdc1eb971612a8aaa31e111341a8134876830bb"
+        },
+        {
+          "bytes": 64,
+          "json_sha256": "a7ccc06ccbea181d0a58efb4738e5f91d9197215b84d12f8a0ac48a94a0084d8",
+          "json_shape": {
+            "keys": [
+              "magic",
+              "virt"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0002"
+            }
+          },
+          "name": "blk_driver.data",
+          "sha256": "07f347fa5eafaaac1cde6623e6868324986d094659788c8d8e5f2b46f0282dea"
+        },
+        {
+          "bytes": 1608,
+          "json_sha256": "92d87cafee6ed8ecc325b100469c2e5733d19a56d2984fab83f8911bc9a0b0f9",
+          "json_shape": {
+            "keys": [
+              "irqs",
+              "magic",
+              "num_irqs",
+              "num_regions",
+              "regions"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0001",
+              "num_irqs": 1,
+              "num_regions": 3
+            }
+          },
+          "name": "blk_driver_device_resources.data",
+          "sha256": "72675a02e04f81cb940082f7de49bb571b1431720aa674c4cfc2e666296719f9"
+        },
+        {
+          "bytes": 5728,
+          "json_sha256": "8c2a6cc44ce76e9d9c73f4239a1107b9a8d35669b411a2241a5d76c6a80fd13d",
+          "json_shape": {
+            "keys": [
+              "clients",
+              "driver",
+              "magic",
+              "num_clients"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0002",
+              "num_clients": 1
+            }
+          },
+          "name": "blk_virt.data",
+          "sha256": "155bdf09e349fcf1c13eaa4b108747c11487e324399b5fba66d0192348a598ff"
+        },
+        {
+          "bytes": 1608,
+          "json_sha256": "3889280167717fb1746ffa969f721a85375501a1dcadee09518c2e7be94fbf0b",
+          "json_shape": {
+            "keys": [
+              "irqs",
+              "magic",
+              "num_irqs",
+              "num_regions",
+              "regions"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0001",
+              "num_irqs": 1,
+              "num_regions": 2
+            }
+          },
+          "name": "eth_driver_device_resources.data",
+          "sha256": "5dec5d66562586f82a6b1913867e441799db641dabeb08986109cca451e29791"
+        },
+        {
+          "bytes": 0,
+          "json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "json_shape": {
+            "keys": [],
+            "scalar_fields": {}
+          },
+          "name": "fat_config.data",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 64,
+          "json_sha256": "fe84a016d3fad9258f99fb3d84a7cb86fa03d6b1bddeab6cc94bead5114946b8",
+          "json_shape": {
+            "keys": [
+              "magic",
+              "server"
+            ],
+            "scalar_fields": {
+              "magic": "LionsOS\u0001"
+            }
+          },
+          "name": "fs_client_beam_server.data",
+          "sha256": "075bcf602ca62ce6248d36071dbc5fc7189594aaf7b1a1fad5cbe176183a9145"
+        },
+        {
+          "bytes": 64,
+          "json_sha256": "ba33c9472c4509e1760107f30cc96befc6c8aa85559a69543c1a96a506b5bb9d",
+          "json_shape": {
+            "keys": [
+              "client",
+              "magic"
+            ],
+            "scalar_fields": {
+              "magic": "LionsOS\u0001"
+            }
+          },
+          "name": "fs_server_fatfs.data",
+          "sha256": "ff291aa7650f5580940e7a160db4792ad9e55e54976209c631082b9aee936cda"
+        },
+        {
+          "bytes": 32,
+          "json_sha256": "c0a6e5de15c85522e2ffa5840176f7f85f0104973aa62f67c2ea3590b287e214",
+          "json_shape": {
+            "keys": [
+              "magic",
+              "num_pbufs",
+              "pbuf_pool"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\b",
+              "num_pbufs": 1024
+            }
+          },
+          "name": "lib_sddf_lwip_config_beam_server.data",
+          "sha256": "d595f51e75c455474b83c0d5a9c7b235a3840a1f9c87e065ae4a26843cc17eaa"
+        },
+        {
+          "bytes": 128,
+          "json_sha256": "cd090f9755e7563fa835f944ad82b5f94a969c1f0b1a5d536affcfe6d697aeb6",
+          "json_shape": {
+            "keys": [
+              "mac_addr",
+              "magic",
+              "rx",
+              "rx_data",
+              "tx",
+              "tx_data"
+            ],
+            "scalar_fields": {
+              "mac_addr": "RT\u0001\u0000\u0000\u0007",
+              "magic": "sDDF\u0005"
+            }
+          },
+          "name": "net_client_beam_server.data",
+          "sha256": "3d7c5a01e07ea95e15d5c9f967307e0b0491be39367d5a10ca4140b5a15721cd"
+        },
+        {
+          "bytes": 1128,
+          "json_sha256": "7912dad82c63af138a4f3fe2216d2dbf659ce123db558fdc69292b61d3999b16",
+          "json_shape": {
+            "keys": [
+              "client",
+              "client_data",
+              "magic",
+              "rx",
+              "rx_data"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0005"
+            }
+          },
+          "name": "net_copy_net_copy.data",
+          "sha256": "1c7d989b2d61cd25a4c8d6de8507022c0df4887bb3988c7cfef55d0bd714f1f8"
+        },
+        {
+          "bytes": 88,
+          "json_sha256": "076cda3a071009f7fb958d532d937419f3635edc9230b7394629fa9b64ce708b",
+          "json_shape": {
+            "keys": [
+              "magic",
+              "virt_rx",
+              "virt_tx"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0005"
+            }
+          },
+          "name": "net_driver.data",
+          "sha256": "4b6371a262ae5f9768d4a5621235c3db6cd77533368fc7a0bfbcdfda73d94b7e"
+        },
+        {
+          "bytes": 27744,
+          "json_sha256": "5f77d1071abee99e72a7549838300dacde11304c57b01c40669e2db1961ef108",
+          "json_shape": {
+            "keys": [
+              "buffer_metadata",
+              "clients",
+              "data_region",
+              "driver",
+              "magic",
+              "num_clients"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0005",
+              "num_clients": 1
+            }
+          },
+          "name": "net_virt_rx.data",
+          "sha256": "b3b37593c44fbaa16c9efc721dcf2886bb095ffdb5a286181e6bb00e4bb26596"
+        },
+        {
+          "bytes": 134200,
+          "json_sha256": "3787f4508936bd037f205019a1cedbd844d55d40133f0c65833305393b458ab9",
+          "json_shape": {
+            "keys": [
+              "clients",
+              "driver",
+              "magic",
+              "num_clients"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0005",
+              "num_clients": 1
+            }
+          },
+          "name": "net_virt_tx.data",
+          "sha256": "92ff770a7cdfcd15d43ab87ec0fe7049ef2290e5c18dc292d5d116de6726e832"
+        },
+        {
+          "bytes": 88,
+          "json_sha256": "682f1f75ff8452e48709bd5c357f3ae6ac8c822fb8dc985145da773ecd148064",
+          "json_shape": {
+            "keys": [
+              "magic",
+              "rx",
+              "tx"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0003"
+            }
+          },
+          "name": "serial_client_beam_server.data",
+          "sha256": "0929ccc9a083596d0d588533387cbaf3c36c1cffdb5c4ba02f81d4cfc75ab4a5"
+        },
+        {
+          "bytes": 104,
+          "json_sha256": "530c2261bc7e26881d4ba826a1b18071c1700a06c04c3c659f3324c66063aefa",
+          "json_shape": {
+            "keys": [
+              "default_baud",
+              "magic",
+              "rx",
+              "rx_enabled",
+              "tx"
+            ],
+            "scalar_fields": {
+              "default_baud": 115200,
+              "magic": "sDDF\u0003",
+              "rx_enabled": 1
+            }
+          },
+          "name": "serial_driver_config.data",
+          "sha256": "4920f9535162029384ed6fc8ce598a46294bda3d4179b07c5f39a20792ead0c2"
+        },
+        {
+          "bytes": 1608,
+          "json_sha256": "7acd284c7c0564e41cd7121dbdf1703b7474e5f7617887febd8e67c4e0b9daee",
+          "json_shape": {
+            "keys": [
+              "irqs",
+              "magic",
+              "num_irqs",
+              "num_regions",
+              "regions"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0001",
+              "num_irqs": 1,
+              "num_regions": 1
+            }
+          },
+          "name": "serial_driver_device_resources.data",
+          "sha256": "6f077204d762f9c5543006b676d584fa3f93918e2594a1ce4105ee3ddb8b0c40"
+        },
+        {
+          "bytes": 2616,
+          "json_sha256": "1cca278b72d230ab20d45661703167f3a9c646d5d90d16ad13e2a50a2f615b19",
+          "json_shape": {
+            "keys": [
+              "clients",
+              "driver",
+              "magic",
+              "num_clients",
+              "switch_char",
+              "terminate_num_char"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0003",
+              "num_clients": 1,
+              "switch_char": 28,
+              "terminate_num_char": 13
+            }
+          },
+          "name": "serial_virt_rx.data",
+          "sha256": "bf1d968d14a7b814b9f1a5fc67596b353a2f36f0168e3ddb07894276846d4d27"
+        },
+        {
+          "bytes": 6840,
+          "json_sha256": "5f64b0389bd03f2326a12de30b402d39f2b660dcd5108a95439655a735959b78",
+          "json_shape": {
+            "keys": [
+              "begin_str",
+              "clients",
+              "driver",
+              "enable_colour",
+              "enable_rx",
+              "magic",
+              "num_clients"
+            ],
+            "scalar_fields": {
+              "begin_str": "Begin input\r\n\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+              "enable_colour": 1,
+              "enable_rx": 1,
+              "magic": "sDDF\u0003",
+              "num_clients": 1
+            }
+          },
+          "name": "serial_virt_tx.data",
+          "sha256": "62e63a31113b23ff903efadfb809ab374573cb917d0c13a69b417ae46a02f720"
+        },
+        {
+          "bytes": 6,
+          "json_sha256": "512e1ba30c37675364a1d5e13fe0aac62933918429f57f773eec8db9bb37a268",
+          "json_shape": {
+            "keys": [
+              "driver_id",
+              "magic"
+            ],
+            "scalar_fields": {
+              "driver_id": 2,
+              "magic": "sDDF\u0006"
+            }
+          },
+          "name": "timer_client_beam_server.data",
+          "sha256": "6524481d3b16b9c8b80538b03d327a293e84f0234f0d6c36374ec24066c25a08"
+        },
+        {
+          "bytes": 1608,
+          "json_sha256": "bed48c67493d28ce69b8ef1a47e5cf006d7b1a42764ea9004189de6520b58baf",
+          "json_shape": {
+            "keys": [
+              "irqs",
+              "magic",
+              "num_irqs",
+              "num_regions",
+              "regions"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0001",
+              "num_irqs": 1,
+              "num_regions": 0
+            }
+          },
+          "name": "timer_driver_device_resources.data",
+          "sha256": "d13364f4a87e2d3ab4e3b67fa7a3f242464df45708b19cd5f6dc32742bf0dd6f"
+        }
+      ],
+      "system": {
+        "attributes": {},
+        "canonical_sha256": "6c673daaad31fd8aa791042242166ae245611b0fd4b32d55704f7a6e58a91252",
+        "channels": [
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "serial_driver"
+              },
+              {
+                "id": 0,
+                "pd": "serial_virt_rx"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "serial_virt_rx"
+              },
+              {
+                "id": 0,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 2,
+                "pd": "serial_driver"
+              },
+              {
+                "id": 0,
+                "pd": "serial_virt_tx"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "serial_virt_tx"
+              },
+              {
+                "id": 1,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "timer_driver"
+              },
+              {
+                "id": 2,
+                "notify": "false",
+                "pd": "beam_server",
+                "pp": "true"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 0,
+                "pd": "fatfs"
+              },
+              {
+                "id": 3,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 0,
+                "pd": "blk_virt"
+              },
+              {
+                "id": 1,
+                "pd": "blk_driver"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "blk_virt"
+              },
+              {
+                "id": 1,
+                "pd": "fatfs"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "eth_driver"
+              },
+              {
+                "id": 0,
+                "pd": "net_virt_rx"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 2,
+                "pd": "eth_driver"
+              },
+              {
+                "id": 0,
+                "pd": "net_virt_tx"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "net_virt_rx"
+              },
+              {
+                "id": 0,
+                "pd": "net_copy"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "net_copy"
+              },
+              {
+                "id": 4,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "net_virt_tx"
+              },
+              {
+                "id": 5,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 10,
+                "pd": "root"
+              },
+              {
+                "id": 61,
+                "notify": "false",
+                "pd": "blk_virt"
+              }
+            ]
+          }
+        ],
+        "memory_regions": [
+          {
+            "name": "beam_heap",
+            "page_size": "0x200000",
+            "size": "0x20000000"
+          },
+          {
+            "name": "beam_snapshot",
+            "size": "0x80000"
+          },
+          {
+            "name": "pl011@9000000/drivers/serial/arm/regs",
+            "phys_addr": "0x9000000",
+            "size": "0x1000"
+          },
+          {
+            "name": "pl011@9000000/serial/queue/serial_driver/serial_virt_rx",
+            "size": "0x1000"
+          },
+          {
+            "name": "pl011@9000000/serial/data/serial_driver/serial_virt_rx",
+            "size": "0x10000"
+          },
+          {
+            "name": "pl011@9000000/serial/queue/serial_virt_rx/beam_server",
+            "size": "0x1000"
+          },
+          {
+            "name": "pl011@9000000/serial/data/serial_virt_rx/beam_server",
+            "size": "0x10000"
+          },
+          {
+            "name": "pl011@9000000/serial/queue/serial_driver/serial_virt_tx",
+            "size": "0x1000"
+          },
+          {
+            "name": "pl011@9000000/serial/data/serial_driver/serial_virt_tx",
+            "size": "0x20000"
+          },
+          {
+            "name": "pl011@9000000/serial/queue/serial_virt_tx/beam_server",
+            "size": "0x1000"
+          },
+          {
+            "name": "pl011@9000000/serial/data/serial_virt_tx/beam_server",
+            "size": "0x10000"
+          },
+          {
+            "name": "fs_fatfs_command_queue",
+            "size": "0x8000"
+          },
+          {
+            "name": "fs_fatfs_completion_queue",
+            "size": "0x8000"
+          },
+          {
+            "name": "fs_fatfs_share",
+            "size": "0x4000000"
+          },
+          {
+            "name": "fatfs_stack1",
+            "size": "0x40000"
+          },
+          {
+            "name": "fatfs_stack2",
+            "size": "0x40000"
+          },
+          {
+            "name": "fatfs_stack3",
+            "size": "0x40000"
+          },
+          {
+            "name": "fatfs_stack4",
+            "size": "0x40000"
+          },
+          {
+            "name": "virtio_mmio@a000200/drivers/blk/virtio/regs",
+            "phys_addr": "0xa000000",
+            "size": "0x1000"
+          },
+          {
+            "name": "virtio_mmio@a000200/drivers/blk/virtio/virtio_headers",
+            "phys_addr": "0x9fff0000",
+            "size": "0x10000"
+          },
+          {
+            "name": "virtio_mmio@a000200/drivers/blk/virtio/virtio_metadata",
+            "phys_addr": "0x9fdf0000",
+            "size": "0x200000"
+          },
+          {
+            "name": "blk_driver_storage_info",
+            "size": "0x1000"
+          },
+          {
+            "name": "blk_driver_request",
+            "size": "0x4000"
+          },
+          {
+            "name": "blk_driver_response",
+            "size": "0x4000"
+          },
+          {
+            "name": "blk_driver_data",
+            "phys_addr": "0x9fde6000",
+            "size": "0xa000"
+          },
+          {
+            "name": "blk_client_fatfs_storage_info",
+            "size": "0x1000"
+          },
+          {
+            "name": "blk_client_fatfs_request",
+            "size": "0x4000"
+          },
+          {
+            "name": "blk_client_fatfs_response",
+            "size": "0x4000"
+          },
+          {
+            "name": "blk_client_fatfs_data",
+            "phys_addr": "0x9fbe6000",
+            "size": "0x200000"
+          },
+          {
+            "name": "virtio_mmio@a000000/drivers/network/virtio/mmio/hw_ring_buffer",
+            "phys_addr": "0x9fbd6000",
+            "size": "0x10000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/eth_driver/net_virt_rx/free",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/eth_driver/net_virt_rx/active",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/rx/data/device",
+            "phys_addr": "0x9fad6000",
+            "size": "0x100000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/rx/virt_metadata",
+            "size": "0x1000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/eth_driver/net_virt_tx/free",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/eth_driver/net_virt_tx/active",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_virt_rx/net_copy/free",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_virt_rx/net_copy/active",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_copy/beam_server/free",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_copy/beam_server/active",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/rx/data/client/beam_server",
+            "size": "0x100000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_virt_tx/beam_server/free",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_virt_tx/beam_server/active",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/tx/data/client/beam_server",
+            "phys_addr": "0x9f9d6000",
+            "size": "0x100000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/lib_sddf_lwip/beam_server",
+            "size": "0xe000"
+          }
+        ],
+        "protection_domains": [
+          {
+            "attributes": {
+              "name": "root",
+              "priority": 254
+            },
+            "irqs": [],
+            "map_count": 0,
+            "maps_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "name": "root",
+            "parent": null,
+            "program_image": {
+              "path": "root.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "id": 5,
+              "name": "beam_server",
+              "priority": 1,
+              "stack_size": "0x200000"
+            },
+            "irqs": [],
+            "map_count": 16,
+            "maps_sha256": "a5a658844cd824ac8eb35a2d7363897c4503ebd1387d77e9b31aa2704e9dd1db",
+            "name": "beam_server",
+            "parent": "root",
+            "program_image": {
+              "path": "beam_server.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "id": 0,
+              "name": "serial_driver",
+              "priority": 100
+            },
+            "irqs": [
+              {
+                "id": 0,
+                "irq": 33,
+                "trigger": "level"
+              }
+            ],
+            "map_count": 5,
+            "maps_sha256": "829c36bf38a2cc0400c53f4bcd54abf9a9fb11f111fda28a0b61da05650ee7b4",
+            "name": "serial_driver",
+            "parent": "root",
+            "program_image": {
+              "path": "serial_driver.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "id": 1,
+              "name": "timer_driver",
+              "passive": "false",
+              "priority": 101
+            },
+            "irqs": [
+              {
+                "id": 0,
+                "irq": 30,
+                "trigger": "level"
+              }
+            ],
+            "map_count": 0,
+            "maps_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "name": "timer_driver",
+            "parent": "root",
+            "program_image": {
+              "path": "timer_driver.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "id": 2,
+              "name": "blk_driver",
+              "priority": 200
+            },
+            "irqs": [
+              {
+                "id": 0,
+                "irq": 49,
+                "trigger": "edge"
+              }
+            ],
+            "map_count": 6,
+            "maps_sha256": "6cb3b65dad4c3673a5cf66f1e1b061e9b3912b548183c900f048648916534068",
+            "name": "blk_driver",
+            "parent": "root",
+            "program_image": {
+              "path": "blk_driver.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "budget": 100,
+              "id": 3,
+              "name": "eth_driver",
+              "period": 400,
+              "priority": 110
+            },
+            "irqs": [
+              {
+                "id": 0,
+                "irq": 48,
+                "trigger": "edge"
+              }
+            ],
+            "map_count": 6,
+            "maps_sha256": "c7763d23f7257f4cfb2ba19321385e74e8772e52b913712fbb6cea9e0bf9b19f",
+            "name": "eth_driver",
+            "parent": "root",
+            "program_image": {
+              "path": "eth_driver.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "name": "serial_virt_tx",
+              "priority": 99
+            },
+            "irqs": [],
+            "map_count": 4,
+            "maps_sha256": "f7eff6ef557f036bc4e803a1b849700fe2324a0fdfcc18b5918480c450e99109",
+            "name": "serial_virt_tx",
+            "parent": null,
+            "program_image": {
+              "path": "serial_virt_tx.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "name": "serial_virt_rx",
+              "priority": 98
+            },
+            "irqs": [],
+            "map_count": 4,
+            "maps_sha256": "a603dde79e82125fcb79066f7bee968336dc20b451aaa33c66b50692dd00356e",
+            "name": "serial_virt_rx",
+            "parent": null,
+            "program_image": {
+              "path": "serial_virt_rx.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "name": "blk_virt",
+              "priority": 199
+            },
+            "irqs": [],
+            "map_count": 8,
+            "maps_sha256": "d1cb41c5cfe5b76901ba163ea83e0dacd867aa15bba8c344d3794b2050892bb8",
+            "name": "blk_virt",
+            "parent": null,
+            "program_image": {
+              "path": "blk_virt.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "name": "fatfs",
+              "priority": 96
+            },
+            "irqs": [],
+            "map_count": 11,
+            "maps_sha256": "cefdef9bcbe5e6525c5a84aed6c95417a68075557f7d96954735deccb0898f91",
+            "name": "fatfs",
+            "parent": null,
+            "program_image": {
+              "path": "fat.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "budget": 100,
+              "name": "net_virt_tx",
+              "period": 500,
+              "priority": 109
+            },
+            "irqs": [],
+            "map_count": 5,
+            "maps_sha256": "c6019750bdef65e47d0fa33f12f41b06b04e2d539310424ca409ba3e410c3e90",
+            "name": "net_virt_tx",
+            "parent": null,
+            "program_image": {
+              "path": "net_virt_tx.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "budget": 100,
+              "name": "net_virt_rx",
+              "period": 500,
+              "priority": 108
+            },
+            "irqs": [],
+            "map_count": 6,
+            "maps_sha256": "a5e234fd910d3c863f474520b25bfab5b5f3d0e611baf5f961e0fd75d62c12ac",
+            "name": "net_virt_rx",
+            "parent": null,
+            "program_image": {
+              "path": "net_virt_rx.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "budget": 20000,
+              "name": "net_copy",
+              "priority": 97
+            },
+            "irqs": [],
+            "map_count": 6,
+            "maps_sha256": "551200e05064ef14d7dc91a69f6ea720208ddfc9f2f88a9f4130a8a4ce4a70cf",
+            "name": "net_copy",
+            "parent": null,
+            "program_image": {
+              "path": "net_copy.elf"
+            },
+            "setvars": []
+          }
+        ]
+      }
+    },
+    "restart": {
+      "config_blobs": [
+        {
+          "bytes": 80,
+          "json_sha256": "8e58fdbdfa63765760695acc598c40dc9aa0983e46a418fa5b1663fcf2e1d893",
+          "json_shape": {
+            "keys": [
+              "data",
+              "magic",
+              "virt"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0002"
+            }
+          },
+          "name": "blk_client_fatfs.data",
+          "sha256": "aeec0d107afe20f561905b673cdc1eb971612a8aaa31e111341a8134876830bb"
+        },
+        {
+          "bytes": 64,
+          "json_sha256": "a7ccc06ccbea181d0a58efb4738e5f91d9197215b84d12f8a0ac48a94a0084d8",
+          "json_shape": {
+            "keys": [
+              "magic",
+              "virt"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0002"
+            }
+          },
+          "name": "blk_driver.data",
+          "sha256": "07f347fa5eafaaac1cde6623e6868324986d094659788c8d8e5f2b46f0282dea"
+        },
+        {
+          "bytes": 1608,
+          "json_sha256": "92d87cafee6ed8ecc325b100469c2e5733d19a56d2984fab83f8911bc9a0b0f9",
+          "json_shape": {
+            "keys": [
+              "irqs",
+              "magic",
+              "num_irqs",
+              "num_regions",
+              "regions"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0001",
+              "num_irqs": 1,
+              "num_regions": 3
+            }
+          },
+          "name": "blk_driver_device_resources.data",
+          "sha256": "72675a02e04f81cb940082f7de49bb571b1431720aa674c4cfc2e666296719f9"
+        },
+        {
+          "bytes": 5728,
+          "json_sha256": "8c2a6cc44ce76e9d9c73f4239a1107b9a8d35669b411a2241a5d76c6a80fd13d",
+          "json_shape": {
+            "keys": [
+              "clients",
+              "driver",
+              "magic",
+              "num_clients"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0002",
+              "num_clients": 1
+            }
+          },
+          "name": "blk_virt.data",
+          "sha256": "155bdf09e349fcf1c13eaa4b108747c11487e324399b5fba66d0192348a598ff"
+        },
+        {
+          "bytes": 1608,
+          "json_sha256": "3889280167717fb1746ffa969f721a85375501a1dcadee09518c2e7be94fbf0b",
+          "json_shape": {
+            "keys": [
+              "irqs",
+              "magic",
+              "num_irqs",
+              "num_regions",
+              "regions"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0001",
+              "num_irqs": 1,
+              "num_regions": 2
+            }
+          },
+          "name": "eth_driver_device_resources.data",
+          "sha256": "5dec5d66562586f82a6b1913867e441799db641dabeb08986109cca451e29791"
+        },
+        {
+          "bytes": 0,
+          "json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "json_shape": {
+            "keys": [],
+            "scalar_fields": {}
+          },
+          "name": "fat_config.data",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 64,
+          "json_sha256": "fe84a016d3fad9258f99fb3d84a7cb86fa03d6b1bddeab6cc94bead5114946b8",
+          "json_shape": {
+            "keys": [
+              "magic",
+              "server"
+            ],
+            "scalar_fields": {
+              "magic": "LionsOS\u0001"
+            }
+          },
+          "name": "fs_client_beam_server.data",
+          "sha256": "075bcf602ca62ce6248d36071dbc5fc7189594aaf7b1a1fad5cbe176183a9145"
+        },
+        {
+          "bytes": 64,
+          "json_sha256": "ba33c9472c4509e1760107f30cc96befc6c8aa85559a69543c1a96a506b5bb9d",
+          "json_shape": {
+            "keys": [
+              "client",
+              "magic"
+            ],
+            "scalar_fields": {
+              "magic": "LionsOS\u0001"
+            }
+          },
+          "name": "fs_server_fatfs.data",
+          "sha256": "ff291aa7650f5580940e7a160db4792ad9e55e54976209c631082b9aee936cda"
+        },
+        {
+          "bytes": 32,
+          "json_sha256": "c0a6e5de15c85522e2ffa5840176f7f85f0104973aa62f67c2ea3590b287e214",
+          "json_shape": {
+            "keys": [
+              "magic",
+              "num_pbufs",
+              "pbuf_pool"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\b",
+              "num_pbufs": 1024
+            }
+          },
+          "name": "lib_sddf_lwip_config_beam_server.data",
+          "sha256": "d595f51e75c455474b83c0d5a9c7b235a3840a1f9c87e065ae4a26843cc17eaa"
+        },
+        {
+          "bytes": 128,
+          "json_sha256": "cd090f9755e7563fa835f944ad82b5f94a969c1f0b1a5d536affcfe6d697aeb6",
+          "json_shape": {
+            "keys": [
+              "mac_addr",
+              "magic",
+              "rx",
+              "rx_data",
+              "tx",
+              "tx_data"
+            ],
+            "scalar_fields": {
+              "mac_addr": "RT\u0001\u0000\u0000\u0007",
+              "magic": "sDDF\u0005"
+            }
+          },
+          "name": "net_client_beam_server.data",
+          "sha256": "3d7c5a01e07ea95e15d5c9f967307e0b0491be39367d5a10ca4140b5a15721cd"
+        },
+        {
+          "bytes": 1128,
+          "json_sha256": "7912dad82c63af138a4f3fe2216d2dbf659ce123db558fdc69292b61d3999b16",
+          "json_shape": {
+            "keys": [
+              "client",
+              "client_data",
+              "magic",
+              "rx",
+              "rx_data"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0005"
+            }
+          },
+          "name": "net_copy_net_copy.data",
+          "sha256": "1c7d989b2d61cd25a4c8d6de8507022c0df4887bb3988c7cfef55d0bd714f1f8"
+        },
+        {
+          "bytes": 88,
+          "json_sha256": "076cda3a071009f7fb958d532d937419f3635edc9230b7394629fa9b64ce708b",
+          "json_shape": {
+            "keys": [
+              "magic",
+              "virt_rx",
+              "virt_tx"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0005"
+            }
+          },
+          "name": "net_driver.data",
+          "sha256": "4b6371a262ae5f9768d4a5621235c3db6cd77533368fc7a0bfbcdfda73d94b7e"
+        },
+        {
+          "bytes": 27744,
+          "json_sha256": "5f77d1071abee99e72a7549838300dacde11304c57b01c40669e2db1961ef108",
+          "json_shape": {
+            "keys": [
+              "buffer_metadata",
+              "clients",
+              "data_region",
+              "driver",
+              "magic",
+              "num_clients"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0005",
+              "num_clients": 1
+            }
+          },
+          "name": "net_virt_rx.data",
+          "sha256": "b3b37593c44fbaa16c9efc721dcf2886bb095ffdb5a286181e6bb00e4bb26596"
+        },
+        {
+          "bytes": 134200,
+          "json_sha256": "3787f4508936bd037f205019a1cedbd844d55d40133f0c65833305393b458ab9",
+          "json_shape": {
+            "keys": [
+              "clients",
+              "driver",
+              "magic",
+              "num_clients"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0005",
+              "num_clients": 1
+            }
+          },
+          "name": "net_virt_tx.data",
+          "sha256": "92ff770a7cdfcd15d43ab87ec0fe7049ef2290e5c18dc292d5d116de6726e832"
+        },
+        {
+          "bytes": 88,
+          "json_sha256": "682f1f75ff8452e48709bd5c357f3ae6ac8c822fb8dc985145da773ecd148064",
+          "json_shape": {
+            "keys": [
+              "magic",
+              "rx",
+              "tx"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0003"
+            }
+          },
+          "name": "serial_client_beam_server.data",
+          "sha256": "0929ccc9a083596d0d588533387cbaf3c36c1cffdb5c4ba02f81d4cfc75ab4a5"
+        },
+        {
+          "bytes": 104,
+          "json_sha256": "530c2261bc7e26881d4ba826a1b18071c1700a06c04c3c659f3324c66063aefa",
+          "json_shape": {
+            "keys": [
+              "default_baud",
+              "magic",
+              "rx",
+              "rx_enabled",
+              "tx"
+            ],
+            "scalar_fields": {
+              "default_baud": 115200,
+              "magic": "sDDF\u0003",
+              "rx_enabled": 1
+            }
+          },
+          "name": "serial_driver_config.data",
+          "sha256": "4920f9535162029384ed6fc8ce598a46294bda3d4179b07c5f39a20792ead0c2"
+        },
+        {
+          "bytes": 1608,
+          "json_sha256": "7acd284c7c0564e41cd7121dbdf1703b7474e5f7617887febd8e67c4e0b9daee",
+          "json_shape": {
+            "keys": [
+              "irqs",
+              "magic",
+              "num_irqs",
+              "num_regions",
+              "regions"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0001",
+              "num_irqs": 1,
+              "num_regions": 1
+            }
+          },
+          "name": "serial_driver_device_resources.data",
+          "sha256": "6f077204d762f9c5543006b676d584fa3f93918e2594a1ce4105ee3ddb8b0c40"
+        },
+        {
+          "bytes": 2616,
+          "json_sha256": "1cca278b72d230ab20d45661703167f3a9c646d5d90d16ad13e2a50a2f615b19",
+          "json_shape": {
+            "keys": [
+              "clients",
+              "driver",
+              "magic",
+              "num_clients",
+              "switch_char",
+              "terminate_num_char"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0003",
+              "num_clients": 1,
+              "switch_char": 28,
+              "terminate_num_char": 13
+            }
+          },
+          "name": "serial_virt_rx.data",
+          "sha256": "bf1d968d14a7b814b9f1a5fc67596b353a2f36f0168e3ddb07894276846d4d27"
+        },
+        {
+          "bytes": 6840,
+          "json_sha256": "5f64b0389bd03f2326a12de30b402d39f2b660dcd5108a95439655a735959b78",
+          "json_shape": {
+            "keys": [
+              "begin_str",
+              "clients",
+              "driver",
+              "enable_colour",
+              "enable_rx",
+              "magic",
+              "num_clients"
+            ],
+            "scalar_fields": {
+              "begin_str": "Begin input\r\n\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+              "enable_colour": 1,
+              "enable_rx": 1,
+              "magic": "sDDF\u0003",
+              "num_clients": 1
+            }
+          },
+          "name": "serial_virt_tx.data",
+          "sha256": "62e63a31113b23ff903efadfb809ab374573cb917d0c13a69b417ae46a02f720"
+        },
+        {
+          "bytes": 6,
+          "json_sha256": "512e1ba30c37675364a1d5e13fe0aac62933918429f57f773eec8db9bb37a268",
+          "json_shape": {
+            "keys": [
+              "driver_id",
+              "magic"
+            ],
+            "scalar_fields": {
+              "driver_id": 2,
+              "magic": "sDDF\u0006"
+            }
+          },
+          "name": "timer_client_beam_server.data",
+          "sha256": "6524481d3b16b9c8b80538b03d327a293e84f0234f0d6c36374ec24066c25a08"
+        },
+        {
+          "bytes": 1608,
+          "json_sha256": "bed48c67493d28ce69b8ef1a47e5cf006d7b1a42764ea9004189de6520b58baf",
+          "json_shape": {
+            "keys": [
+              "irqs",
+              "magic",
+              "num_irqs",
+              "num_regions",
+              "regions"
+            ],
+            "scalar_fields": {
+              "magic": "sDDF\u0001",
+              "num_irqs": 1,
+              "num_regions": 0
+            }
+          },
+          "name": "timer_driver_device_resources.data",
+          "sha256": "d13364f4a87e2d3ab4e3b67fa7a3f242464df45708b19cd5f6dc32742bf0dd6f"
+        }
+      ],
+      "system": {
+        "attributes": {},
+        "canonical_sha256": "0f71fe9de5f0db15c8add4917dbbffd04a0f5aae7769a924d938f9f38fbc69f3",
+        "channels": [
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "serial_driver"
+              },
+              {
+                "id": 0,
+                "pd": "serial_virt_rx"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "serial_virt_rx"
+              },
+              {
+                "id": 0,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 2,
+                "pd": "serial_driver"
+              },
+              {
+                "id": 0,
+                "pd": "serial_virt_tx"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "serial_virt_tx"
+              },
+              {
+                "id": 1,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "timer_driver"
+              },
+              {
+                "id": 2,
+                "notify": "false",
+                "pd": "beam_server",
+                "pp": "true"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 0,
+                "pd": "fatfs"
+              },
+              {
+                "id": 3,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 0,
+                "pd": "blk_virt"
+              },
+              {
+                "id": 1,
+                "pd": "blk_driver"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "blk_virt"
+              },
+              {
+                "id": 1,
+                "pd": "fatfs"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "eth_driver"
+              },
+              {
+                "id": 0,
+                "pd": "net_virt_rx"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 2,
+                "pd": "eth_driver"
+              },
+              {
+                "id": 0,
+                "pd": "net_virt_tx"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "net_virt_rx"
+              },
+              {
+                "id": 0,
+                "pd": "net_copy"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "net_copy"
+              },
+              {
+                "id": 4,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "pd": "net_virt_tx"
+              },
+              {
+                "id": 5,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 10,
+                "pd": "root"
+              },
+              {
+                "id": 61,
+                "notify": "false",
+                "pd": "blk_virt"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 0,
+                "notify": "false",
+                "pd": "root"
+              },
+              {
+                "id": 58,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 1,
+                "notify": "false",
+                "pd": "root"
+              },
+              {
+                "id": 59,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 2,
+                "notify": "false",
+                "pd": "root"
+              },
+              {
+                "id": 60,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 3,
+                "notify": "false",
+                "pd": "root"
+              },
+              {
+                "id": 61,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 4,
+                "notify": "false",
+                "pd": "root"
+              },
+              {
+                "id": 54,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 5,
+                "notify": "false",
+                "pd": "root"
+              },
+              {
+                "id": 55,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 6,
+                "notify": "false",
+                "pd": "root"
+              },
+              {
+                "id": 56,
+                "pd": "beam_server"
+              }
+            ]
+          },
+          {
+            "attributes": {},
+            "ends": [
+              {
+                "id": 7,
+                "notify": "false",
+                "pd": "root"
+              },
+              {
+                "id": 57,
+                "pd": "beam_server"
+              }
+            ]
+          }
+        ],
+        "memory_regions": [
+          {
+            "name": "beam_heap",
+            "page_size": "0x200000",
+            "size": "0x20000000"
+          },
+          {
+            "name": "beam_snapshot",
+            "size": "0x80000"
+          },
+          {
+            "name": "pl011@9000000/drivers/serial/arm/regs",
+            "phys_addr": "0x9000000",
+            "size": "0x1000"
+          },
+          {
+            "name": "pl011@9000000/serial/queue/serial_driver/serial_virt_rx",
+            "size": "0x1000"
+          },
+          {
+            "name": "pl011@9000000/serial/data/serial_driver/serial_virt_rx",
+            "size": "0x10000"
+          },
+          {
+            "name": "pl011@9000000/serial/queue/serial_virt_rx/beam_server",
+            "size": "0x1000"
+          },
+          {
+            "name": "pl011@9000000/serial/data/serial_virt_rx/beam_server",
+            "size": "0x10000"
+          },
+          {
+            "name": "pl011@9000000/serial/queue/serial_driver/serial_virt_tx",
+            "size": "0x1000"
+          },
+          {
+            "name": "pl011@9000000/serial/data/serial_driver/serial_virt_tx",
+            "size": "0x20000"
+          },
+          {
+            "name": "pl011@9000000/serial/queue/serial_virt_tx/beam_server",
+            "size": "0x1000"
+          },
+          {
+            "name": "pl011@9000000/serial/data/serial_virt_tx/beam_server",
+            "size": "0x10000"
+          },
+          {
+            "name": "fs_fatfs_command_queue",
+            "size": "0x8000"
+          },
+          {
+            "name": "fs_fatfs_completion_queue",
+            "size": "0x8000"
+          },
+          {
+            "name": "fs_fatfs_share",
+            "size": "0x4000000"
+          },
+          {
+            "name": "fatfs_stack1",
+            "size": "0x40000"
+          },
+          {
+            "name": "fatfs_stack2",
+            "size": "0x40000"
+          },
+          {
+            "name": "fatfs_stack3",
+            "size": "0x40000"
+          },
+          {
+            "name": "fatfs_stack4",
+            "size": "0x40000"
+          },
+          {
+            "name": "virtio_mmio@a000200/drivers/blk/virtio/regs",
+            "phys_addr": "0xa000000",
+            "size": "0x1000"
+          },
+          {
+            "name": "virtio_mmio@a000200/drivers/blk/virtio/virtio_headers",
+            "phys_addr": "0x9fff0000",
+            "size": "0x10000"
+          },
+          {
+            "name": "virtio_mmio@a000200/drivers/blk/virtio/virtio_metadata",
+            "phys_addr": "0x9fdf0000",
+            "size": "0x200000"
+          },
+          {
+            "name": "blk_driver_storage_info",
+            "size": "0x1000"
+          },
+          {
+            "name": "blk_driver_request",
+            "size": "0x4000"
+          },
+          {
+            "name": "blk_driver_response",
+            "size": "0x4000"
+          },
+          {
+            "name": "blk_driver_data",
+            "phys_addr": "0x9fde6000",
+            "size": "0xa000"
+          },
+          {
+            "name": "blk_client_fatfs_storage_info",
+            "size": "0x1000"
+          },
+          {
+            "name": "blk_client_fatfs_request",
+            "size": "0x4000"
+          },
+          {
+            "name": "blk_client_fatfs_response",
+            "size": "0x4000"
+          },
+          {
+            "name": "blk_client_fatfs_data",
+            "phys_addr": "0x9fbe6000",
+            "size": "0x200000"
+          },
+          {
+            "name": "virtio_mmio@a000000/drivers/network/virtio/mmio/hw_ring_buffer",
+            "phys_addr": "0x9fbd6000",
+            "size": "0x10000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/eth_driver/net_virt_rx/free",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/eth_driver/net_virt_rx/active",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/rx/data/device",
+            "phys_addr": "0x9fad6000",
+            "size": "0x100000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/rx/virt_metadata",
+            "size": "0x1000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/eth_driver/net_virt_tx/free",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/eth_driver/net_virt_tx/active",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_virt_rx/net_copy/free",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_virt_rx/net_copy/active",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_copy/beam_server/free",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_copy/beam_server/active",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/rx/data/client/beam_server",
+            "size": "0x100000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_virt_tx/beam_server/free",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/queue/net_virt_tx/beam_server/active",
+            "size": "0x3000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/tx/data/client/beam_server",
+            "phys_addr": "0x9f9d6000",
+            "size": "0x100000"
+          },
+          {
+            "name": "virtio_mmio@a000000/net/lib_sddf_lwip/beam_server",
+            "size": "0xe000"
+          }
+        ],
+        "protection_domains": [
+          {
+            "attributes": {
+              "name": "root",
+              "priority": 254
+            },
+            "irqs": [],
+            "map_count": 0,
+            "maps_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "name": "root",
+            "parent": null,
+            "program_image": {
+              "path": "root.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "id": 5,
+              "name": "beam_server",
+              "priority": 1,
+              "stack_size": "0x200000"
+            },
+            "irqs": [],
+            "map_count": 16,
+            "maps_sha256": "a5a658844cd824ac8eb35a2d7363897c4503ebd1387d77e9b31aa2704e9dd1db",
+            "name": "beam_server",
+            "parent": "root",
+            "program_image": {
+              "path": "beam_server.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "id": 0,
+              "name": "serial_driver",
+              "priority": 100
+            },
+            "irqs": [
+              {
+                "id": 0,
+                "irq": 33,
+                "trigger": "level"
+              }
+            ],
+            "map_count": 5,
+            "maps_sha256": "829c36bf38a2cc0400c53f4bcd54abf9a9fb11f111fda28a0b61da05650ee7b4",
+            "name": "serial_driver",
+            "parent": "root",
+            "program_image": {
+              "path": "serial_driver.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "id": 1,
+              "name": "timer_driver",
+              "passive": "false",
+              "priority": 101
+            },
+            "irqs": [
+              {
+                "id": 0,
+                "irq": 30,
+                "trigger": "level"
+              }
+            ],
+            "map_count": 0,
+            "maps_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "name": "timer_driver",
+            "parent": "root",
+            "program_image": {
+              "path": "timer_driver.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "id": 4,
+              "name": "crasher",
+              "priority": 50
+            },
+            "irqs": [],
+            "map_count": 0,
+            "maps_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "name": "crasher",
+            "parent": "root",
+            "program_image": {
+              "path": "crasher.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "id": 2,
+              "name": "blk_driver",
+              "priority": 200
+            },
+            "irqs": [
+              {
+                "id": 0,
+                "irq": 49,
+                "trigger": "edge"
+              }
+            ],
+            "map_count": 6,
+            "maps_sha256": "6cb3b65dad4c3673a5cf66f1e1b061e9b3912b548183c900f048648916534068",
+            "name": "blk_driver",
+            "parent": "root",
+            "program_image": {
+              "path": "blk_driver.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "budget": 100,
+              "id": 3,
+              "name": "eth_driver",
+              "period": 400,
+              "priority": 110
+            },
+            "irqs": [
+              {
+                "id": 0,
+                "irq": 48,
+                "trigger": "edge"
+              }
+            ],
+            "map_count": 6,
+            "maps_sha256": "c7763d23f7257f4cfb2ba19321385e74e8772e52b913712fbb6cea9e0bf9b19f",
+            "name": "eth_driver",
+            "parent": "root",
+            "program_image": {
+              "path": "eth_driver.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "name": "serial_virt_tx",
+              "priority": 99
+            },
+            "irqs": [],
+            "map_count": 4,
+            "maps_sha256": "f7eff6ef557f036bc4e803a1b849700fe2324a0fdfcc18b5918480c450e99109",
+            "name": "serial_virt_tx",
+            "parent": null,
+            "program_image": {
+              "path": "serial_virt_tx.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "name": "serial_virt_rx",
+              "priority": 98
+            },
+            "irqs": [],
+            "map_count": 4,
+            "maps_sha256": "a603dde79e82125fcb79066f7bee968336dc20b451aaa33c66b50692dd00356e",
+            "name": "serial_virt_rx",
+            "parent": null,
+            "program_image": {
+              "path": "serial_virt_rx.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "name": "blk_virt",
+              "priority": 199
+            },
+            "irqs": [],
+            "map_count": 8,
+            "maps_sha256": "d1cb41c5cfe5b76901ba163ea83e0dacd867aa15bba8c344d3794b2050892bb8",
+            "name": "blk_virt",
+            "parent": null,
+            "program_image": {
+              "path": "blk_virt.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "name": "fatfs",
+              "priority": 96
+            },
+            "irqs": [],
+            "map_count": 11,
+            "maps_sha256": "cefdef9bcbe5e6525c5a84aed6c95417a68075557f7d96954735deccb0898f91",
+            "name": "fatfs",
+            "parent": null,
+            "program_image": {
+              "path": "fat.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "budget": 100,
+              "name": "net_virt_tx",
+              "period": 500,
+              "priority": 109
+            },
+            "irqs": [],
+            "map_count": 5,
+            "maps_sha256": "c6019750bdef65e47d0fa33f12f41b06b04e2d539310424ca409ba3e410c3e90",
+            "name": "net_virt_tx",
+            "parent": null,
+            "program_image": {
+              "path": "net_virt_tx.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "budget": 100,
+              "name": "net_virt_rx",
+              "period": 500,
+              "priority": 108
+            },
+            "irqs": [],
+            "map_count": 6,
+            "maps_sha256": "a5e234fd910d3c863f474520b25bfab5b5f3d0e611baf5f961e0fd75d62c12ac",
+            "name": "net_virt_rx",
+            "parent": null,
+            "program_image": {
+              "path": "net_virt_rx.elf"
+            },
+            "setvars": []
+          },
+          {
+            "attributes": {
+              "budget": 20000,
+              "name": "net_copy",
+              "priority": 97
+            },
+            "irqs": [],
+            "map_count": 6,
+            "maps_sha256": "551200e05064ef14d7dc91a69f6ea720208ddfc9f2f88a9f4130a8a4ce4a70cf",
+            "name": "net_copy",
+            "parent": null,
+            "program_image": {
+              "path": "net_copy.elf"
+            },
+            "setvars": []
+          }
+        ]
+      }
+    }
+  },
+  "host_tests": {
+    "executions": 28,
+    "suites": [
+      "deadline",
+      "stack",
+      "timer_slot",
+      "fd_pair",
+      "epoll",
+      "status",
+      "pd_restart",
+      "pthread",
+      "root_policy",
+      "snapshot",
+      "restart_layout",
+      "rng_select",
+      "tcp_logic",
+      "tcp_state"
+    ],
+    "variants": [
+      {
+        "name": "debug",
+        "optimize": "Debug",
+        "sanitize_c": "trap"
+      },
+      {
+        "name": "release",
+        "optimize": "ReleaseFast",
+        "sanitize_c": "off"
+      }
+    ]
+  },
+  "images": {
+    "disk": {
+      "bytes": 104857600,
+      "sha256": "8a43548e8ac06502a945fb45dca14db58c87a9ea0dbd4ca454e19fe3f9892389"
+    },
+    "production": {
+      "bytes": 35961348
+    },
+    "restart": {
+      "bytes": 41224748
+    },
+    "test": {
+      "bytes": 41213764
+    }
+  },
+  "normalization": {
+    "excluded": [
+      "Nix store prefixes",
+      "timestamps",
+      "ELF non-allocated sections including DWARF",
+      "ELF segment and whole-image hashes that encode source paths",
+      "raw QEMU serial logs",
+      "report kernel-object physical addresses"
+    ],
+    "serial_evidence": "required and forbidden marker contracts plus QEMU checks"
+  },
+  "reports": {
+    "production": {
+      "canonical_sha256": "9e611bd8bcb8b302e646ad11f43a972ba6a8805bfa5c78fa6c764755aae0e579",
+      "cnodes": [
+        {
+          "name": "cnode_beam_server",
+          "slot_count": 10,
+          "slots_sha256": "568740e236d6216a69152fa2885d8d4f53b8d9193225e023e76a8af8c8426d42"
+        },
+        {
+          "name": "cnode_beam_server_root",
+          "slot_count": 1,
+          "slots_sha256": "ee616f24bb5f9e399684eb0328fcfd03b0338bcdf5b76d85b5f2d7f7f246533d"
+        },
+        {
+          "name": "cnode_blk_driver",
+          "slot_count": 6,
+          "slots_sha256": "7fb05a5f0b09396c2128d1ce9ab435aa956be08533e09b81e225f281b11c6059"
+        },
+        {
+          "name": "cnode_blk_driver_root",
+          "slot_count": 1,
+          "slots_sha256": "51201c744d6f298b24567ebc4efa9c4779436c5cac6e050e46170860461f50d2"
+        },
+        {
+          "name": "cnode_blk_virt",
+          "slot_count": 6,
+          "slots_sha256": "0184c4a2566ac03792ece795a18f8b941bd6b19f7e703d0fc7279869f9661874"
+        },
+        {
+          "name": "cnode_blk_virt_root",
+          "slot_count": 1,
+          "slots_sha256": "33036a1c34923aa6eafc8effe1c7a47689a8e90c55f04bcdc32f5fbd3af8d937"
+        },
+        {
+          "name": "cnode_eth_driver",
+          "slot_count": 7,
+          "slots_sha256": "09effcf8eb6acea7afb0b18176e0ae96041751360ce6aef63825d977f6bd52b4"
+        },
+        {
+          "name": "cnode_eth_driver_root",
+          "slot_count": 1,
+          "slots_sha256": "553efdf18e5609c1ad6ef41d68e8bb27f4767b7def4e781b4b7feedd4ec8a261"
+        },
+        {
+          "name": "cnode_fatfs",
+          "slot_count": 6,
+          "slots_sha256": "bdc9b11bc77ad46c52d0548d274aa6a7cbd009ee4109be57652610fa7e42c3bb"
+        },
+        {
+          "name": "cnode_fatfs_root",
+          "slot_count": 1,
+          "slots_sha256": "b3afde64b844d0a9e0558d047acc7b4dc3ac27193f4fec36e69ec2ede523c845"
+        },
+        {
+          "name": "cnode_monitor",
+          "slot_count": 15,
+          "slots_sha256": "1e26146a45e2fc5b887f9b02378ea860e64e7bffe2f79b34c4ea4630e22dcc7e"
+        },
+        {
+          "name": "cnode_net_copy",
+          "slot_count": 6,
+          "slots_sha256": "d325030c22572ed71a0968f88d5372cd44b6305ce94c6d9a1ba96e0648930380"
+        },
+        {
+          "name": "cnode_net_copy_root",
+          "slot_count": 1,
+          "slots_sha256": "3cd7d30dd5fd41a90f013c05090be2ea6d0f36afbb344dc0f26204d384907494"
+        },
+        {
+          "name": "cnode_net_virt_rx",
+          "slot_count": 6,
+          "slots_sha256": "a0fe997168e7d47712c155fd8cf250a00e32c42e635aa47eeea710f0f31580e3"
+        },
+        {
+          "name": "cnode_net_virt_rx_root",
+          "slot_count": 1,
+          "slots_sha256": "b42ef3b6459a48f150bc5a2b66378e646e41182c434205ea3bc98241240e6e36"
+        },
+        {
+          "name": "cnode_net_virt_tx",
+          "slot_count": 6,
+          "slots_sha256": "f4711a07e8657af9a7cd8b2b985e34aa50cb4a99d0ba4945bfebf9d1fcf2a7fa"
+        },
+        {
+          "name": "cnode_net_virt_tx_root",
+          "slot_count": 1,
+          "slots_sha256": "d19a2d9ba0c130c15f4efce32016578ec0a50b76831d68d9a56993d4240392aa"
+        },
+        {
+          "name": "cnode_root",
+          "slot_count": 10,
+          "slots_sha256": "d708b1570eaf25707b76d0f1e086c64ac8023b4026252222fa3bba5fdbba0575"
+        },
+        {
+          "name": "cnode_root_root",
+          "slot_count": 1,
+          "slots_sha256": "e2297bdacc4da41517ae7f9bd90f6dd68e7a01be2e85d4ebadd4f856b1014da5"
+        },
+        {
+          "name": "cnode_serial_driver",
+          "slot_count": 7,
+          "slots_sha256": "2f37620b2e204f2edbf641260efc2db1c8bc6abb5c52e8b9f82f56e50e35f80d"
+        },
+        {
+          "name": "cnode_serial_driver_root",
+          "slot_count": 1,
+          "slots_sha256": "88b126d04b691f0b446dd39f98c1d445b0ba108254bc66ea3fbb90b8757471cc"
+        },
+        {
+          "name": "cnode_serial_virt_rx",
+          "slot_count": 6,
+          "slots_sha256": "08aec2087eab8fbc22bde33bbbd1d6791cf0b70d5ca1837d9bdc18321bb8f3a4"
+        },
+        {
+          "name": "cnode_serial_virt_rx_root",
+          "slot_count": 1,
+          "slots_sha256": "580146ba63bc18b8ece1f86787c36d9bb321f603f88846b9845373eb2f874bca"
+        },
+        {
+          "name": "cnode_serial_virt_tx",
+          "slot_count": 6,
+          "slots_sha256": "01a333741f8715083648df50c19c5a4f457acb148597f5202b8941b906bafe8f"
+        },
+        {
+          "name": "cnode_serial_virt_tx_root",
+          "slot_count": 1,
+          "slots_sha256": "eeecdea2c2371fd619edc2d6d705d6122f579f0c69197d0ee317fdb58251d04c"
+        },
+        {
+          "name": "cnode_timer_driver",
+          "slot_count": 6,
+          "slots_sha256": "8cbdd7c69af7cb1bff60b50d5cedca2079c7f5b90916192b8b13a065c2b36d70"
+        },
+        {
+          "name": "cnode_timer_driver_root",
+          "slot_count": 1,
+          "slots_sha256": "5750d4a27757af6e002affee14e18bdf5a3cfd09405d64559b54c2823afe1c6d"
+        }
+      ],
+      "critical_cnodes": {
+        "cnode_beam_server": [
+          {
+            "badge": "0x0",
+            "object": "ntfn_beam_server",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 1
+          },
+          {
+            "badge": "0x4000000000000005",
+            "object": "ep_root",
+            "rights": [
+              "Grant",
+              "Read",
+              "Write"
+            ],
+            "slot": 2
+          },
+          {
+            "object": "pud_beam_server",
+            "slot": 3
+          },
+          {
+            "object": "reply_beam_server",
+            "slot": 4
+          },
+          {
+            "badge": "0x2",
+            "object": "ntfn_serial_virt_rx",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 10
+          },
+          {
+            "badge": "0x2",
+            "object": "ntfn_serial_virt_tx",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 11
+          },
+          {
+            "badge": "0x1",
+            "object": "ntfn_fatfs",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 13
+          },
+          {
+            "badge": "0x2",
+            "object": "ntfn_net_copy",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 14
+          },
+          {
+            "badge": "0x2",
+            "object": "ntfn_net_virt_tx",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 15
+          },
+          {
+            "badge": "0x8000000000000001",
+            "object": "ep_timer_driver",
+            "rights": [
+              "Grant",
+              "Read",
+              "Write"
+            ],
+            "slot": 76
+          }
+        ],
+        "cnode_root": [
+          {
+            "badge": "0x0",
+            "object": "ep_root",
+            "rights": [
+              "Grant",
+              "Read",
+              "Write"
+            ],
+            "slot": 1
+          },
+          {
+            "badge": "0x1",
+            "object": "ep_fault_monitor",
+            "rights": [
+              "Grant",
+              "Read",
+              "Write"
+            ],
+            "slot": 2
+          },
+          {
+            "object": "pud_root",
+            "slot": 3
+          },
+          {
+            "object": "reply_root",
+            "slot": 4
+          },
+          {
+            "badge": "0x2000000000000000",
+            "object": "ntfn_blk_virt",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 20
+          },
+          {
+            "object": "tcb_serial_driver",
+            "slot": 202
+          },
+          {
+            "object": "tcb_timer_driver",
+            "slot": 203
+          },
+          {
+            "object": "tcb_blk_driver",
+            "slot": 204
+          },
+          {
+            "object": "tcb_eth_driver",
+            "slot": 205
+          },
+          {
+            "object": "tcb_beam_server",
+            "slot": 207
+          }
+        ]
+      },
+      "irqs": [
+        {
+          "CPU": 0,
+          "Number": 30,
+          "Trigger": "level",
+          "name": "irq_30_timer_driver"
+        },
+        {
+          "CPU": 0,
+          "Number": 33,
+          "Trigger": "level",
+          "name": "irq_33_serial_driver"
+        },
+        {
+          "CPU": 0,
+          "Number": 48,
+          "Trigger": "edge",
+          "name": "irq_48_eth_driver"
+        },
+        {
+          "CPU": 0,
+          "Number": 49,
+          "Trigger": "edge",
+          "name": "irq_49_blk_driver"
+        }
+      ],
+      "tcbs": [
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_beam_server",
+          "priority": 1,
+          "scheduling_context": "sched_context_beam_server"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_blk_driver",
+          "priority": 200,
+          "scheduling_context": "sched_context_blk_driver"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_blk_virt",
+          "priority": 199,
+          "scheduling_context": "sched_context_blk_virt"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_eth_driver",
+          "priority": 110,
+          "scheduling_context": "sched_context_eth_driver"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_fatfs",
+          "priority": 96,
+          "scheduling_context": "sched_context_fatfs"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": null,
+          "ip": "0x200000",
+          "name": "tcb_monitor",
+          "priority": 255,
+          "scheduling_context": "sched_context_monitor"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_net_copy",
+          "priority": 97,
+          "scheduling_context": "sched_context_net_copy"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_net_virt_rx",
+          "priority": 108,
+          "scheduling_context": "sched_context_net_virt_rx"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_net_virt_tx",
+          "priority": 109,
+          "scheduling_context": "sched_context_net_virt_tx"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_root",
+          "priority": 254,
+          "scheduling_context": "sched_context_root"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_serial_driver",
+          "priority": 100,
+          "scheduling_context": "sched_context_serial_driver"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_serial_virt_rx",
+          "priority": 98,
+          "scheduling_context": "sched_context_serial_virt_rx"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_serial_virt_tx",
+          "priority": 99,
+          "scheduling_context": "sched_context_serial_virt_tx"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_timer_driver",
+          "priority": 101,
+          "scheduling_context": "sched_context_timer_driver"
+        }
+      ]
+    },
+    "restart": {
+      "canonical_sha256": "36ee3c86fc2ec35c4d05e50fb9b306ae336f7c0eb77d9dfcb27c4ecb101c2a6d",
+      "cnodes": [
+        {
+          "name": "cnode_beam_server",
+          "slot_count": 18,
+          "slots_sha256": "12b65ab8d0ae36064189c2989a46d1a683e020d8e92cc450b648b110db66ef82"
+        },
+        {
+          "name": "cnode_beam_server_root",
+          "slot_count": 1,
+          "slots_sha256": "ee616f24bb5f9e399684eb0328fcfd03b0338bcdf5b76d85b5f2d7f7f246533d"
+        },
+        {
+          "name": "cnode_blk_driver",
+          "slot_count": 6,
+          "slots_sha256": "7fb05a5f0b09396c2128d1ce9ab435aa956be08533e09b81e225f281b11c6059"
+        },
+        {
+          "name": "cnode_blk_driver_root",
+          "slot_count": 1,
+          "slots_sha256": "51201c744d6f298b24567ebc4efa9c4779436c5cac6e050e46170860461f50d2"
+        },
+        {
+          "name": "cnode_blk_virt",
+          "slot_count": 6,
+          "slots_sha256": "49bf8f4115f565b2d1099a7bbed47caac13f22a04905fc2373ed05a46ada8155"
+        },
+        {
+          "name": "cnode_blk_virt_root",
+          "slot_count": 1,
+          "slots_sha256": "33036a1c34923aa6eafc8effe1c7a47689a8e90c55f04bcdc32f5fbd3af8d937"
+        },
+        {
+          "name": "cnode_crasher",
+          "slot_count": 4,
+          "slots_sha256": "61e208ae67df3f02bbe601a79af37702d7e3b87894e56906788a6f9b5aa617c4"
+        },
+        {
+          "name": "cnode_crasher_root",
+          "slot_count": 1,
+          "slots_sha256": "07d39eca70e605e5910bc8e10e6f7b59531222eb8250a6022ca2dc5963cf7439"
+        },
+        {
+          "name": "cnode_eth_driver",
+          "slot_count": 7,
+          "slots_sha256": "09effcf8eb6acea7afb0b18176e0ae96041751360ce6aef63825d977f6bd52b4"
+        },
+        {
+          "name": "cnode_eth_driver_root",
+          "slot_count": 1,
+          "slots_sha256": "553efdf18e5609c1ad6ef41d68e8bb27f4767b7def4e781b4b7feedd4ec8a261"
+        },
+        {
+          "name": "cnode_fatfs",
+          "slot_count": 6,
+          "slots_sha256": "1ace9f0620ecec332d600bf74d3875c9eff93bda85f9ec737203582ba2881848"
+        },
+        {
+          "name": "cnode_fatfs_root",
+          "slot_count": 1,
+          "slots_sha256": "b3afde64b844d0a9e0558d047acc7b4dc3ac27193f4fec36e69ec2ede523c845"
+        },
+        {
+          "name": "cnode_monitor",
+          "slot_count": 16,
+          "slots_sha256": "45c1019dccffaff34541823ed2f5137844a9a7d8998b062e4c17362762c7c703"
+        },
+        {
+          "name": "cnode_net_copy",
+          "slot_count": 6,
+          "slots_sha256": "71905a0aee9c7a5b1613204ccd58b1c21567ccda02c483391da3d7f2329516d9"
+        },
+        {
+          "name": "cnode_net_copy_root",
+          "slot_count": 1,
+          "slots_sha256": "3cd7d30dd5fd41a90f013c05090be2ea6d0f36afbb344dc0f26204d384907494"
+        },
+        {
+          "name": "cnode_net_virt_rx",
+          "slot_count": 6,
+          "slots_sha256": "a3f186c88fdeee6d6eb0243b25b32213b31ae7f558091a6afbe075c7492286be"
+        },
+        {
+          "name": "cnode_net_virt_rx_root",
+          "slot_count": 1,
+          "slots_sha256": "b42ef3b6459a48f150bc5a2b66378e646e41182c434205ea3bc98241240e6e36"
+        },
+        {
+          "name": "cnode_net_virt_tx",
+          "slot_count": 6,
+          "slots_sha256": "1d3473e4a6f15893b374b2b9dcff2185fdadc0e1811e708bf6efa3cee8d09be8"
+        },
+        {
+          "name": "cnode_net_virt_tx_root",
+          "slot_count": 1,
+          "slots_sha256": "d19a2d9ba0c130c15f4efce32016578ec0a50b76831d68d9a56993d4240392aa"
+        },
+        {
+          "name": "cnode_root",
+          "slot_count": 11,
+          "slots_sha256": "7d9a57472b1227e0822cbb23c940835981c43ac1cfeecc0f3b2097d5c078ec55"
+        },
+        {
+          "name": "cnode_root_root",
+          "slot_count": 1,
+          "slots_sha256": "e2297bdacc4da41517ae7f9bd90f6dd68e7a01be2e85d4ebadd4f856b1014da5"
+        },
+        {
+          "name": "cnode_serial_driver",
+          "slot_count": 7,
+          "slots_sha256": "2f37620b2e204f2edbf641260efc2db1c8bc6abb5c52e8b9f82f56e50e35f80d"
+        },
+        {
+          "name": "cnode_serial_driver_root",
+          "slot_count": 1,
+          "slots_sha256": "88b126d04b691f0b446dd39f98c1d445b0ba108254bc66ea3fbb90b8757471cc"
+        },
+        {
+          "name": "cnode_serial_virt_rx",
+          "slot_count": 6,
+          "slots_sha256": "1a668c606d20be0c1f7a636424ac383d30f90dfa52f41a7f4c5579f5be8384e4"
+        },
+        {
+          "name": "cnode_serial_virt_rx_root",
+          "slot_count": 1,
+          "slots_sha256": "580146ba63bc18b8ece1f86787c36d9bb321f603f88846b9845373eb2f874bca"
+        },
+        {
+          "name": "cnode_serial_virt_tx",
+          "slot_count": 6,
+          "slots_sha256": "2d2218fe46af89b89c508fc3ee4be633d58223acf15af220ea4ff419f2907794"
+        },
+        {
+          "name": "cnode_serial_virt_tx_root",
+          "slot_count": 1,
+          "slots_sha256": "eeecdea2c2371fd619edc2d6d705d6122f579f0c69197d0ee317fdb58251d04c"
+        },
+        {
+          "name": "cnode_timer_driver",
+          "slot_count": 6,
+          "slots_sha256": "8cbdd7c69af7cb1bff60b50d5cedca2079c7f5b90916192b8b13a065c2b36d70"
+        },
+        {
+          "name": "cnode_timer_driver_root",
+          "slot_count": 1,
+          "slots_sha256": "5750d4a27757af6e002affee14e18bdf5a3cfd09405d64559b54c2823afe1c6d"
+        }
+      ],
+      "critical_cnodes": {
+        "cnode_beam_server": [
+          {
+            "badge": "0x0",
+            "object": "ntfn_beam_server",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 1
+          },
+          {
+            "badge": "0x4000000000000005",
+            "object": "ep_root",
+            "rights": [
+              "Grant",
+              "Read",
+              "Write"
+            ],
+            "slot": 2
+          },
+          {
+            "object": "pud_beam_server",
+            "slot": 3
+          },
+          {
+            "object": "reply_beam_server",
+            "slot": 4
+          },
+          {
+            "badge": "0x2",
+            "object": "ntfn_serial_virt_rx",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 10
+          },
+          {
+            "badge": "0x2",
+            "object": "ntfn_serial_virt_tx",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 11
+          },
+          {
+            "badge": "0x1",
+            "object": "ntfn_fatfs",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 13
+          },
+          {
+            "badge": "0x2",
+            "object": "ntfn_net_copy",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 14
+          },
+          {
+            "badge": "0x2",
+            "object": "ntfn_net_virt_tx",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 15
+          },
+          {
+            "badge": "0x10",
+            "object": "ntfn_root",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 64
+          },
+          {
+            "badge": "0x20",
+            "object": "ntfn_root",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 65
+          },
+          {
+            "badge": "0x40",
+            "object": "ntfn_root",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 66
+          },
+          {
+            "badge": "0x80",
+            "object": "ntfn_root",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 67
+          },
+          {
+            "badge": "0x1",
+            "object": "ntfn_root",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 68
+          },
+          {
+            "badge": "0x2",
+            "object": "ntfn_root",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 69
+          },
+          {
+            "badge": "0x4",
+            "object": "ntfn_root",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 70
+          },
+          {
+            "badge": "0x8",
+            "object": "ntfn_root",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 71
+          },
+          {
+            "badge": "0x8000000000000001",
+            "object": "ep_timer_driver",
+            "rights": [
+              "Grant",
+              "Read",
+              "Write"
+            ],
+            "slot": 76
+          }
+        ],
+        "cnode_crasher": [
+          {
+            "badge": "0x0",
+            "object": "ntfn_crasher",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 1
+          },
+          {
+            "badge": "0x4000000000000004",
+            "object": "ep_root",
+            "rights": [
+              "Grant",
+              "Read",
+              "Write"
+            ],
+            "slot": 2
+          },
+          {
+            "object": "pud_crasher",
+            "slot": 3
+          },
+          {
+            "object": "reply_crasher",
+            "slot": 4
+          }
+        ],
+        "cnode_root": [
+          {
+            "badge": "0x0",
+            "object": "ep_root",
+            "rights": [
+              "Grant",
+              "Read",
+              "Write"
+            ],
+            "slot": 1
+          },
+          {
+            "badge": "0x1",
+            "object": "ep_fault_monitor",
+            "rights": [
+              "Grant",
+              "Read",
+              "Write"
+            ],
+            "slot": 2
+          },
+          {
+            "object": "pud_root",
+            "slot": 3
+          },
+          {
+            "object": "reply_root",
+            "slot": 4
+          },
+          {
+            "badge": "0x2000000000000000",
+            "object": "ntfn_blk_virt",
+            "rights": [
+              "Read",
+              "Write"
+            ],
+            "slot": 20
+          },
+          {
+            "object": "tcb_serial_driver",
+            "slot": 202
+          },
+          {
+            "object": "tcb_timer_driver",
+            "slot": 203
+          },
+          {
+            "object": "tcb_blk_driver",
+            "slot": 204
+          },
+          {
+            "object": "tcb_eth_driver",
+            "slot": 205
+          },
+          {
+            "object": "tcb_crasher",
+            "slot": 206
+          },
+          {
+            "object": "tcb_beam_server",
+            "slot": 207
+          }
+        ]
+      },
+      "irqs": [
+        {
+          "CPU": 0,
+          "Number": 30,
+          "Trigger": "level",
+          "name": "irq_30_timer_driver"
+        },
+        {
+          "CPU": 0,
+          "Number": 33,
+          "Trigger": "level",
+          "name": "irq_33_serial_driver"
+        },
+        {
+          "CPU": 0,
+          "Number": 48,
+          "Trigger": "edge",
+          "name": "irq_48_eth_driver"
+        },
+        {
+          "CPU": 0,
+          "Number": 49,
+          "Trigger": "edge",
+          "name": "irq_49_blk_driver"
+        }
+      ],
+      "tcbs": [
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_beam_server",
+          "priority": 1,
+          "scheduling_context": "sched_context_beam_server"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_blk_driver",
+          "priority": 200,
+          "scheduling_context": "sched_context_blk_driver"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_blk_virt",
+          "priority": 199,
+          "scheduling_context": "sched_context_blk_virt"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_crasher",
+          "priority": 50,
+          "scheduling_context": "sched_context_crasher"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_eth_driver",
+          "priority": 110,
+          "scheduling_context": "sched_context_eth_driver"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_fatfs",
+          "priority": 96,
+          "scheduling_context": "sched_context_fatfs"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": null,
+          "ip": "0x200000",
+          "name": "tcb_monitor",
+          "priority": 255,
+          "scheduling_context": "sched_context_monitor"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_net_copy",
+          "priority": 97,
+          "scheduling_context": "sched_context_net_copy"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_net_virt_rx",
+          "priority": 108,
+          "scheduling_context": "sched_context_net_virt_rx"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_net_virt_tx",
+          "priority": 109,
+          "scheduling_context": "sched_context_net_virt_tx"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_root",
+          "priority": 254,
+          "scheduling_context": "sched_context_root"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_serial_driver",
+          "priority": 100,
+          "scheduling_context": "sched_context_serial_driver"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_serial_virt_rx",
+          "priority": 98,
+          "scheduling_context": "sched_context_serial_virt_rx"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_fault_monitor",
+          "ip": "0x200000",
+          "name": "tcb_serial_virt_tx",
+          "priority": 99,
+          "scheduling_context": "sched_context_serial_virt_tx"
+        },
+        {
+          "cpu_affinity": 0,
+          "fault_endpoint": "ep_root",
+          "ip": "0x200000",
+          "name": "tcb_timer_driver",
+          "priority": 101,
+          "scheduling_context": "sched_context_timer_driver"
+        }
+      ]
+    },
+    "test": {
+      "same_as": "production",
+      "sha256": "2d610f351452628d92e5d188e445cf6a2d781708429c52b07eb2f4ac81c92cdc"
+    }
+  },
+  "schema_version": 1,
+  "toolchain": {
+    "flake_inputs": {
+      "libmicrokitco": {
+        "narHash": "sha256-3p9Apl+PHqI3+m2bzC7xxZMlag8+eMTfXTC7l9Yqhhw=",
+        "ref": "refs/heads/main",
+        "rev": "4bf88ee12c19823ff8c6d3122b6a298a5d8147ea",
+        "type": "git",
+        "url": "https://github.com/au-ts/libmicrokitco"
+      },
+      "lionsos": {
+        "narHash": "sha256-RlyoCQdp8a0+w6r+eUEYSfiKNM6SvLbFYb02jMLuTQU=",
+        "ref": "refs/tags/0.4.0",
+        "rev": "ad4c35ea7ae657d2f450e45c821035e746cfa48a",
+        "type": "git",
+        "url": "https://github.com/au-ts/lionsos"
+      },
+      "musllibc": {
+        "narHash": "sha256-4SEG8EgDXEOkfPSzRLE4WMY1Hc/m7OFFwhfU665JWZk=",
+        "ref": "sel4",
+        "rev": "ee77eeceaeabe97b5a1aed454683e9d39ee6c591",
+        "type": "git",
+        "url": "https://github.com/au-ts/musllibc"
+      },
+      "nixpkgs": {
+        "narHash": "sha256-LQy14TZp77TwbQf40gg1V3jo8FwJG0jGDkAH+zRHqg8=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "1559d3daa3ecc813a650b79375ea61b6741b8746",
+        "type": "github"
+      },
+      "sddf": {
+        "narHash": "sha256-Ser9MfdEIbAmM/SgPh2eeTM5sa2uX3yi75V2U23SI2U=",
+        "ref": "refs/tags/0.7.0",
+        "rev": "650ace5dba984f5d9c7dd1a005648ff7b40655f7",
+        "type": "git",
+        "url": "https://github.com/au-ts/sddf"
+      },
+      "sdfgen": {
+        "narHash": "sha256-NHl5gzx32nExiALlJ9RpbSB3AyTD/pOcGQBgt4jI0m8=",
+        "ref": "refs/tags/0.35.0",
+        "rev": "0fdbd7429d2e8eceb599b6b4bca67cbccfaf1001",
+        "type": "git",
+        "url": "https://github.com/au-ts/microkit_sdf_gen"
+      },
+      "zig-overlay": {
+        "narHash": "sha256-MjJ11590v/aOSXK+3bSuP9Jqz1UiQL4JPDAyRdDFOxg=",
+        "ref": "refs/heads/main",
+        "rev": "fb507fd6911943101aa61b1b05646af743d0f43b",
+        "type": "git",
+        "url": "https://github.com/mitchellh/zig-overlay"
+      },
+      "zig2nix": {
+        "narHash": "sha256-QwOakt8um0hWvMTLimXXgtcJBMdHebJwGkDwGYXlJXE=",
+        "owner": "Cloudef",
+        "repo": "zig2nix",
+        "rev": "f034cbd46a3f2910652c9ae92835f83491d58319",
+        "type": "github"
+      }
+    },
+    "llvm": "18.1.8",
+    "microkit": {
+      "board": "qemu_virt_aarch64",
+      "config": "debug",
+      "version": "2.3.0"
+    },
+    "otp": "28.5.0.4",
+    "zig": "0.15.2"
+  }
+}
