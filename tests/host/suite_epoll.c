@@ -188,6 +188,50 @@ static void test_poll_and_select_helpers(void) {
   CHECK(!runtime_select_nfds_valid(INT32_MIN, 1024));
 }
 
+/* Every combination of the four readiness bits, mapped onto select's sets. */
+static void test_select_from_revents(void) {
+  /* Nothing ready is ready in no set. */
+  runtime_select_ready state = runtime_select_from_revents(0);
+  CHECK(!state.read && !state.write && !state.except);
+
+  state = runtime_select_from_revents(in);
+  CHECK(state.read && !state.write && !state.except);
+
+  state = runtime_select_from_revents(out);
+  CHECK(!state.read && state.write && !state.except);
+
+  state = runtime_select_from_revents(in | out);
+  CHECK(state.read && state.write && !state.except);
+
+  /* A pending error or a hangup makes the descriptor ready in both sets, so
+   * a caller watching either one wakes and collects it. Reporting them only
+   * in exceptfds would leave a caller watching read and write blocked. */
+  state = runtime_select_from_revents(err);
+  CHECK(state.read && state.write && !state.except);
+
+  state = runtime_select_from_revents(hup);
+  CHECK(state.read && state.write && !state.except);
+
+  state = runtime_select_from_revents(err | hup);
+  CHECK(state.read && state.write && !state.except);
+
+  for (uint32_t bits = 0; bits < 16; bits++) {
+    const uint32_t revents = ((bits & 1) ? in : 0) | ((bits & 2) ? out : 0) |
+                             ((bits & 4) ? err : 0) | ((bits & 8) ? hup : 0);
+    const runtime_select_ready got = runtime_select_from_revents(revents);
+    const bool failed = (revents & (err | hup)) != 0;
+    CHECK(got.read == (((revents & in) != 0) || failed));
+    CHECK(got.write == (((revents & out) != 0) || failed));
+    /* This stack's TCP delivers no out-of-band data, so nothing raises the
+     * exception set. */
+    CHECK(!got.except);
+  }
+
+  /* Bits outside the four conditions never make a descriptor ready. */
+  state = runtime_select_from_revents(runtime_epoll_oneshot);
+  CHECK(!state.read && !state.write && !state.except);
+}
+
 int main(void) {
   test_set_and_update();
   test_capacity_and_reuse();
@@ -195,5 +239,6 @@ int main(void) {
   test_report_limit();
   test_oneshot_rearm_cycles();
   test_poll_and_select_helpers();
+  test_select_from_revents();
   return check_finish("epoll");
 }

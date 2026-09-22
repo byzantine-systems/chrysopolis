@@ -146,9 +146,12 @@ fn boardCfg(board: []const u8) BoardCfg {
 const BeamCfg = struct {
     glue_obj: std.Build.LazyPath,
     microkitco_obj: std.Build.LazyPath,
-    // lib_sddf_lwip.a: the lwIP stack + sDDF glue + LionsOS socket backend
-    // (tcp.c) linked into beam so the libc socket layer has an AF_INET path.
+    // lib_sddf_lwip.a: the lwIP stack + sDDF glue, linked into beam so the
+    // libc socket layer has an AF_INET path.
     lwip_obj: std.Build.LazyPath,
+    // src/runtime/tcp.c: the LionsOS socket backend, a separate object rather
+    // than a member of the archive above so it can carry our own diagnostics.
+    tcp_obj: std.Build.LazyPath,
     // libbearssl_drbg.a: the HMAC-DRBG subset backing rng.c (src/runtime/rng.c).
     bearssl_obj: std.Build.LazyPath,
     board_dir: []const u8,
@@ -263,9 +266,12 @@ fn addBeamExe(
     // libmicrokitco.a (built in this same build). addObjectFile whole-archives
     // it, pulling both libco + libmicrokitco objects.
     exe.root_module.addObjectFile(cfg.microkitco_obj);
-    // lib_sddf_lwip.a: the lwIP stack + socket backend. Whole-archived so
-    // tcp.o's socket_config is pulled in for the lazily-linked libc.a sock.c.
+    // lib_sddf_lwip.a: the lwIP stack and its sDDF glue.
     exe.root_module.addObjectFile(cfg.lwip_obj);
+    // tcp.o: the socket backend. A plain object, not an archive member, so its
+    // socket_config is always linked for the lazily-linked libc.a sock.c
+    // without needing the archive to be pulled in whole.
+    exe.root_module.addObjectFile(cfg.tcp_obj);
     // libbearssl_drbg.a: whole-archived so rng.o's br_hmac_drbg_* / br_sha256
     // references (pulled from the glue object linked above) resolve.
     exe.root_module.addObjectFile(cfg.bearssl_obj);
@@ -427,7 +433,6 @@ fn addLwipLib(
     lionsos_src: []const u8,
     lions_libc: []const u8,
     libmicrokitco_src: []const u8,
-    tcp_debug: bool,
 ) *std.Build.Step.Compile {
     const lwip_src = b.fmt("{s}/network/ipstacks/lwip/src", .{sddf});
     // lwIP is noisy under -Wall, match posix_test's warning suppressions.
@@ -468,21 +473,82 @@ fn addLwipLib(
         .file = .{ .cwd_relative = b.fmt("{s}/network/lib_sddf_lwip/lib_sddf_lwip.c", .{sddf}) },
         .flags = flags,
     });
-    // Chrysopolis-patched TCP socket backend (defines the socket_config sock.c
-    // dereferences). Vendored at src/runtime/tcp.c: allows recv() to drain
-    // buffered data after the peer closes the connection (closed_by_peer state).
-    lib.root_module.addCSourceFile(.{
-        .file = b.path("src/runtime/tcp.c"),
-        // -std=gnu23 only for our own file: the vendored lwIP sources above
-        // keep the default, since nothing here is worth risking a warning in
-        // upstream code we do not maintain.
-        .flags = if (tcp_debug)
-            flags ++ &[_][]const u8{ "-std=gnu23", "-DTCP_DEBUG=1" }
-        else
-            flags ++ &[_][]const u8{"-std=gnu23"},
-    });
     addLwipIncludes(b, lib.root_module, lionsos_src, lions_libc, libmicrokitco_src);
     return lib;
+}
+
+// The Chrysopolis-patched TCP socket backend (it defines the socket_config
+// that sock.c dereferences). Vendored at src/runtime/tcp.c: it lets recv()
+// drain buffered data after the peer closes the connection (closed_by_peer),
+// validates every socket index the libc layer hands over, and owns the
+// conversions that cross lwIP's u16_t and u8_t boundaries.
+//
+// Its own object rather than a member of lib_sddf_lwip above, because it is
+// code we maintain and lwIP's is not. That split is what lets it carry real
+// diagnostics: -Wall -Wextra -Wsign-compare here, and -Werror under
+// -Ddiagnostic, matching diagnostic_cflags.
+//
+// The include paths it needs are the same as lwIP's, but added with
+// addSystemIncludePath so the warnings above apply to this file and not to
+// the musl, seL4, Microkit and sDDF headers it pulls in, which do not compile
+// clean under them and which we do not maintain. Only src/runtime and the
+// vendored lwip_include stay plain -I: those are ours.
+fn addTcpObject(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    lionsos_src: []const u8,
+    lions_libc: []const u8,
+    libmicrokitco_src: []const u8,
+    tcp_debug: bool,
+    diagnostic: bool,
+) *std.Build.Step.Compile {
+    const obj = b.addObject(.{
+        .name = "tcp",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .strip = false }),
+    });
+    // -std=gnu23: the LionsOS and seL4 headers this includes need the GNU
+    // extensions. It keeps lwIP's four suppressions because it shares lwIP's
+    // idioms, and they come after -Wall/-Wextra so those do not re-enable
+    // what they turn off.
+    const base = [_][]const u8{
+        "-ffreestanding",
+        "-O2",
+        "-g",
+        "-std=gnu23",
+        "-Wall",
+        "-Wextra",
+        "-Wsign-compare",
+        "-Wno-bitwise-op-parentheses",
+        "-Wno-shift-op-parentheses",
+        "-Wno-unused-function",
+        "-Wno-tautological-constant-out-of-range-compare",
+    };
+    // The four combinations spelled out: ++ needs comptime operands and both
+    // switches are build options read at runtime.
+    const tcp_flags: []const []const u8 = if (diagnostic and tcp_debug)
+        &(base ++ [_][]const u8{ "-Werror", "-DTCP_DEBUG=1" })
+    else if (diagnostic)
+        &(base ++ [_][]const u8{"-Werror"})
+    else if (tcp_debug)
+        &(base ++ [_][]const u8{"-DTCP_DEBUG=1"})
+    else
+        &base;
+    obj.root_module.addCSourceFile(.{
+        .file = b.path("src/runtime/tcp.c"),
+        .flags = tcp_flags,
+    });
+    obj.root_module.addIncludePath(b.path("src/runtime"));
+    obj.root_module.addIncludePath(b.path("src/runtime/lwip_include")); // lwipopts.h, arch/cc.h
+    obj.root_module.addSystemIncludePath(sddfPath(b, "include"));
+    obj.root_module.addSystemIncludePath(sddfPath(b, "include/microkit")); // os/sddf.h
+    obj.root_module.addSystemIncludePath(libmicrokit_include); // microkit.h
+    obj.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lionsos_src}) });
+    obj.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
+    obj.root_module.addSystemIncludePath(.{ .cwd_relative = libmicrokitco_src });
+    obj.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
+    obj.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
+    return obj;
 }
 
 pub fn build(b: *std.Build) void {
@@ -795,6 +861,7 @@ pub fn build(b: *std.Build) void {
             "beam_snapshot_codec.h",
             "beam_restart_layout.h",
             "runtime_tcp_logic.h",
+            "runtime_tcp_state.h",
         };
         for (runtime_contract_headers) |header| {
             const probe_flags = b.allocator.alloc([]const u8, runtime_flags.len + 1) catch @panic("OOM");
@@ -828,7 +895,8 @@ pub fn build(b: *std.Build) void {
     // Prebuilt archives are linked lazily (pulled on demand), the way the
     // Makefile's `-lmicrokit -lc` and ld --start-group did, so members are
     // extracted on demand to resolve the glue + inter-archive references.
-    const lwip_lib = addLwipLib(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src, tcp_debug);
+    const lwip_lib = addLwipLib(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src);
+    const tcp_obj = addTcpObject(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src, tcp_debug, diagnostic);
 
     // libbearssl_drbg.a: a five-file subset of BearSSL (HMAC_DRBG/SHA-256,
     // NIST SP 800-90A) backing src/runtime/rng.c. We compile only what the DRBG
@@ -858,6 +926,7 @@ pub fn build(b: *std.Build) void {
         .glue_obj = glue.getEmittedBin(),
         .microkitco_obj = microkitco.getEmittedBin(),
         .lwip_obj = lwip_lib.getEmittedBin(),
+        .tcp_obj = tcp_obj.getEmittedBin(),
         .bearssl_obj = bearssl.getEmittedBin(),
         .board_dir = board_dir,
         .lions_libc = lions_libc,

@@ -89,4 +89,32 @@ runtime_poll_wanted_mask(uint32_t requested) {
   return nfds >= 0 && nfds <= setsize;
 }
 
+/* One descriptor's readiness, split the way select(2) reports it. */
+typedef struct {
+  bool read;
+  bool write;
+  bool except;
+} runtime_select_ready;
+
+/*
+ * Map the epoll-shaped conditions a descriptor reports onto select's three
+ * sets. A descriptor with a pending error or a hangup is both readable and
+ * writable: that is how select tells the caller to go and collect the error
+ * rather than block on a descriptor that will never make progress.
+ *
+ * The except set stays empty. select reports an exceptional condition for
+ * out-of-band data, which this stack's TCP does not deliver, and reporting
+ * errors there instead would leave a caller that watches only readfds and
+ * writefds blocked forever.
+ */
+[[__nodiscard__]] static inline runtime_select_ready
+runtime_select_from_revents(uint32_t revents) {
+  const bool failed = (revents & (runtime_epoll_err | runtime_epoll_hup)) != 0;
+  return (runtime_select_ready){
+      .read = (revents & runtime_epoll_in) != 0 || failed,
+      .write = (revents & runtime_epoll_out) != 0 || failed,
+      .except = false,
+  };
+}
+
 #endif
