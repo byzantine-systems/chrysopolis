@@ -80,7 +80,7 @@ pub fn main() !void {
 
     // Root fault-handler / process-manager PD. It is the PARENT of every
     // restartable PD: Microkit routes a child PD's fault to its parent's
-    // fault() callback (root.c), which restarts the child to a clean entry
+    // fault() callback (src/pd/root/main.c), which restarts the child to a clean entry
     // (microkit_pd_restart). Priority is above every child so root can preempt
     // and handle a fault. Children are attached via root.addChild() below (NOT
     // sdf.addProtectionDomain, which would render them top-level and route
@@ -90,7 +90,7 @@ pub fn main() !void {
 
     // Child ids come from system_abi.zig rather than sdfgen's allocator. The
     // id is what root's fault()/notified() receive to identify which child to
-    // restart, so changing it is an ABI change shared with src/runtime/root.c.
+    // restart, so changing it is an ABI change shared with src/pd/root/main.c.
     // Child ids and channel ids are SEPARATE Microkit id spaces (microkit_child
     // indexes BASE_TCB_CAP, microkit_channel indexes
     // BASE_OUTPUT_NOTIFICATION_CAP), so these never collide with channel ids.
@@ -311,7 +311,7 @@ pub fn main() !void {
     // channels below purely to keep the pinned-id blocks adjacent.
     //
     // Both ends are pinned: root's id 10 is ROOT_GONE_CH_BLK in
-    // src/runtime/root.c, blk_virt's is BLK_VIRT_DRIVER_GONE_CH in
+    // src/pd/root/main.c, blk_virt's is BLK_VIRT_DRIVER_GONE_CH in
     // nix/patches/sddf-blk-virt-restart-reconcile.patch. blk_virt gets a HIGH id
     // for the same reason beam_server's debug ids are high: sdfgen hands the blk
     // helper ids from 0 upwards (blk_virt already holds 0 and 1), and blk_virt
@@ -335,7 +335,7 @@ pub fn main() !void {
     // memory command word.
     //
     // Both ends come from system_abi.zig. Root's ids map onto the healthy
-    // ROOT_DEBUG_CH_* and fault ROOT_FAULT_CH_* groups in src/runtime/root.c.
+    // ROOT_DEBUG_CH_* and fault ROOT_FAULT_CH_* groups in src/pd/root/main.c.
     // beam_server's ids are allocated high and out of the way of the serial/timer/net/fs
     // channels sdfgen allocates from 0 upwards: beam_server learns every other
     // channel id from a serialised config blob, but these have no blob, so

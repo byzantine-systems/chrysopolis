@@ -179,7 +179,7 @@
             # universal constant, so derive it from the linked child ELFs rather
             # than hardcoding it. Assert it is uniform across the restartable
             # children (they share microkit.ld, so it must be), then patch it
-            # into root.elf's .restart_config section (root.c reads it there).
+            # into root.elf's .restart_config section (src/pd/root/main.c reads it there).
             # Every child of root is checked, not just a representative pair:
             # root restarts them all to the same address, so a divergent entry
             # anywhere means a silent restart into garbage. beam_server is

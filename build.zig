@@ -493,7 +493,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // === Root fault handler and its test-only faulting child.
-    // Neither is an sDDF component: root.c and crasher.c include only
+    // Neither is an sDDF component: Root's main.c and crasher.c include only
     // <microkit.h> and print only via microkit_dbg_puts (supplied by
     // libmicrokit.a, which addPd already links), so they need none of the sDDF
     // include set nor the util/util_putchar_debug libs that component() adds.
@@ -505,7 +505,14 @@ pub fn build(b: *std.Build) void {
     // modules/images.nix objcopies in per board, falling back to the 0x200000
     // literal compiled in here for a bare `zig build`.
     const root_pd = microkit.addPd(microkit_context, "root.elf", target, first_party_optimize);
-    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/root.c"), .flags = first_party_flags });
+    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/main.c"), .flags = first_party_flags });
+    root_pd.root_module.addIncludePath(b.path("src/pd/root/policy"));
+    if (diagnostic) {
+        root_pd.root_module.addCSourceFile(.{
+            .file = b.path("src/pd/root/policy/header_probe.c"),
+            .flags = runtime_flags,
+        });
+    }
     root_pd.root_module.addConfigHeader(generated_abi);
     // Same reason the beam exe and fat.elf disable it: modules/images.nix patches
     // the per-board child entry point into .restart_config with

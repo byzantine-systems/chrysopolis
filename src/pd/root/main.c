@@ -1,5 +1,5 @@
 /*
- * root.c - Chrysopolis Root fault-handler / process-manager PD.
+ * main.c - Chrysopolis Root fault-handler / process-manager PD.
  *
  * The Root PD is the seL4-level substrate for the "crash and restart"
  * resilience model (Crashing for Reliability, seL4 Summit 2023). It is the

@@ -1,6 +1,7 @@
 const std = @import("std");
 
-// Host test harness for the pure runtime units in src/runtime.
+// Host test harness for the pure BEAM units in src/runtime and Root policy in
+// src/pd/root/policy.
 //
 // A separate package rather than a step in the root build.zig: the root build
 // requires every cross -D path (board dir, sDDF, LionsOS, ...) before it can
@@ -30,8 +31,10 @@ const cflags = [_][]const u8{
 
 const Suite = struct {
     name: []const u8,
-    // Pure unit sources from src/runtime linked into the suite. Header-only
-    // units need no entry.
+    source: ?[]const u8 = null,
+    owner: enum { beam, root } = .beam,
+    // Pure unit sources from the suite owner's directory. Header-only units
+    // need no entry.
     units: []const []const u8,
 };
 
@@ -44,7 +47,7 @@ const suites = [_]Suite{
     .{ .name = "status", .units = &.{"runtime_status.c"} },
     .{ .name = "pd_restart", .units = &.{"runtime_pd_restart_parse.c"} },
     .{ .name = "pthread", .units = &.{"runtime_tls_row.c"} },
-    .{ .name = "root_policy", .units = &.{} },
+    .{ .name = "root_policy", .source = "root/suite_root_policy.c", .owner = .root, .units = &.{} },
     .{ .name = "snapshot", .units = &.{"beam_snapshot_codec.c"} },
     .{ .name = "restart_layout", .units = &.{} },
     .{ .name = "rng_select", .units = &.{"rng_select.c"} },
@@ -76,6 +79,7 @@ pub fn build(b: *std.Build) void {
 
     for (variants) |variant| {
         for (suites) |suite| {
+            const owner_dir = if (suite.owner == .root) b.path("../../src/pd/root/policy") else runtime_dir;
             const exe = b.addExecutable(.{
                 .name = b.fmt("suite_{s}_{s}", .{ suite.name, variant.suffix }),
                 .linkage = if (linux) .static else null,
@@ -87,16 +91,17 @@ pub fn build(b: *std.Build) void {
                 }),
             });
             exe.root_module.addCSourceFile(.{
-                .file = b.path(b.fmt("suite_{s}.c", .{suite.name})),
+                .file = b.path(suite.source orelse b.fmt("suite_{s}.c", .{suite.name})),
                 .flags = &cflags,
             });
             for (suite.units) |unit| {
                 exe.root_module.addCSourceFile(.{
-                    .file = runtime_dir.path(b, unit),
+                    .file = owner_dir.path(b, unit),
                     .flags = &cflags,
                 });
             }
-            exe.root_module.addIncludePath(runtime_dir);
+            exe.root_module.addIncludePath(b.path(".")); // check.h for suites under owner subdirectories
+            exe.root_module.addIncludePath(owner_dir);
 
             const run = b.addRunArtifact(exe);
             run.expectExitCode(0);

@@ -1,4 +1,4 @@
-/* root_policy.h: child id validation, restart budgets, the terminal gone
+/* Root's root_policy.h: child id validation, restart budgets, the terminal gone
  * state, give-up reasons and channel routing. */
 #include "check.h"
 

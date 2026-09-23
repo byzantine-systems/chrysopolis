@@ -37,6 +37,7 @@
               ../build.zig.zon2json-lock
               ../build
               ../src/runtime
+              ../src/pd/root
               ../interfaces/system_abi.zig
               ../interfaces/generated/system-abi.json
             ];
@@ -172,6 +173,7 @@
             fileset = pkgs.lib.fileset.unions [
               ../tests/host
               ../src/runtime
+              ../src/pd/root/policy
             ];
           };
           nativeBuildInputs = [ inputs'.zig2nix.packages."zig-0_15_2" ];

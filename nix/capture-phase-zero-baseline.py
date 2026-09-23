@@ -484,7 +484,14 @@ def parse_host_tests(path: Path) -> dict[str, Any]:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         fail(f"cannot read host-test build {path}: {error}")
-    suites = re.findall(r'\.name = "([^"]+)", \.units =', text)
+    # Suite entries may carry owner/source fields before units after a move.
+    # Require both a named entry and its units declaration so the inventory
+    # still fails closed if the build table's shape changes unexpectedly.
+    suites = re.findall(
+        r'^\s*\.\{\s*\.name\s*=\s*"([^"]+)",[^\n]*\.units\s*=',
+        text,
+        re.MULTILINE,
+    )
     variants = [
         {"name": name, "optimize": optimize, "sanitize_c": sanitize}
         for name, optimize, sanitize in re.findall(
