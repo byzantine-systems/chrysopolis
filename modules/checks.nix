@@ -29,9 +29,10 @@
       # Only the attribute names are forced here. Check derivation values are
       # not evaluated, avoiding a dependency from the baseline capture back to
       # the checks whose contracts it inventories.
-      # The ABI projection gate is additional evidence, not a baseline fact.
       phaseZeroCheckNames = pkgs.writeText "chrysopolis-phase-zero-check-names.json" (
-        builtins.toJSON (pkgs.lib.subtractLists [ "abi-stale" ] (builtins.attrNames config.checks))
+        builtins.toJSON (
+          pkgs.lib.subtractLists [ "abi-stale" "project-structure" ] (builtins.attrNames config.checks)
+        )
       );
 
       capturePhaseZeroBaseline = output: ''
@@ -123,6 +124,38 @@
       };
 
       checks = {
+        # Dependency direction, explicit first-party source membership,
+        # public header isolation and the vendored TCP formatting boundary.
+        project-structure = pkgs.stdenvNoCC.mkDerivation {
+          name = "chrysopolis-project-structure";
+          src = pkgs.lib.fileset.toSource {
+            root = ../.;
+            fileset = pkgs.lib.fileset.unions [
+              ../build.zig
+              ../build.zig.zon
+              ../build
+              ../src
+              ../include
+              ../interfaces
+              ../modules
+              ../nix/check-project-structure.py
+              ../nix/test-project-structure.py
+            ];
+          };
+          nativeBuildInputs = [
+            pkgs.python3
+            chryso.llvm.clang
+          ];
+          dontConfigure = true;
+          dontInstall = true;
+          buildPhase = ''
+            runHook preBuild
+            python nix/test-project-structure.py
+            python nix/check-project-structure.py .
+            touch $out
+            runHook postBuild
+          '';
+        };
         abi-stale = pkgs.runCommand "chrysopolis-abi-stale" { } ''
           ${config.packages.abi-tool}/bin/gen-system-abi first.json
           ${config.packages.abi-tool}/bin/gen-system-abi second.json
