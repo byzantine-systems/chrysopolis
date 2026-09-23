@@ -20,7 +20,7 @@ Chrysopolis aims to run the BEAM on the [seL4 microkernel](https://sel4.systems/
     - A [flake-parts](https://flake.parts/)-structured flake (`flake.nix` + one module per concern under [modules/](modules)) cross-compiles ERTS, builds musl `libc.a` (autotools), and pins every input in `flake.lock`. 
     - **Zig** is invoked by Nix as the build driver via two `build.zig` metaprograms: 
         - [tools/sdf](tools/sdf) generates the Microkit system description.
-        - the root [build.zig](build.zig) builds [libmicrokitco](https://github.com/au-ts/libmicrokitco), the sDDF driver/virtualiser PDs, and compiles and links the `beam_server` PD (ERTS glue) from [src/runtime](src/runtime). 
+        - the root [build.zig](build.zig) builds [libmicrokitco](https://github.com/au-ts/libmicrokitco), the sDDF driver/virtualiser PDs, and compiles and links the `beam_server` PD (ERTS glue) from [src/pd/beam](src/pd/beam).
     - ERTS loads its OTP modules and boot script from a FAT filesystem (`fatfs` PD -> sDDF block subsystem), the result is a hermetic, reproducible `sel4-beam.img`.
 
 ### Build-time ABI

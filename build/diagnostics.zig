@@ -1,13 +1,15 @@
 const std = @import("std");
 
 pub const runtime_contract_headers = [_][]const u8{
-    "runtime_boot.h",             "runtime_config.h",       "runtime_fs.h",             "runtime_lifecycle.h",        "runtime_status.h",
-    "runtime_futex_cmd.h",        "runtime_timer.h",        "runtime_wait.h",           "runtime_cothread.h",         "runtime_cothread_state.h",
-    "runtime_stack.h",            "runtime_pthread_abi.h",  "runtime_pthread_handle.h", "runtime_pthread_tls.h",      "runtime_tls_row.h",
-    "runtime_token_counter.h",    "runtime_thread_probe.h", "runtime_network.h",        "runtime_restart.h",          "runtime_syscalls.h",
-    "runtime_syscall_handlers.h", "runtime_console.h",      "runtime_fd.h",             "runtime_fd_pair.h",          "runtime_epoll_table.h",
-    "runtime_deadline.h",         "runtime_timer_slot.h",   "runtime_pd_restart.h",     "runtime_pd_restart_parse.h", "rng.h",
-    "rng_select.h",               "beam_snapshot_codec.h",  "beam_restart_layout.h",    "runtime_tcp_logic.h",        "runtime_tcp_state.h",
+    "config/runtime_boot.h",                   "config/runtime_config.h",               "config/runtime_lifecycle.h",                "config/runtime_status.h",
+    "compat/fd/runtime_fd.h",                  "compat/fd/runtime_fd_pair.h",           "compat/poll/runtime_epoll_table.h",         "compat/pthread/runtime_cothread.h",
+    "compat/pthread/runtime_cothread_state.h", "compat/pthread/runtime_pthread_abi.h",  "compat/pthread/runtime_pthread_handle.h",   "compat/pthread/runtime_pthread_tls.h",
+    "compat/pthread/runtime_stack.h",          "compat/pthread/runtime_thread_probe.h", "compat/pthread/runtime_tls_row.h",          "compat/pthread/runtime_token_counter.h",
+    "compat/pthread/runtime_wait.h",           "compat/syscall/runtime_futex_cmd.h",    "compat/syscall/runtime_syscall_handlers.h", "compat/syscall/runtime_syscalls.h",
+    "compat/time/runtime_deadline.h",          "io/console/runtime_console.h",          "io/filesystem/runtime_fs.h",                "io/network/runtime_network.h",
+    "io/network/runtime_tcp_logic.h",          "io/network/runtime_tcp_state.h",        "io/timer/runtime_timer.h",                  "io/timer/runtime_timer_slot.h",
+    "restart/beam_restart_layout.h",           "restart/beam_snapshot_codec.h",         "restart/runtime_pd_restart.h",              "restart/runtime_pd_restart_parse.h",
+    "restart/runtime_restart.h",               "security/rng.h",                        "security/rng_select.h",
 };
 
 pub fn addContractProbes(b: *std.Build, mod: *std.Build.Module, source: std.Build.LazyPath, flags: []const []const u8) void {

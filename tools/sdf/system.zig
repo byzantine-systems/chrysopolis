@@ -99,7 +99,7 @@ pub fn main() !void {
     // beam_server.elf, so the C runtime reads each region's base from a global.
     //
     // beam_server is a CHILD of root, so an ERTS crash (or a deliberate
-    // init:stop(), which src/runtime/runtime_sys_identity.c turns into a fault carrying the
+    // init:stop(), which src/pd/beam/compat/syscall/runtime_sys_identity.c turns into a fault carrying the
     // exit code) reaches root's fault() and is restarted rather than wedging
     // the PD forever.
     var beam_server = Pd.create(allocator, "beam_server", "beam_server.elf", .{ .priority = 1 });
@@ -115,7 +115,7 @@ pub fn main() !void {
     // Restart snapshot region. beam_server takes a pristine copy of its own
     // writable segment here at first boot and restores from it when root
     // restarts the PD, because a Microkit restart re-zeroes nothing (see
-    // src/runtime/restart.c for the whole mechanism and why the copy has to be
+    // src/pd/beam/restart/restart.c for the whole mechanism and why the copy has to be
     // taken at runtime rather than embedded in the ELF).
     //
     // It is a SEPARATE memory region precisely so that it is not part of what
@@ -339,7 +339,7 @@ pub fn main() !void {
     // beam_server's ids are allocated high and out of the way of the serial/timer/net/fs
     // channels sdfgen allocates from 0 upwards: beam_server learns every other
     // channel id from a serialised config blob, but these have no blob, so
-    // src/runtime/runtime_pd_restart.c reads them from the .pd_restart_config section that
+    // src/pd/beam/restart/runtime_pd_restart.c reads them from the .pd_restart_config section that
     // modules/images.nix objcopies in (0xff = channel absent, which is what
     // production images keep). The manifest validator enforces sdfgen's id
     // ceiling so no channel can overflow its StaticBitSet. Declared last so
@@ -382,7 +382,7 @@ pub fn main() !void {
 
     // beam_server asks root to restart it by faulting deliberately at
     // BEAM_EXIT_FAULT_BASE + the exit code, so root's fault() reports the code
-    // in mr1 (src/runtime/restart.c: beam_request_restart). That only works
+    // in mr1 (src/pd/beam/restart/restart.c: beam_request_restart). That only works
     // while the address is UNMAPPED in beam_server's VSpace, and nothing else
     // would notice if a future memory region quietly landed on top of it: the
     // store would simply succeed and ERTS would carry on with the emulator
@@ -402,7 +402,7 @@ pub fn main() !void {
             std.debug.print(
                 "beam_server map '{s}' at 0x{x}..0x{x} covers the restart-request " ++
                     "fault address 0x{x}; move the mapping or change " ++
-                    "BEAM_EXIT_FAULT_BASE in src/runtime/restart.c (and here)\n",
+                    "BEAM_EXIT_FAULT_BASE in src/pd/beam/restart/restart.c (and here)\n",
                 .{ map.mr.name, lo, hi, abi.exit_fault_base },
             );
             std.process.exit(1);

@@ -11,7 +11,7 @@
     // committed build.zig.zon2json-lock so `zig build` runs offline (the same
     // machinery tools/sdf uses for sdfgen).
     .dependencies = .{
-        // BearSSL: vetted embedded crypto (MIT). Backs src/runtime/rng.c's
+        // BearSSL: vetted embedded crypto (MIT). Backs src/pd/beam/security/rng.c's
         // HMAC-DRBG (SHA-256, NIST SP 800-90A); build.zig compiles a 5-file
         // subset (libbearssl_drbg.a), not the whole TLS stack.
         .bearssl = .{
@@ -25,5 +25,6 @@
         "build.zig.zon",
         "build.zig.zon2json-lock",
         "src/runtime",
+        "src/pd/beam",
     },
 }

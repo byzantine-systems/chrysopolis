@@ -224,11 +224,11 @@
             # tens of megabytes of ERTS/libc state that has to be pristine
             # before the emulator can boot again, so _reset restores its
             # writable segment first and only then enters the normal boot (see
-            # src/runtime/restart.c). Resolve the symbol rather than hardcoding
+            # src/pd/beam/restart/restart.c). Resolve the symbol rather than hardcoding
             # it: unlike _start it has no fixed address.
             if ! beam_reset=$(sym_of beam_server.elf _reset); then
               echo "restart-entry: beam_server.elf exports no _reset symbol;" \
-                   "src/runtime/restart.c must be linked into the beam glue" >&2
+                   "src/pd/beam/restart/restart.c must be linked into the beam glue" >&2
               exit 1
             fi
 
@@ -249,7 +249,7 @@
             for sym in __init_array_start _bss; do
               sym_of beam_server.elf "$sym" > /dev/null || {
                 echo "restart-snapshot: beam_server.elf has no $sym symbol;" \
-                     "src/runtime/restart.c reads the writable-segment bounds" \
+                     "src/pd/beam/restart/restart.c reads the writable-segment bounds" \
                      "from the board's microkit.ld" >&2
                 exit 1
               }
@@ -364,7 +364,7 @@
             ${pkgs.lib.optionalString restartDebug ''
               # Test-only /dev/pd-restart trigger: patch the beam_server-side
               # channel ids of the beam_server -> root debug channels
-              # into beam_server.elf's .pd_restart_config (src/runtime/runtime_pd_restart.c
+              # into beam_server.elf's .pd_restart_config (src/pd/beam/restart/runtime_pd_restart.c
               # reads them there). The first four bytes are healthy restart
               # channels in serial, timer, blk, eth order; the next four are
               # fault-injection channels in the same class order. This matches

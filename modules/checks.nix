@@ -29,7 +29,6 @@
       # Only the attribute names are forced here. Check derivation values are
       # not evaluated, avoiding a dependency from the baseline capture back to
       # the checks whose contracts it inventories.
-      # The A1 snapshot inventories the checks that existed before A3.
       # The ABI projection gate is additional evidence, not a baseline fact.
       phaseZeroCheckNames = pkgs.writeText "chrysopolis-phase-zero-check-names.json" (
         builtins.toJSON (pkgs.lib.subtractLists [ "abi-stale" ] (builtins.attrNames config.checks))

@@ -73,7 +73,7 @@ fn runtimeAbiConfigHeader(b: *std.Build, abi: abi_schema.Contract) *std.Build.St
 //
 //   tools/libmicrokitco  -> the cooperative cothread runtime (lib/libmicrokitco.a)
 //   tools/sddf-drivers   -> the sDDF driver/virtualiser Protection Domains
-//   src/runtime          -> the beam_server PD glue + ERTS link (beam_*.elf)
+//   src/pd/beam          -> the beam_server PD glue + ERTS link (beam_*.elf)
 //
 // They duplicated the same boilerplate: the cross target (one
 // resolveTargetQuery), the Microkit `addPd` recipe (libmicrokit + microkit.ld +
@@ -112,6 +112,23 @@ var microkit_context: microkit.Context = undefined;
 // Shared across every driver PD, built once in build().
 var util: *std.Build.Step.Compile = undefined;
 var util_putchar_debug: *std.Build.Step.Compile = undefined;
+
+// Private BEAM headers remain with their owning subsystem. These are explicit
+// because a source move must not change which headers the glue can see.
+const beam_include_dirs = [_][]const u8{
+    "src/pd/beam/config",
+    "src/pd/beam/compat/fd",
+    "src/pd/beam/compat/poll",
+    "src/pd/beam/compat/pthread",
+    "src/pd/beam/compat/syscall",
+    "src/pd/beam/compat/time",
+    "src/pd/beam/io/console",
+    "src/pd/beam/io/filesystem",
+    "src/pd/beam/io/network",
+    "src/pd/beam/io/timer",
+    "src/pd/beam/restart",
+    "src/pd/beam/security",
+};
 
 // Build + install one sDDF component PD: its sources, the shared sDDF includes,
 // any per-driver include dir, and the shared util libs.
@@ -235,9 +252,9 @@ fn addLwipIncludes(
     mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) }); // musl headers
     mod.addIncludePath(.{ .cwd_relative = libmicrokitco_src }); // libmicrokitco.h
     mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
-    mod.addIncludePath(b.path("src/runtime")); // libmicrokitco_opts.h (beam variant)
+    mod.addIncludePath(b.path("src/pd/beam/compat/pthread")); // libmicrokitco_opts.h (beam variant)
     mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
-    mod.addIncludePath(b.path("src/runtime/lwip_include")); // lwipopts.h, arch/cc.h
+    mod.addIncludePath(b.path("src/pd/beam/io/network/lwip_include")); // lwipopts.h, arch/cc.h
 }
 
 // lib_sddf_lwip.a: the lwIP TCP/IP stack + sDDF glue + LionsOS socket backend,
@@ -301,7 +318,7 @@ fn addLwipLib(
 }
 
 // The Chrysopolis-patched TCP socket backend (it defines the socket_config
-// that sock.c dereferences). Vendored at src/runtime/tcp.c: it lets recv()
+// that sock.c dereferences). Vendored at src/pd/beam/io/tcp.c: it lets recv()
 // drain buffered data after the peer closes the connection (closed_by_peer),
 // validates every socket index the libc layer hands over, and owns the
 // conversions that cross lwIP's u16_t and u8_t boundaries.
@@ -314,7 +331,7 @@ fn addLwipLib(
 // The include paths it needs are the same as lwIP's, but added with
 // addSystemIncludePath so the warnings above apply to this file and not to
 // the musl, seL4, Microkit and sDDF headers it pulls in, which do not compile
-// clean under them and which we do not maintain. Only src/runtime and the
+// clean under them and which we do not maintain. Only our BEAM directories and the
 // vendored lwip_include stay plain -I: those are ours.
 fn addTcpObject(
     b: *std.Build,
@@ -358,11 +375,13 @@ fn addTcpObject(
     else
         &base;
     obj.root_module.addCSourceFile(.{
-        .file = b.path("src/runtime/tcp.c"),
+        .file = b.path("src/pd/beam/io/tcp.c"),
         .flags = tcp_flags,
     });
-    obj.root_module.addIncludePath(b.path("src/runtime"));
-    obj.root_module.addIncludePath(b.path("src/runtime/lwip_include")); // lwipopts.h, arch/cc.h
+    obj.root_module.addIncludePath(b.path("src/pd/beam/io/network"));
+    obj.root_module.addIncludePath(b.path("src/pd/beam/config")); // runtime_network.h -> runtime_lifecycle.h
+    obj.root_module.addIncludePath(b.path("src/pd/beam/compat/pthread")); // libmicrokitco_opts.h
+    obj.root_module.addIncludePath(b.path("src/pd/beam/io/network/lwip_include")); // lwipopts.h, arch/cc.h
     obj.root_module.addSystemIncludePath(target_cfg.sddfPath(b, sddf, "include"));
     obj.root_module.addSystemIncludePath(target_cfg.sddfPath(b, sddf, "include/microkit")); // os/sddf.h
     obj.root_module.addSystemIncludePath(libmicrokit_include); // microkit.h
@@ -417,7 +436,7 @@ pub fn build(b: *std.Build) void {
     // tools/sdf/system.zig): an ELF the system description never references is
     // inert, so production images carry no crasher PD.
     const with_crasher = opts.with_crasher;
-    // Socket-state tracing in src/runtime/tcp.c (TCP_DEBUG). Off by default and
+    // Socket-state tracing in src/pd/beam/io/tcp.c (TCP_DEBUG). Off by default and
     // never set by the images: it prints a line per socket event through
     // microkit_dbg_puts, which is far too chatty for a normal boot but is the
     // only way to see the ERTS/lwIP state races this layer produces. Turn it on
@@ -542,56 +561,56 @@ pub fn build(b: *std.Build) void {
         }),
     });
     glue.root_module.addCSourceFiles(.{
-        .root = b.path("src/runtime"),
+        .root = b.path("src/pd/beam"),
         // restart.c defines _start, replacing libmicrokit.a's crt0.o. That
         // object defines only _start and references only main, so with _start
         // already defined by this object the lazily-linked libmicrokit archive
         // never extracts it and there is no duplicate symbol. It also defines
         // _reset, the entry root resumes this PD at.
         .files = &.{
-            "c23_probe.c",
+            "config/c23_probe.c",
             "main.c",
-            "runtime_lifecycle.c",
-            "runtime_status.c",
-            "runtime_config.c",
-            "runtime_timer.c",
-            "runtime_fs.c",
-            "runtime_network.c",
-            "runtime_payload.c",
-            "runtime_syscalls.c",
-            "runtime_console.c",
-            "runtime_fd.c",
-            "runtime_fd_pair.c",
-            "runtime_sys_fd.c",
-            "runtime_sys_poll.c",
-            "runtime_epoll_table.c",
-            "runtime_sys_time.c",
-            "runtime_sys_sync.c",
-            "runtime_sys_identity.c",
-            "runtime_sys_devices.c",
-            "runtime_pd_restart.c",
-            "runtime_pd_restart_parse.c",
-            "runtime_cothread.c",
-            "runtime_stack.c",
-            "runtime_wait.c",
-            "runtime_pthread_handle.c",
-            "runtime_pthread.c",
-            "runtime_pthread_attr.c",
-            "runtime_pthread_tls.c",
-            "runtime_tls_row.c",
-            "runtime_pthread_locks.c",
-            "runtime_pthread_cond.c",
-            "rng.c",
-            "rng_select.c",
-            "restart.c",
-            "beam_snapshot_codec.c",
+            "config/runtime_lifecycle.c",
+            "config/runtime_status.c",
+            "config/runtime_config.c",
+            "io/timer/runtime_timer.c",
+            "io/filesystem/runtime_fs.c",
+            "io/network/runtime_network.c",
+            "payload/runtime_payload.c",
+            "compat/syscall/runtime_syscalls.c",
+            "io/console/runtime_console.c",
+            "compat/fd/runtime_fd.c",
+            "compat/fd/runtime_fd_pair.c",
+            "compat/fd/runtime_sys_fd.c",
+            "compat/poll/runtime_sys_poll.c",
+            "compat/poll/runtime_epoll_table.c",
+            "compat/time/runtime_sys_time.c",
+            "compat/syscall/runtime_sys_sync.c",
+            "compat/syscall/runtime_sys_identity.c",
+            "compat/syscall/runtime_sys_devices.c",
+            "restart/runtime_pd_restart.c",
+            "restart/runtime_pd_restart_parse.c",
+            "compat/pthread/runtime_cothread.c",
+            "compat/pthread/runtime_stack.c",
+            "compat/pthread/runtime_wait.c",
+            "compat/pthread/runtime_pthread_handle.c",
+            "compat/pthread/runtime_pthread.c",
+            "compat/pthread/runtime_pthread_attr.c",
+            "compat/pthread/runtime_pthread_tls.c",
+            "compat/pthread/runtime_tls_row.c",
+            "compat/pthread/runtime_pthread_locks.c",
+            "compat/pthread/runtime_pthread_cond.c",
+            "security/rng.c",
+            "security/rng_select.c",
+            "restart/restart.c",
+            "restart/beam_snapshot_codec.c",
         },
         .flags = runtime_flags,
     });
 
     if (diagnostic) {
         glue.root_module.addCSourceFile(.{
-            .file = b.path("src/runtime/runtime_thread_probe.c"),
+            .file = b.path("src/pd/beam/compat/pthread/runtime_thread_probe.c"),
             .flags = runtime_flags,
         });
     }
@@ -602,12 +621,13 @@ pub fn build(b: *std.Build) void {
         diagnostics.addContractProbes(
             b,
             glue.root_module,
-            b.path("src/runtime/runtime_contract_header_probe.c"),
+            b.path("src/pd/beam/config/runtime_contract_header_probe.c"),
             runtime_flags,
         );
     }
 
-    glue.root_module.addIncludePath(b.path("src/runtime")); // libmicrokitco_opts.h
+    glue.root_module.addIncludePath(b.path("src/pd/beam")); // owner-qualified diagnostic probes
+    for (beam_include_dirs) |dir| glue.root_module.addIncludePath(b.path(dir));
     glue.root_module.addConfigHeader(generated_abi);
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
@@ -621,7 +641,7 @@ pub fn build(b: *std.Build) void {
     // lwIP headers: runtime_network.c includes this header, which pulls
     // lwip/pbuf.h -> lwipopts.h + arch/cc.h from our vendored lwip_include.
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
-    glue.root_module.addIncludePath(b.path("src/runtime/lwip_include"));
+    glue.root_module.addIncludePath(b.path("src/pd/beam/io/network/lwip_include"));
     // <bearssl.h> for rng.c's HMAC-DRBG calls.
     glue.root_module.addSystemIncludePath(bearssl_dep.path("inc"));
 
@@ -632,7 +652,7 @@ pub fn build(b: *std.Build) void {
     const tcp_obj = addTcpObject(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src, tcp_debug, diagnostic);
 
     // libbearssl_drbg.a: a five-file subset of BearSSL (HMAC_DRBG/SHA-256,
-    // NIST SP 800-90A) backing src/runtime/rng.c. We compile only what the DRBG
+    // NIST SP 800-90A) backing src/pd/beam/security/rng.c. We compile only what the DRBG
     // needs, not a whole TLS stack; the deliberate choice NOT to hand-roll the
     // CSPRNG. inner.h pulls <string.h>/<limits.h> (musl, via lions_libc),
     // "config.h" (BearSSL's default, in src/) and "bearssl.h" (in inc/).

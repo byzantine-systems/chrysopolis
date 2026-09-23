@@ -177,7 +177,7 @@ pub fn validate(contract: Contract) !void {
     const reset_stack_top = try std.math.add(u64, snapshot.reset_stack_offset, snapshot.reset_stack_size);
     const survivors_end = try std.math.add(u64, snapshot.survivors_offset, snapshot.survivors_size);
     if (snapshot.reset_stack_offset < page_size or reset_stack_top > snapshot.survivors_offset) return error.InvalidResetStackLayout;
-    // src/runtime/restart.c's _reset installs this top as SP (AAPCS64 wants it
+    // src/pd/beam/restart/restart.c's _reset installs this top as SP (AAPCS64 wants it
     // 16-byte aligned) and loads it with a 16-bit `mov` immediate.
     if (reset_stack_top % 16 != 0 or reset_stack_top > 0xffff) return error.InvalidResetStackLayout;
     if (survivors_end > snapshot.data_offset or snapshot.data_offset >= snapshot.size) return error.InvalidSnapshotDataLayout;

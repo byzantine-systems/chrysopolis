@@ -30,7 +30,7 @@
  *     few .bss words; beam_server holds ~28 MiB of ERTS, libc and cothread
  *     state, so it resets that memory itself before re-entering the normal boot
  *     path. Root's part is only knowing which of the two entry points to use;
- *     the mechanism lives in src/runtime/restart.c.
+ *     the mechanism lives in src/pd/beam/restart/restart.c.
  *
  * Identifiers:
  *   - Microkit child ids and channel ids are separate id spaces
@@ -77,8 +77,9 @@
  *     in a Microkit restart re-zeroes .bss or reloads .data, and beam_server
  *     carries ~28 MiB of ERTS and libc state that has to be pristine before the
  *     emulator can boot again. _reset is the trampoline that restores that
- *     memory and then enters the normal boot (see src/runtime/restart.c).
- *     modules/images.nix resolves that symbol with llvm-nm and patches it in.
+ *     memory and then enters the normal boot (see
+ * src/pd/beam/restart/restart.c). modules/images.nix resolves that symbol with
+ * llvm-nm and patches it in.
  *
  * The initializers are the fallback for an un-patched build. A zero
  * beam_reset_entry means "not patched", which root treats as "beam_server is

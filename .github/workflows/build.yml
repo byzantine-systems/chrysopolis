@@ -49,7 +49,7 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - run: nix build .#checks.x86_64-linux.test-modules --print-build-logs
 
-  # Host tests for the pure runtime logic in src/runtime (tests/host). A native
+  # Host tests for the pure BEAM logic in src/pd/beam (tests/host). A native
   # Zig build with no cross inputs, so it also runs beside the image build and
   # fails in seconds on a broken boundary or state transition.
   runtime-host-tests:

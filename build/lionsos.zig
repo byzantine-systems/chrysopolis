@@ -28,7 +28,7 @@ pub fn buildLibraries(
     microkitco.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libco", .{libmicrokitco_src}) });
     microkitco.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
     microkitco.root_module.addIncludePath(ctx.libmicrokit_include);
-    microkitco.root_module.addIncludePath(b.path("src/runtime"));
+    microkitco.root_module.addIncludePath(b.path("src/pd/beam/compat/pthread"));
     b.installArtifact(microkitco);
 
     const util = b.addLibrary(.{
