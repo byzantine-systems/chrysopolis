@@ -88,7 +88,7 @@ pub fn main() !void {
     var root = Pd.create(allocator, "root", "root.elf", .{ .priority = 254 });
     sdf.addProtectionDomain(&root);
 
-    // Child ids come from runtime-abi.json rather than sdfgen's allocator. The
+    // Child ids come from system_abi.zig rather than sdfgen's allocator. The
     // id is what root's fault()/notified() receive to identify which child to
     // restart, so changing it is an ABI change shared with src/runtime/root.c.
     // Child ids and channel ids are SEPARATE Microkit id spaces (microkit_child
@@ -122,7 +122,7 @@ pub fn main() !void {
     // gets restored; that is the role rust-sel4's sel4-reset gives its
     // .persistent section.
     //
-    // The size and internal offsets come from runtime-abi.json for both this
+    // The size and internal offsets come from system_abi.zig for both this
     // generator and restart.c. modules/images.nix also checks that the region
     // is large enough for the ELF that was actually linked.
     //
@@ -334,7 +334,7 @@ pub fn main() !void {
     // Microkit notify has no payload, so a single channel would need a shared
     // memory command word.
     //
-    // Both ends come from runtime-abi.json. Root's ids map onto the healthy
+    // Both ends come from system_abi.zig. Root's ids map onto the healthy
     // ROOT_DEBUG_CH_* and fault ROOT_FAULT_CH_* groups in src/runtime/root.c.
     // beam_server's ids are allocated high and out of the way of the serial/timer/net/fs
     // channels sdfgen allocates from 0 upwards: beam_server learns every other

@@ -25,19 +25,22 @@ Chrysopolis aims to run the BEAM on the [seL4 microkernel](https://sel4.systems/
 
 ### Build-time ABI
 
-[`tools/sdf/runtime-abi.json`](tools/sdf/runtime-abi.json) is currently the shared value authority
-for child and channel IDs, restart limits, fixed virtual-memory regions, ELF config sections, and
-the mapping from generated sDDF blobs to PD images. [`tools/sdf/abi.zig`](tools/sdf/abi.zig)
-deserializes it into a concrete Zig `Contract` and rejects invalid versions, layouts, ranges,
-collisions, and section mappings. Nix reads the same JSON during evaluation, while both Zig builds
-consume the validated contract.
+[`interfaces/system_abi.zig`](interfaces/system_abi.zig) owns child and channel IDs, restart
+limits, fixed virtual-memory regions, ELF config sections, and the mapping from generated sDDF
+blobs to PD images. The host-only [`tools/abi`](tools/abi) generator validates the typed contract
+and emits [`interfaces/generated/system-abi.json`](interfaces/generated/system-abi.json) for pure
+Nix evaluation. Both Zig builds validate that generated projection before consuming it.
+Regenerate the projection with `nix build .#abi-tool` followed by
+`result/bin/gen-system-abi interfaces/generated/system-abi.json`; the
+`abi-stale` flake check rejects a stale or hand-edited copy.
 
 ```mermaid
 flowchart LR
-    abi["runtime-abi.json<br/>shared values"] --> validator["abi.zig<br/>typed parse + invariants"]
-    validator --> sdf["tools/sdf<br/>system.sdf + config blobs"]
-    validator --> native["build.zig<br/>runtime_abi.h + PD ELFs"]
-    abi --> nix["Nix evaluation<br/>section injection + checks"]
+    abi["system_abi.zig<br/>typed values + invariants"] --> generator["tools/abi<br/>JSON projection"]
+    generator --> json["system-abi.json"]
+    json --> sdf["tools/sdf<br/>system.sdf + config blobs"]
+    json --> native["build.zig<br/>runtime_abi.h + PD ELFs"]
+    json --> nix["Nix evaluation<br/>section injection + checks"]
     sdf --> image["Microkit image"]
     native --> image
     nix --> image

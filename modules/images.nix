@@ -19,7 +19,7 @@
       ...
     }:
     let
-      runtimeAbi = builtins.fromJSON (builtins.readFile ../tools/sdf/runtime-abi.json);
+      runtimeAbi = builtins.fromJSON (builtins.readFile ../interfaces/generated/system-abi.json);
       inherit (runtimeAbi) config_sections;
       drivers = runtimeAbi.drivers;
 
@@ -33,13 +33,17 @@
       # build.zig.zon + committed build.zig.zon2json-lock and fetches the
       # sdfgen/dtb/sddf Zig packages through Nix, so `zig build` runs
       # offline. A host tool (we run it at build time to emit the SDF).
-      zigSdfTool = chryso.zigEnv.package {
-        src = ../tools/sdf;
-      };
+      sdfToolSource = pkgs.runCommand "chrysopolis-sdf-tool-source" { } ''
+        mkdir -p $out
+        cp -r ${../tools/sdf}/. $out/
+        cp ${../interfaces/system_abi.zig} $out/system_abi.zig
+        cp ${../interfaces/generated/system-abi.json} $out/system-abi.json
+      '';
+      zigSdfTool = chryso.zigEnv.package { src = sdfToolSource; };
 
       # Which gen-sdf config blob lands in which ELF section, as data rather
       # than as twenty near-identical shell lines. The objcopy loop below is
-      # generated from runtime-abi.json, which keeps the mapping readable and
+      # generated from the typed system ABI, which keeps the mapping readable and
       # makes an addition one manifest edit.
       #
       # Worth knowing when this list changes: sdfgen writes the blob and an
@@ -256,7 +260,7 @@
             if [ "$data_len" -gt "$data_capacity" ]; then
               echo "restart-snapshot: beam_server's writable data is $data_len bytes," \
                    "which exceeds the $data_capacity byte snapshot data area;" \
-                   "raise the snapshot size in tools/sdf/runtime-abi.json" >&2
+                   "raise the snapshot size in interfaces/system_abi.zig" >&2
               exit 1
             fi
             echo "restart-snapshot: data=$data_len/$data_capacity bytes"

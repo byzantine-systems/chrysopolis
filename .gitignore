@@ -59,6 +59,7 @@ dkms.conf
 # ---
 .zig-cache/
 zig-out/
+zig-pkg/
 *.o
 
 # Keep the root Zig build's imported helpers under build/. Ignore generated

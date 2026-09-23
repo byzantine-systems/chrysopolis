@@ -10,13 +10,18 @@
   perSystem =
     {
       pkgs,
+      inputs',
       config,
       chryso,
       ...
     }:
     let
-      runtimeAbi = builtins.fromJSON (builtins.readFile ../tools/sdf/runtime-abi.json);
+      runtimeAbi = builtins.fromJSON (builtins.readFile ../interfaces/generated/system-abi.json);
       drivers = runtimeAbi.drivers;
+      abiToolDeps = chryso.zigEnv.deriveLockFile ../tools/abi/build.zig.zon2json-lock {
+        inherit (chryso.zigEnv) zig;
+        name = "chrysopolis-abi-dependencies";
+      };
       hex = value: "0x${pkgs.lib.toHexString value}";
 
       # The behavioral baseline documents every check visible in the final
@@ -24,13 +29,15 @@
       # Only the attribute names are forced here. Check derivation values are
       # not evaluated, avoiding a dependency from the baseline capture back to
       # the checks whose contracts it inventories.
+      # The A1 snapshot inventories the checks that existed before A3.
+      # The ABI projection gate is additional evidence, not a baseline fact.
       phaseZeroCheckNames = pkgs.writeText "chrysopolis-phase-zero-check-names.json" (
-        builtins.toJSON (builtins.attrNames config.checks)
+        builtins.toJSON (pkgs.lib.subtractLists [ "abi-stale" ] (builtins.attrNames config.checks))
       );
 
       capturePhaseZeroBaseline = output: ''
         ${pkgs.python3}/bin/python ${../nix/capture-phase-zero-baseline.py} \
-          --abi ${../tools/sdf/runtime-abi.json} \
+          --abi ${../interfaces/generated/system-abi.json} \
           --flake-lock ${../flake.lock} \
           --host-build ${../tests/host/build.zig} \
           --contracts ${../baselines/phase-zero/contracts.json} \
@@ -57,7 +64,7 @@
       checkTopology = mode: image: sdf: ''
         ${pkgs.lib.getExe config.packages.check-restart-topology} \
           ${image}/report.txt ${sdf}/system.sdf \
-          ${chryso.boardDir}/include/microkit.h ${../tools/sdf/runtime-abi.json} \
+          ${chryso.boardDir}/include/microkit.h ${../interfaces/generated/system-abi.json} \
           ${mode}
       '';
     in
@@ -65,6 +72,32 @@
       # The report.txt parser behind the restart-topology check, exposed so it
       # can be run by hand against a modified report or SDF.
       packages = {
+        abi-tool =
+          let
+            source = pkgs.lib.fileset.toSource {
+              root = ../.;
+              fileset = pkgs.lib.fileset.unions [
+                ../tools/abi
+                ../interfaces/system_abi.zig
+              ];
+            };
+          in
+          pkgs.stdenvNoCC.mkDerivation {
+            name = "chrysopolis-abi-tool";
+            src = source;
+            nativeBuildInputs = [ inputs'.zig2nix.packages."zig-0_15_2" ];
+            buildPhase = ''
+              runHook preBuild
+              export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+              mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
+              ln -s ${abiToolDeps} "$ZIG_GLOBAL_CACHE_DIR"/p
+              zig test interfaces/system_abi.zig
+              cd tools/abi
+              zig build --prefix $out -Doptimize=ReleaseSafe
+              runHook postBuild
+            '';
+            dontInstall = true;
+          };
         check-restart-topology = pkgs.writeShellApplication {
           name = "check-restart-topology";
           runtimeInputs = [
@@ -91,6 +124,13 @@
       };
 
       checks = {
+        abi-stale = pkgs.runCommand "chrysopolis-abi-stale" { } ''
+          ${config.packages.abi-tool}/bin/gen-system-abi first.json
+          ${config.packages.abi-tool}/bin/gen-system-abi second.json
+          cmp first.json second.json
+          cmp first.json ${../interfaces/generated/system-abi.json}
+          touch $out
+        '';
         # Compile gate for the console-driving probes in tests/. Exposed as a
         # named check, not left as a transitive dependency of .#disk, so that a
         # typo in an .erl file fails in seconds instead of behind a multi-minute
@@ -276,7 +316,7 @@
           # which PDs fault to Root, their entry and priority, Root's TCB caps
           # and the notification caps between Root and its peers, read from
           # report.txt and cross-checked against the generated SDF and
-          # runtime-abi.json. Both images, because the restart image adds the
+          # system-abi.json. Both images, because the restart image adds the
           # crasher and the debug channels and production must have neither.
           restart-topology = pkgs.runCommand "chrysopolis-restart-topology" { } ''
             ${checkTopology "production" config.packages.default config.packages.sdf}

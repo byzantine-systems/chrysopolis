@@ -1,10 +1,10 @@
 # Verify Root's restart topology in a synthesised image.
 #
 # Usage: check-restart-topology <report.txt> <system.sdf> <microkit.h> \
-#          <runtime-abi.json> production|restart
+#          <system-abi.json> production|restart
 #
 # The generated SDF says what we asked for; the Microkit tool's report.txt says
-# what it built. This checks the second against runtime-abi.json and the first:
+# what it built. This checks the second against system-abi.json and the first:
 # which PDs fault to Root, at what entry and priority, which TCB caps Root
 # holds, and which notification caps connect Root to its peers.
 #
@@ -15,7 +15,7 @@
 # vacuously. Cap slot bases come from the SDK's own microkit.h.
 
 usage() {
-  echo "usage: check-restart-topology <report.txt> <system.sdf> <microkit.h> <runtime-abi.json> production|restart" >&2
+  echo "usage: check-restart-topology <report.txt> <system.sdf> <microkit.h> <system-abi.json> production|restart" >&2
   exit 2
 }
 
@@ -118,7 +118,7 @@ sdf_attr() {
   ' "$sdf"
 }
 
-# Root's children, by PD name, from runtime-abi.json. The crasher exists only
+# Root's children, by PD name, from system-abi.json. The crasher exists only
 # in the restart image.
 declare -A children=()
 while read -r name id; do

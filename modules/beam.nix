@@ -37,8 +37,8 @@
               ../build.zig.zon2json-lock
               ../build
               ../src/runtime
-              ../tools/sdf/abi.zig
-              ../tools/sdf/runtime-abi.json
+              ../interfaces/system_abi.zig
+              ../interfaces/generated/system-abi.json
             ];
           };
 

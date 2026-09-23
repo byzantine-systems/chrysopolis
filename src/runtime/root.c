@@ -37,7 +37,7 @@
  *     (BASE_TCB_CAP versus BASE_OUTPUT_NOTIFICATION_CAP) that are both plain
  *     unsigned ints. Past the entry points Root carries them as root_child and
  *     root_channel (root_policy.h), and a root_child exists only once the raw
- *     id has been checked against the set of children runtime-abi.json
+ *     id has been checked against the set of children system_abi.zig
  *     declares. An id outside that set never reaches a capability invocation.
  *
  * Child lifecycle:
@@ -58,7 +58,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Compile-time fallback child ELF entry point from runtime-abi.json. Image
+/* Compile-time fallback child ELF entry point from system_abi.zig. Image
  * assembly replaces it with the actual linked child entry after checking that
  * every restartable child agrees. The fallback covers a by-hand `zig build`
  * plus `microkit` run where nothing patches the section. */
@@ -111,7 +111,7 @@ __attribute__((__section__(ROOT_RESTART_CONFIG_SECTION),
 #define beam_reset_entry (restart_config.beam_reset_entry)
 
 /*
- * The children runtime-abi.json declares, one bit per child id. fault() only
+ * The children system_abi.zig declares, one bit per child id. fault() only
  * turns a raw id into a root_child when its bit is set, so the budget table is
  * never indexed and BASE_TCB_CAP + id is never invoked for anything else.
  * The crasher's bit is set in every image; in production no PD holds that
@@ -155,7 +155,7 @@ static_assert(BASE_TCB_CAP + ROOT_MAX_CHILDREN <= BASE_VM_TCB_CAP,
  * first group lets a test restart a HEALTHY driver on demand. The second group
  * resumes that driver at address 0, making the real driver PD take an
  * instruction fault that returns through fault() and the ordinary restart
- * policy. Both channel and child ids come from runtime-abi.json and map 1:1.
+ * policy. Both channel and child ids come from system_abi.zig and map 1:1.
  *
  * Note these are microkit_channel ids, a SEPARATE id space from the
  * microkit_child ids they map to (BASE_OUTPUT_NOTIFICATION_CAP vs
@@ -204,7 +204,7 @@ static const root_child
 };
 
 /*
- * Give-up notification channels, shared through runtime-abi.json.
+ * Give-up notification channels, shared through system_abi.zig.
  *
  * Unlike the debug-restart channels above these exist in EVERY image, including
  * production. They carry the one thing only root can report: that a child has

@@ -1,0 +1,13 @@
+.{
+    .name = .chrysopolis_abi,
+    .version = "0.0.0",
+    .fingerprint = 0x825a5923ee295fdc,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .serde = .{
+            .url = "https://github.com/OrlovEvgeny/serde.zig/archive/refs/tags/v1.0.6.tar.gz",
+            .hash = "serde-1.0.1-1DszT7B_DQByGB4OA1ofuxMNznusFipIeMMqCeXbu2cY",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+}

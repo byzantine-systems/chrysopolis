@@ -64,7 +64,7 @@
 }:
 let
   qemu = "${pkgs.qemu}/bin/qemu-system-aarch64";
-  runtimeAbi = builtins.fromJSON (builtins.readFile ./tools/sdf/runtime-abi.json);
+  runtimeAbi = builtins.fromJSON (builtins.readFile ./interfaces/generated/system-abi.json);
   serialChild = toString (builtins.elemAt runtimeAbi.drivers 0).child;
   timerChild = toString (builtins.elemAt runtimeAbi.drivers 1).child;
   blkChild = toString (builtins.elemAt runtimeAbi.drivers 2).child;

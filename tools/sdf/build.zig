@@ -1,5 +1,5 @@
 const std = @import("std");
-const abi_schema = @import("abi.zig");
+const abi_schema = @import("system_abi.zig");
 
 // Builds the gen-sdf tool. The sdfgen dependency is resolved through the
 // Zig package manager (build.zig.zon), with zig2nix supplying the fetched
@@ -14,8 +14,8 @@ pub fn build(b: *std.Build) void {
 
     const sdfgen = b.dependency("sdfgen", .{});
 
-    const abi = abi_schema.load(b.allocator, "runtime-abi.json") catch |err| {
-        std.debug.panic("invalid runtime-abi.json: {s}", .{@errorName(err)});
+    const abi = abi_schema.load(b.allocator, "system-abi.json") catch |err| {
+        std.debug.panic("invalid system-abi.json: {s}", .{@errorName(err)});
     };
     const abi_options = b.addOptions();
     abi_options.addOption(u8, "child_serial", abi.drivers[0].child);

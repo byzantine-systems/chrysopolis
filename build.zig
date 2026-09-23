@@ -1,5 +1,5 @@
 const std = @import("std");
-const abi_schema = @import("tools/sdf/abi.zig");
+const abi_schema = @import("interfaces/system_abi.zig");
 const cflags = @import("build/cflags.zig");
 const components = @import("build/components.zig");
 const diagnostics = @import("build/diagnostics.zig");
@@ -382,8 +382,8 @@ pub fn build(b: *std.Build) void {
     const first_party_optimize: std.builtin.OptimizeMode = if (diagnostic) .ReleaseSafe else .ReleaseFast;
     const first_party_flags = cflags.firstParty(diagnostic);
     const runtime_flags = cflags.runtime(diagnostic);
-    const runtime_abi = abi_schema.load(b.allocator, "tools/sdf/runtime-abi.json") catch |err| {
-        std.debug.panic("invalid tools/sdf/runtime-abi.json: {s}", .{@errorName(err)});
+    const runtime_abi = abi_schema.load(b.allocator, "interfaces/generated/system-abi.json") catch |err| {
+        std.debug.panic("invalid interfaces/generated/system-abi.json: {s}", .{@errorName(err)});
     };
     const generated_abi = runtimeAbiConfigHeader(b, runtime_abi);
 
