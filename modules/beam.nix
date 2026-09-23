@@ -35,6 +35,7 @@
               ../build.zig
               ../build.zig.zon
               ../build.zig.zon2json-lock
+              ../build
               ../src/runtime
               ../tools/sdf/abi.zig
               ../tools/sdf/runtime-abi.json

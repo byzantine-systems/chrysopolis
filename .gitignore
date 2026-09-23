@@ -54,22 +54,38 @@ dkms.conf
 # debug information files
 *.dwo
 
+# ---
 # Zig
+# ---
 .zig-cache/
 zig-out/
 *.o
 
+# Keep the root Zig build's imported helpers under build/. Ignore generated
+# build products while retaining the checked-in Zig source modules.
+/build/*
+!/build/
+!/build/*.zig
+
+# ---
 # BEAM Project artifacts
-/build/
+# ---
 # rebar3's output tree for tests/ (see rebar.config). /ebin is where
 # `rebar3 bare compile` lands, which is the form the Nix build uses.
 /_build/
 /ebin/
 
-# Misc.
+# ---
+# Nix
+# ---
 /result*
 .devenv*
 .direnv/
+
+# -----
+# Misc.
+# -----
 .env
+
 ## QEMU stuff
 *.img
