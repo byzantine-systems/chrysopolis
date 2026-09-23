@@ -542,7 +542,7 @@ pub fn build(b: *std.Build) void {
 
     if (with_crasher) {
         const crasher_pd = microkit.addPd(microkit_context, "crasher.elf", target, first_party_optimize);
-        crasher_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/crasher.c"), .flags = first_party_flags });
+        crasher_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/test_support/crasher.c"), .flags = first_party_flags });
         b.installArtifact(crasher_pd);
     }
 

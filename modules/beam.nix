@@ -36,9 +36,9 @@
               ../build.zig.zon
               ../build.zig.zon2json-lock
               ../build
-              ../src/runtime
               ../src/pd/beam
               ../src/pd/root
+              ../src/pd/test_support
               ../interfaces/system_abi.zig
               ../interfaces/generated/system-abi.json
             ];

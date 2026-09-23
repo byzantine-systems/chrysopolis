@@ -24,7 +24,9 @@
         "build.zig",
         "build.zig.zon",
         "build.zig.zon2json-lock",
-        "src/runtime",
         "src/pd/beam",
+        "src/pd/root",
+        "src/pd/smp",
+        "src/pd/test_support",
     },
 }
