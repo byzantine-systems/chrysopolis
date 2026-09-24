@@ -471,10 +471,14 @@
               otp=${otp}
               rel=$(ls $otp/releases | grep -E '^[0-9]+$' | head -1)
 
+              # FAT stores local timestamps. Pin the clock, zone and generated
+              # identifiers so identical derivations produce identical bytes.
+              export SOURCE_DATE_EPOCH=315532800 TZ=UTC
+
               # Build a populated FAT32 partition image.
               part=part.fat
               truncate -s 96M $part
-              mkfs.fat -F 32 -n CHRYSO $part
+              mkfs.fat --invariant -F 32 -n CHRYSO $part
               export MTOOLS_SKIP_CHECK=1
 
               mmd -i $part ::/dev ::/bin ::/lib ::/releases "::/releases/$rel"
@@ -528,6 +532,7 @@
               off=2048
               truncate -s 100M $out
               echo "label: dos
+              label-id: 0x43485259
               start=$off, type=c" | sfdisk $out
               dd if=$part of=$out bs=512 seek=$off conv=notrunc status=none
             '';
