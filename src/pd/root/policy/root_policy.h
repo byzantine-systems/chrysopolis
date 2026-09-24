@@ -51,16 +51,22 @@ typedef enum : uint8_t {
   root_child_gone,
 } root_child_state;
 
-/* Per-child restart accounting. A zero-initialised record is a live child
- * that has not been restarted. */
+/* Per-child restart accounting. Lifetime never decays. A zero-initialised
+ * record is live and has never been restarted. The timestamp-valid bit lets
+ * tick zero be the first real charge. */
 typedef struct {
-  unsigned int count;
+  unsigned int lifetime_count;
+  unsigned int window_count;
+  uint64_t last_charge_ticks;
+  bool last_charge_valid;
   root_child_state state;
 } root_child_record;
 
 typedef enum {
   root_restart_resume,
   root_restart_giveup_budget_exhausted,
+  root_restart_giveup_window_exhausted,
+  root_restart_giveup_lifetime_exhausted,
   /* The image carries no entry point for this child. */
   root_restart_giveup_no_entry,
   /* The child is already gone: make no Microkit call at all. */
@@ -82,7 +88,7 @@ root_restart_decide(const root_child_record *record, unsigned int budget,
   if (record->state == root_child_gone) {
     return root_restart_ignore_gone;
   }
-  if (record->count >= budget) {
+  if (record->lifetime_count >= budget) {
     return root_restart_giveup_budget_exhausted;
   }
   if (entry == 0) {
@@ -94,7 +100,7 @@ root_restart_decide(const root_child_record *record, unsigned int budget,
 /* Charge one restart. Only valid after root_restart_resume, which bounds the
  * count below the budget, so the increment cannot wrap. */
 static inline void root_record_charge(root_child_record *record) {
-  record->count++;
+  record->lifetime_count++;
 }
 
 /* Mark a child gone. Idempotent. */
@@ -108,6 +114,10 @@ root_restart_giveup_reason(root_restart_action action) {
   switch (action) {
   case root_restart_giveup_budget_exhausted:
     return "budget-exhausted";
+  case root_restart_giveup_window_exhausted:
+    return "window-exhausted";
+  case root_restart_giveup_lifetime_exhausted:
+    return "lifetime-exhausted";
   case root_restart_giveup_no_entry:
     return "no-restart-entry";
   case root_restart_resume:
@@ -115,6 +125,152 @@ root_restart_giveup_reason(root_restart_action action) {
     break;
   }
   return "";
+}
+
+/* Root has no timer notification. It samples this counter at init and on
+ * events; a backwards sample permanently disables time-based decisions. */
+typedef enum {
+  root_clock_ok,
+  root_clock_bad_frequency,
+  root_clock_regressed,
+  root_clock_bad_interval,
+  root_clock_interval_overflow,
+} root_clock_result;
+
+typedef struct {
+  uint64_t ticks_per_ms;
+  uint64_t last_ticks;
+  bool seen;
+  bool available;
+} root_clock;
+
+[[__nodiscard__]] static inline root_clock_result
+root_clock_init(root_clock *clock, uint64_t frequency_hz, uint64_t minimum_hz,
+                uint64_t maximum_hz) {
+  *clock = (root_clock){};
+  if (minimum_hz < 1000 || minimum_hz > maximum_hz ||
+      frequency_hz < minimum_hz || frequency_hz > maximum_hz) {
+    return root_clock_bad_frequency;
+  }
+  /* Round up so a policy window never refills earlier than requested. */
+  clock->ticks_per_ms = frequency_hz / 1000 + (frequency_hz % 1000 != 0);
+  clock->available = true;
+  return root_clock_ok;
+}
+
+[[__nodiscard__]] static inline root_clock_result
+root_clock_observe(root_clock *clock, uint64_t ticks) {
+  if (!clock->available) {
+    return root_clock_bad_frequency;
+  }
+  if (clock->ticks_per_ms == 0) {
+    clock->available = false;
+    return root_clock_bad_frequency;
+  }
+  if (clock->seen && ticks < clock->last_ticks) {
+    clock->available = false;
+    return root_clock_regressed;
+  }
+  clock->seen = true;
+  clock->last_ticks = ticks;
+  return root_clock_ok;
+}
+
+[[__nodiscard__]] static inline root_clock_result
+root_clock_interval(const root_clock *clock, uint64_t milliseconds,
+                    uint64_t *ticks) {
+  if (!clock->available || clock->ticks_per_ms == 0) {
+    return root_clock_bad_frequency;
+  }
+  if (milliseconds == 0) {
+    return root_clock_bad_interval;
+  }
+  if (milliseconds > UINT64_MAX / clock->ticks_per_ms) {
+    return root_clock_interval_overflow;
+  }
+  *ticks = milliseconds * clock->ticks_per_ms;
+  return root_clock_ok;
+}
+
+/* One event consumes one window and one lifetime token. The caller commits
+ * next before invoking Microkit, so an immediate refault sees the charge. */
+typedef struct {
+  unsigned int capacity;
+  unsigned int lifetime_limit;
+  uint64_t leak_interval_ticks;
+} root_budget_policy;
+
+typedef enum {
+  root_timed_valid,
+  root_timed_invalid_policy,
+  root_timed_invalid_record,
+  root_timed_clock_regressed,
+} root_timed_error;
+
+typedef struct {
+  root_timed_error error;
+  root_restart_action action;
+  root_child_record next;
+} root_timed_decision;
+
+[[__nodiscard__]] static inline root_timed_decision
+root_restart_decide_at(const root_child_record *record,
+                       const root_budget_policy *policy, uint64_t entry,
+                       uint64_t now_ticks) {
+  root_timed_decision result = {
+      .error = root_timed_valid,
+      .action = root_restart_ignore_gone,
+      .next = *record,
+  };
+  if (record->state == root_child_gone) {
+    return result;
+  }
+  if (policy->capacity == 0 || policy->lifetime_limit == 0 ||
+      policy->leak_interval_ticks == 0) {
+    result.error = root_timed_invalid_policy;
+    return result;
+  }
+  if (record->window_count > policy->capacity ||
+      record->last_charge_valid != (record->window_count != 0)) {
+    result.error = root_timed_invalid_record;
+    return result;
+  }
+  if (record->last_charge_valid && now_ticks < record->last_charge_ticks) {
+    result.error = root_timed_clock_regressed;
+    return result;
+  }
+  if (record->lifetime_count >= policy->lifetime_limit) {
+    result.action = root_restart_giveup_lifetime_exhausted;
+    return result;
+  }
+
+  if (record->last_charge_valid) {
+    const uint64_t elapsed = now_ticks - record->last_charge_ticks;
+    const uint64_t leaked = elapsed / policy->leak_interval_ticks;
+    if (leaked >= record->window_count) {
+      result.next.window_count = 0;
+      result.next.last_charge_valid = false;
+    } else if (leaked != 0) {
+      result.next.window_count -= (unsigned int)leaked;
+      result.next.last_charge_ticks += leaked * policy->leak_interval_ticks;
+    }
+  }
+  if (result.next.window_count >= policy->capacity) {
+    result.action = root_restart_giveup_window_exhausted;
+    return result;
+  }
+  if (entry == 0) {
+    result.action = root_restart_giveup_no_entry;
+    return result;
+  }
+  if (result.next.window_count == 0) {
+    result.next.last_charge_ticks = now_ticks;
+    result.next.last_charge_valid = true;
+  }
+  result.next.window_count++;
+  result.next.lifetime_count++;
+  result.action = root_restart_resume;
+  return result;
 }
 
 /*

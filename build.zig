@@ -38,6 +38,8 @@ fn runtimeAbiConfigHeader(b: *std.Build, abi: abi_schema.Contract) *std.Build.St
         .ROOT_GONE_CH_NONE = @as(i64, abi.microkit.absent_id),
         .ROOT_RESTART_BUDGET = @as(i64, abi.restart.driver_budget),
         .ROOT_BEAM_RESTART_BUDGET = @as(i64, abi.restart.beam_budget),
+        .ROOT_CLOCK_MIN_HZ = @as(i64, @intCast(abi.restart.clock_min_hz)),
+        .ROOT_CLOCK_MAX_HZ = @as(i64, @intCast(abi.restart.clock_max_hz)),
         .MICROKIT_RESTART_ENTRY = @as(i64, @intCast(abi.restart.entry_fallback)),
         .ROOT_RESTART_CONFIG_WORDS = @as(i64, abi.restart.config_words),
         .ROOT_RESTART_CONFIG_WORD_BYTES = @as(i64, abi.restart.word_bytes),
@@ -539,6 +541,22 @@ pub fn build(b: *std.Build) void {
     // collected the section.
     root_pd.link_gc_sections = false;
     b.installArtifact(root_pd);
+
+    if (with_crasher) {
+        // A separate ELF exercises the timed policy under QEMU. It is staged
+        // only by budget-decay-image; production still uses root.elf and the
+        // unchanged lifetime-only selector. Both consume the same ABI header.
+        const test_root_flags = b.allocator.alloc([]const u8, first_party_flags.len + 1) catch @panic("allocating Root test flags");
+        @memcpy(test_root_flags[0..first_party_flags.len], first_party_flags);
+        test_root_flags[first_party_flags.len] = "-DROOT_TEST_BUDGET=1";
+        const root_test_source = b.path("src/pd/root/main.c");
+        const test_root = microkit.addPd(microkit_context, "root_budget_test.elf", target, first_party_optimize);
+        test_root.root_module.addCSourceFile(.{ .file = root_test_source, .flags = test_root_flags });
+        test_root.root_module.addIncludePath(b.path("src/pd/root/policy"));
+        test_root.root_module.addConfigHeader(generated_abi);
+        test_root.link_gc_sections = false;
+        b.installArtifact(test_root);
+    }
 
     if (with_crasher) {
         const crasher_pd = microkit.addPd(microkit_context, "crasher.elf", target, first_party_optimize);

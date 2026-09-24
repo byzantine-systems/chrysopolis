@@ -69,10 +69,13 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
       # Everything the smoke tests boot: the ERTS-linked image, the bring-up
-      # image (socket-smoke), the restart image (the *-restart-smoke checks) and
-      # the FAT disk they all attach. Built once here so the fanned-out test jobs
+      # image, the restart and budget-decay images, and their FAT disk. Built
+      # once here so the fanned-out test jobs
       # restore them from the cache instead of each rebuilding them.
-      - run: nix build .#test-image .#default .#disk .#restart-image --print-build-logs
+      - run: nix build .#test-image .#default .#disk .#restart-image .#budget-decay-image --print-build-logs
+      # Generate the normalized artifact baseline from these images and check
+      # its compact fingerprint against the reviewed value in the repository.
+      - run: nix build .#checks.x86_64-linux.phase-zero-baseline --print-build-logs
 
   # Root's restart topology read from the Microkit tool's report.txt for both
   # the production and restart images: entries, priorities, fault endpoints,
@@ -105,6 +108,9 @@ jobs:
           # Fault detection: root catches a deliberately faulting child, restarts
           # it until the budget is spent, then gives up.
           - restart-smoke
+          # The test Root refills a timed window while retaining a hard
+          # lifetime ceiling. Production still uses the original policy.
+          - budget-decay-smoke
           # BEAM PD recovery: an ERTS exit restarts beam_server to a fresh 1>
           # with none of the previous VM's state.
           - beam-restart-smoke

@@ -87,6 +87,23 @@
       "Eshell"
     ]
   },
+  "budget-decay-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "Root reads the board counter without a timer client",
+      "a fault window refills without reducing the lifetime count",
+      "the lifetime ceiling stops a repeatedly faulting child"
+    ],
+    "required_markers": [
+      "ROOT|clock|freq=",
+      "ROOT|restart|child=3|count=3|window=1",
+      "ROOT|giveup|child=3|reason=lifetime-exhausted"
+    ],
+    "forbidden_markers": [
+      "ROOT|clock|unavailable",
+      "ROOT|giveup|child=3|reason=window-exhausted"
+    ]
+  },
   "c23-diagnostic": {
     "kind": "compile",
     "protects": [
@@ -153,7 +170,7 @@
   "phase-zero-baseline": {
     "kind": "artifact-comparison",
     "protects": [
-      "phase-zero topology and runtime artifacts remain unchanged",
+      "reviewed topology and runtime artifact facts match the current milestone",
       "every current flake check has a documented contract",
       "baseline extraction is deterministic"
     ]

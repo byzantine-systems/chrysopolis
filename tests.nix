@@ -58,6 +58,7 @@
   sel4SystemImage,
   sel4TestImage,
   sel4RestartImage,
+  sel4BudgetDecayImage,
   sel4LifecycleFailureImage,
   sel4ThreadProbeImage,
   fatDisk,
@@ -572,6 +573,42 @@ in
       # still reached the shell.
       assert_no_pd_fault(chryso)
       chryso.crash()
+    '';
+  };
+
+  # A test-only Root ELF enables a one-token window and a three-restart
+  # lifetime ceiling. The production root.elf still selects the old budget.
+  budget-decay-smoke = mkSel4Test {
+    name = "budget-decay-smoke";
+    image = sel4BudgetDecayImage;
+    testScript = ''
+      try:
+          wait_console(chryso, r"ROOT\|clock\|freq=", 300)
+          wait_console(chryso, r"Eshell", 300)
+          load_test_modules(chryso)
+
+          for count in range(1, 4):
+              # The previous charge must leak before another fault. This
+              # delay is longer than the test Root's two-second interval.
+              if count != 1:
+                  time.sleep(3)
+              chryso.send_console("chryso_test:fault_pd('eth').\r")
+              wait_console(chryso,
+                           r"ROOT\|restart\|child=${ethChild}\|count="
+                           + str(count) + r"\|window=1", 120)
+
+          time.sleep(3)
+          chryso.send_console("chryso_test:fault_pd('eth').\r")
+          wait_console(chryso,
+                       r"ROOT\|giveup\|child=${ethChild}"
+                       r"\|reason=lifetime-exhausted", 120)
+          log = chryso.get_console_log()
+          assert log.count("ROOT|giveup|child=${ethChild}|") == 1
+          assert "ROOT|giveup|child=${ethChild}|reason=window-exhausted" not in log
+          assert "ROOT|clock|unavailable" not in log
+          assert_no_beam_fault(chryso)
+      finally:
+          power_off(chryso)
     '';
   };
 

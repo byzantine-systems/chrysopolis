@@ -348,21 +348,21 @@
           # which PDs fault to Root, their entry and priority, Root's TCB caps
           # and the notification caps between Root and its peers, read from
           # report.txt and cross-checked against the generated SDF and
-          # system-abi.json. Both images, because the restart image adds the
-          # crasher and the debug channels and production must have neither.
+          # system-abi.json. Check production and both restart images because
+          # the latter add the crasher and debug channels.
           restart-topology = pkgs.runCommand "chrysopolis-restart-topology" { } ''
             ${checkTopology "production" config.packages.default config.packages.sdf}
             ${checkTopology "restart" config.packages.restart-image config.packages.sdf-restart}
+            ${checkTopology "restart" config.packages.budget-decay-image config.packages.sdf-restart}
             touch $out
           '';
 
-          # The checked artifact and behavior reference. A mismatch prints a
-          # field-level unified diff. The expected file is intentionally not
-          # regenerated inside this check: updating it is a reviewed decision.
+          # The checked artifact and behavior reference. The JSON is generated
+          # during the build; its compact fingerprint is updated only after
+          # reviewing changes to the captured facts.
           phase-zero-baseline = pkgs.runCommand "chrysopolis-phase-zero-baseline" { } ''
-            diff -u \
-              ${../baselines/phase-zero/expected-v1.json} \
-              ${config.packages.phase-zero-baseline-current}/baseline.json
+            cd ${config.packages.phase-zero-baseline-current}
+            sha256sum -c ${../baselines/phase-zero/expected.sha256}
             cp ${config.packages.phase-zero-baseline-current}/baseline.json $out
           '';
         }
@@ -371,6 +371,7 @@
           sel4SystemImage = config.packages.default;
           sel4TestImage = config.packages.test-image;
           sel4RestartImage = config.packages.restart-image;
+          sel4BudgetDecayImage = config.packages.budget-decay-image;
           sel4LifecycleFailureImage = config.packages.lifecycle-failure-image;
           sel4ThreadProbeImage = config.packages.cothread-probe-image;
           fatDisk = config.packages.disk;
