@@ -16,3 +16,5 @@ runs:
       run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
     - uses: cachix/install-nix-action@v31
+      with:
+        set_as_trusted_user: true

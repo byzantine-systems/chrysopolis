@@ -1,6 +1,5 @@
-# Build images once, transfer their Nix store paths, then run grouped QEMU
-# checks. Formatting and pure gates start alongside the image build. The image
-# job is the only writer of the per-run store cache; VM jobs restore it.
+# Build images once, transfer their Nix store closure, then run grouped QEMU
+# checks. Formatting and pure gates start alongside the image build.
 name: "[Nix] Build & Test"
 
 on:
@@ -57,24 +56,27 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
-      - name: Restore and save image store
-        uses: nix-community/cache-nix-action@v7
-        with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
       # Everything the smoke tests boot: the ERTS-linked image, the bring-up
-      # image, the restart and budget-decay images, and their FAT disk. Built
-      # once here so the fanned-out test jobs
-      # restore them from the cache instead of each rebuilding them.
-      - run: nix build .#test-image .#default .#disk .#restart-image .#budget-decay-image .#cothread-probe-image .#lifecycle-failure-image --print-build-logs
+      # image, every test variant, and their FAT disk. Export their closure to
+      # /nix, which has space for it on the CI runner.
+      - run: sudo install -d -o "$USER" -g "$USER" /nix/ci-image-transfer
+      - run: bash nix/ci-transfer-images.sh export /nix/ci-image-transfer
       # Generate the normalized artifact baseline from these images and check
       # its compact fingerprint against the reviewed value in the repository.
       - run: nix build .#checks.x86_64-linux.phase-zero-baseline --print-build-logs
+      - name: Upload image closure
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-image-closure
+          path: /nix/ci-image-transfer/
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 1
 
   # Root's restart topology read from the Microkit tool's report.txt for both
   # the production and restart images: entries, priorities, fault endpoints,
   # TCB cap slots and restart channels. No QEMU, but it needs the images, so it
-  # restores them from the cache after the image job.
+  # imports them after the image job.
   restart-topology:
     name: "[Nix] Restart topology"
     needs: image
@@ -82,13 +84,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
-      - name: Restore image store
-        uses: nix-community/cache-nix-action@v7
+      - run: sudo install -d -o "$USER" -g "$USER" /nix/ci-image-transfer
+      - name: Download image closure
+        uses: actions/download-artifact@v8
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          save: false
-          fail-on: primary-key.miss
-      - run: python3 nix/ci-check-image-cache.py restart-topology
+          name: ci-image-closure
+          path: /nix/ci-image-transfer
+      - run: bash nix/ci-transfer-images.sh import /nix/ci-image-transfer
+      - run: python3 nix/ci-check-image-store.py restart-topology
       - run: nix build .#checks.x86_64-linux.restart-topology --print-build-logs
 
   test:
@@ -116,11 +119,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
-      - name: Restore image store
-        uses: nix-community/cache-nix-action@v7
+      - run: sudo install -d -o "$USER" -g "$USER" /nix/ci-image-transfer
+      - name: Download image closure
+        uses: actions/download-artifact@v8
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          save: false
-          fail-on: primary-key.miss
-      - run: python3 nix/ci-check-image-cache.py ${{ matrix.check }}
+          name: ci-image-closure
+          path: /nix/ci-image-transfer
+      - run: bash nix/ci-transfer-images.sh import /nix/ci-image-transfer
+      - run: python3 nix/ci-check-image-store.py ${{ matrix.check }}
       - run: nix build .#checks.x86_64-linux.${{ matrix.check }} --print-build-logs

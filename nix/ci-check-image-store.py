@@ -1,4 +1,4 @@
-"""Fail before a CI check can rebuild an image missing from its restored store."""
+"""Verify the imported CI artifact contains each check's image and disk."""
 
 import json
 import subprocess
@@ -20,7 +20,7 @@ IMAGES = {
 }
 
 if len(sys.argv) != 2:
-    raise SystemExit("usage: ci-check-image-cache.py CHECK")
+    raise SystemExit("usage: ci-check-image-store.py CHECK")
 
 check = sys.argv[1]
 if check == "restart-topology":
@@ -52,5 +52,5 @@ for item in json.loads(evaluated.stdout):
     path = item["path"]
     validity = subprocess.run(["nix-store", "--check-validity", path], check=False)
     if validity.returncode:
-        raise SystemExit(f"missing cached {item['name']}: {path}")
-    print(f"cached {item['name']}: {path}")
+        raise SystemExit(f"missing imported {item['name']}: {path}")
+    print(f"imported {item['name']}: {path}")
