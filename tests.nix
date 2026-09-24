@@ -131,21 +131,18 @@ let
       def record_observation(scenario, **facts):
           group_observations.append({"scenario": scenario, **facts})
 
-      def save_group_trace(machine, name):
-          """Keep serial evidence and host observations in the test output."""
+      def save_group_observations(machine, name):
+          """Keep stable host observations in the test output."""
           output = os.environ.get("out")
           if output is None:
               return
           directory = Path(output)
           try:
-              (directory / f"{name}.serial.log").write_text(
-                  machine.get_console_log()
-              )
               (directory / f"{name}.observations.json").write_text(
-                  json.dumps(group_observations, indent=2) + "\n"
+                  json.dumps(group_observations, indent=2, sort_keys=True) + "\n"
               )
           except OSError as err:
-              machine.log(f"could not save grouped trace: {err}")
+              machine.log(f"could not save grouped observations: {err}")
 
       def wait_console(machine, regex, timeout):
           """Wait until `regex` matches the accumulated console log."""
@@ -1629,7 +1626,7 @@ in
               assert_no_beam_fault(chryso)
               record_observation("tcp-smoke-guest-to-host", payload=got.decode())
       finally:
-          save_group_trace(chryso, "boot-shell-tcp")
+          save_group_observations(chryso, "boot-shell-tcp")
           power_off(chryso)
     '';
   };
@@ -1658,7 +1655,7 @@ in
                   r"ROOT\|giveup\|child=4\|reason=budget-exhausted", log
               ), "root never gave up on the crasher"
               assert_no_pd_fault(chryso)
-              record_observation("restart-smoke", crasher_restarts=max(restarts))
+              record_observation("restart-smoke", budget_exhausted=True)
 
           load_test_modules(chryso)
           with subtest("serial-restart-smoke"):
@@ -1698,7 +1695,7 @@ in
               assert_no_pd_fault(chryso)
               record_observation("serial-fault-smoke", restart_count=2)
       finally:
-          save_group_trace(chryso, "serial-recovery")
+          save_group_observations(chryso, "serial-recovery")
           power_off(chryso)
     '';
   };
@@ -1738,7 +1735,7 @@ in
               assert after > before, f"clock did not advance: {before} -> {after}"
               sleep_works("slept_after", 180)
               assert_no_pd_fault(chryso)
-              record_observation("timer-restart-smoke", clock_delta=after - before)
+              record_observation("timer-restart-smoke", clock_advanced=True)
 
           with subtest("timer-fault-smoke"):
               offset = len(chryso.get_console_log())
@@ -1761,9 +1758,9 @@ in
                   chryso.get_console_log()[offset:]
               ), "timer fault used the requested-restart path"
               assert_no_pd_fault(chryso)
-              record_observation("timer-fault-smoke", clock_delta=after - before)
+              record_observation("timer-fault-smoke", clock_advanced=True)
       finally:
-          save_group_trace(chryso, "timer-recovery")
+          save_group_observations(chryso, "timer-recovery")
           power_off(chryso)
     '';
   };
@@ -1860,7 +1857,7 @@ in
               assert_no_pd_fault(chryso)
               record_observation("blk-fault-smoke-in-flight", restart_count=4)
       finally:
-          save_group_trace(chryso, "blk-recovery")
+          save_group_observations(chryso, "blk-recovery")
           power_off(chryso)
     '';
   };
@@ -1953,7 +1950,7 @@ in
               assert_no_pd_fault(chryso)
               record_observation("net-fault-smoke", restart_count=4)
       finally:
-          save_group_trace(chryso, "net-recovery")
+          save_group_observations(chryso, "net-recovery")
           power_off(chryso)
     '';
   };
