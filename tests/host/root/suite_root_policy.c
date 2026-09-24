@@ -51,14 +51,14 @@ static void test_decision_order(void) {
 
   /* Budget before entry, so an exhausted child without an entry reports the
    * budget. */
-  record.count = 3;
+  record.lifetime_count = 3;
   CHECK(root_restart_decide(&record, 3, 0) ==
         root_restart_giveup_budget_exhausted);
-  record.count = 2;
+  record.lifetime_count = 2;
   CHECK(root_restart_decide(&record, 3, 0) == root_restart_giveup_no_entry);
 
   /* A zero budget gives up on the first fault. */
-  record.count = 0;
+  record.lifetime_count = 0;
   CHECK(root_restart_decide(&record, 0, entry) ==
         root_restart_giveup_budget_exhausted);
 
@@ -85,6 +85,8 @@ static void test_budget_then_gone(void) {
         resumes++;
         break;
       case root_restart_giveup_budget_exhausted:
+      case root_restart_giveup_window_exhausted:
+      case root_restart_giveup_lifetime_exhausted:
       case root_restart_giveup_no_entry:
         root_record_give_up(&records[1]);
         giveups++;
@@ -99,10 +101,12 @@ static void test_budget_then_gone(void) {
      * notified once. */
     CHECK(giveups == 1);
     CHECK(ignored == 40 - budget - 1);
-    CHECK_EQ_U64(records[1].count, budget);
+    CHECK_EQ_U64(records[1].lifetime_count, budget);
     /* Budgets and states are per child. */
-    CHECK(records[0].state == root_child_live && records[0].count == 0);
-    CHECK(records[2].state == root_child_live && records[2].count == 0);
+    CHECK(records[0].state == root_child_live &&
+          records[0].lifetime_count == 0);
+    CHECK(records[2].state == root_child_live &&
+          records[2].lifetime_count == 0);
     CHECK(budget == 0 || root_restart_decide(&records[2], budget, entry) ==
                              root_restart_resume);
   }
@@ -113,8 +117,145 @@ static void test_giveup_reasons(void) {
                "budget-exhausted") == 0);
   CHECK(strcmp(root_restart_giveup_reason(root_restart_giveup_no_entry),
                "no-restart-entry") == 0);
+  CHECK(strcmp(root_restart_giveup_reason(root_restart_giveup_window_exhausted),
+               "window-exhausted") == 0);
+  CHECK(
+      strcmp(root_restart_giveup_reason(root_restart_giveup_lifetime_exhausted),
+             "lifetime-exhausted") == 0);
   CHECK(strcmp(root_restart_giveup_reason(root_restart_resume), "") == 0);
   CHECK(strcmp(root_restart_giveup_reason(root_restart_ignore_gone), "") == 0);
+}
+
+static void test_clock(void) {
+  root_clock clock = {};
+  uint64_t interval = 99;
+  CHECK(root_clock_init(&clock, 0, 1000000, 1000000000) ==
+        root_clock_bad_frequency);
+  CHECK(!clock.available);
+  CHECK(root_clock_observe(&clock, 1) == root_clock_bad_frequency);
+  CHECK(root_clock_interval(&clock, 1, &interval) == root_clock_bad_frequency);
+  CHECK_EQ_U64(interval, 99);
+  CHECK(root_clock_init(&clock, 999999, 1000000, 1000000000) ==
+        root_clock_bad_frequency);
+  CHECK(root_clock_init(&clock, 1000000001, 1000000, 1000000000) ==
+        root_clock_bad_frequency);
+  CHECK(root_clock_init(&clock, 1000000, 1000000, 1000000000) == root_clock_ok);
+  CHECK_EQ_U64(clock.ticks_per_ms, 1000);
+  CHECK(root_clock_init(&clock, 1000000000, 1000000, 1000000000) ==
+        root_clock_ok);
+  CHECK_EQ_U64(clock.ticks_per_ms, 1000000);
+  CHECK(root_clock_init(&clock, 62500000, 1000000, 1000000000) ==
+        root_clock_ok);
+  CHECK_EQ_U64(clock.ticks_per_ms, 62500);
+  CHECK(root_clock_interval(&clock, 0, &interval) == root_clock_bad_interval);
+  CHECK(root_clock_interval(&clock, 2000, &interval) == root_clock_ok);
+  CHECK_EQ_U64(interval, 125000000);
+  CHECK(root_clock_interval(&clock, UINT64_MAX / 62500, &interval) ==
+        root_clock_ok);
+  CHECK(root_clock_interval(&clock, UINT64_MAX / 62500 + 1, &interval) ==
+        root_clock_interval_overflow);
+  CHECK(root_clock_observe(&clock, 0) == root_clock_ok);
+  CHECK(root_clock_observe(&clock, 0) == root_clock_ok);
+  CHECK(root_clock_observe(&clock, UINT64_MAX - 1) == root_clock_ok);
+  CHECK(root_clock_observe(&clock, 1) == root_clock_regressed);
+  CHECK(!clock.available);
+  CHECK(root_clock_interval(&clock, 1, &interval) == root_clock_bad_frequency);
+
+  /* Non-integral milliseconds round up, so a leak cannot arrive early. */
+  CHECK(root_clock_init(&clock, 1000001, 1000000, 1000000000) == root_clock_ok);
+  CHECK_EQ_U64(clock.ticks_per_ms, 1001);
+}
+
+static void test_timed_budget(void) {
+  const root_budget_policy policy = {
+      .capacity = 2, .lifetime_limit = 4, .leak_interval_ticks = 10};
+  root_child_record record = {};
+  root_timed_decision decision =
+      root_restart_decide_at(&record, &policy, entry, 0);
+  CHECK(decision.error == root_timed_valid);
+  CHECK(decision.action == root_restart_resume);
+  record = decision.next;
+  CHECK_EQ_U64(record.lifetime_count, 1);
+  CHECK_EQ_U64(record.window_count, 1);
+  CHECK(record.last_charge_valid);
+  CHECK_EQ_U64(record.last_charge_ticks, 0);
+
+  decision = root_restart_decide_at(&record, &policy, entry, 9);
+  CHECK(decision.action == root_restart_resume);
+  record = decision.next;
+  CHECK_EQ_U64(record.window_count, 2);
+
+  /* No elapsed interval yet: the next fault exhausts the window. */
+  decision = root_restart_decide_at(&record, &policy, entry, 9);
+  CHECK(decision.action == root_restart_giveup_window_exhausted);
+  CHECK_EQ_U64(decision.next.lifetime_count, 2);
+
+  /* At the exact boundary one unit leaks, preserving the remaining fraction. */
+  decision = root_restart_decide_at(&record, &policy, entry, 10);
+  CHECK(decision.action == root_restart_resume);
+  record = decision.next;
+  CHECK_EQ_U64(record.lifetime_count, 3);
+  CHECK_EQ_U64(record.window_count, 2);
+  CHECK_EQ_U64(record.last_charge_ticks, 10);
+
+  decision = root_restart_decide_at(&record, &policy, entry, 19);
+  CHECK(decision.action == root_restart_giveup_window_exhausted);
+  decision = root_restart_decide_at(&record, &policy, entry, 20);
+  CHECK(decision.action == root_restart_resume);
+  record = decision.next;
+  CHECK_EQ_U64(record.lifetime_count, 4);
+  CHECK_EQ_U64(record.window_count, 2);
+  decision = root_restart_decide_at(&record, &policy, entry, 1000);
+  CHECK(decision.action == root_restart_giveup_lifetime_exhausted);
+  CHECK_EQ_U64(decision.next.lifetime_count, 4);
+  root_record_give_up(&record);
+  CHECK(root_restart_decide_at(&record, &policy, entry, 1001).action ==
+        root_restart_ignore_gone);
+}
+
+static void test_timed_errors_and_idle(void) {
+  const root_budget_policy policy = {
+      .capacity = 2, .lifetime_limit = 5, .leak_interval_ticks = 10};
+  root_child_record record = {};
+  root_timed_decision decision =
+      root_restart_decide_at(&record, &policy, entry, 3);
+  record = decision.next;
+  decision = root_restart_decide_at(&record, &policy, entry, UINT64_MAX);
+  CHECK(decision.action == root_restart_resume);
+  record = decision.next;
+  CHECK_EQ_U64(record.window_count, 1);
+  CHECK_EQ_U64(record.last_charge_ticks, UINT64_MAX);
+  CHECK_EQ_U64(record.lifetime_count, 2);
+
+  decision = root_restart_decide_at(&record, &policy, entry, 2);
+  CHECK(decision.error == root_timed_clock_regressed);
+  CHECK_EQ_U64(decision.next.lifetime_count, 2);
+  CHECK(root_restart_decide(&record, 2, entry) ==
+        root_restart_giveup_budget_exhausted);
+
+  root_budget_policy bad = policy;
+  bad.leak_interval_ticks = 0;
+  CHECK(root_restart_decide_at(&record, &bad, entry, UINT64_MAX).error ==
+        root_timed_invalid_policy);
+  bad = policy;
+  bad.capacity = 0;
+  CHECK(root_restart_decide_at(&record, &bad, entry, UINT64_MAX).error ==
+        root_timed_invalid_policy);
+  record.window_count = 3;
+  CHECK(root_restart_decide_at(&record, &policy, entry, UINT64_MAX).error ==
+        root_timed_invalid_record);
+  record = (root_child_record){};
+  record.window_count = 1;
+  CHECK(root_restart_decide_at(&record, &policy, entry, 1).error ==
+        root_timed_invalid_record);
+  record = (root_child_record){};
+  record.last_charge_valid = true;
+  CHECK(root_restart_decide_at(&record, &policy, entry, 1).error ==
+        root_timed_invalid_record);
+  record = (root_child_record){};
+  CHECK(root_restart_decide_at(&record, &policy, 0, 1).action ==
+        root_restart_giveup_no_entry);
+  CHECK_EQ_U64(record.lifetime_count, 0);
 }
 
 enum : unsigned int { max_channels = 62, no_gone = UINT_MAX };
@@ -205,6 +346,9 @@ int main(void) {
   test_decision_order();
   test_budget_then_gone();
   test_giveup_reasons();
+  test_clock();
+  test_timed_budget();
+  test_timed_errors_and_idle();
   test_layout_validity();
   test_notify_routing();
   return check_finish("root_policy");

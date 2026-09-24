@@ -41,11 +41,11 @@
  *     declares. An id outside that set never reaches a capability invocation.
  *
  * Child lifecycle:
- *   - Every child starts live with a zero restart count. Each restart, whether
- *     from a fault or a debug request, spends one unit of a lifetime budget;
- *     there is no time window that refills it.
- *   - When the budget is spent (or there is no entry to restart at) Root stops
- *     the child, marks it gone and tells its dependents once. Gone is
+ *   - Every child starts live with zero restart counts. Production still uses
+ *     the original lifetime budget until a validated orchestration policy can
+ *     select the timed path. A separate test Root exercises that path now.
+ *   - When the selected budget is spent (or there is no entry to restart at)
+ * Root stops the child, marks it gone and tells its dependents once. Gone is
  *     terminal: later faults, debug restarts and fault injections for that
  *     child are logged as ignored and make no Microkit call.
  */
@@ -293,6 +293,34 @@ static seL4_Word root_restart_entry(root_child child) {
  * ROOT_MAX_CHILDREN. */
 static root_child_record child_records[ROOT_MAX_CHILDREN];
 
+/* The generic timer's physical counter is already read by the sDDF timer PD
+ * and beam_server on this board. Root reads it directly at EL0: a PPC to the
+ * timer driver would violate Microkit's priority rule and make fault policy
+ * depend on a child Root may need to restart. The pure checks and arithmetic
+ * stay in root_policy.h. No timer notification is wired to Root. */
+static root_clock root_clock_state;
+
+static inline uint64_t root_now_ticks(void) {
+  uint64_t ticks;
+  __asm__ volatile("mrs %0, cntpct_el0" : "=r"(ticks));
+  return ticks;
+}
+
+static inline uint64_t root_clock_freq(void) {
+  uint64_t frequency;
+  __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+  return frequency;
+}
+
+#ifdef ROOT_TEST_BUDGET
+/* Only root_budget_test.elf selects this policy. The normal root.elf always
+ * reaches root_restart_decide, with exactly its previous budget and trace. */
+static root_budget_policy root_test_budget;
+static constexpr uint64_t root_test_leak_ms = 2000;
+static constexpr unsigned int root_test_window_capacity = 1;
+static constexpr unsigned int root_test_lifetime_limit = 3;
+#endif
+
 /* --- tiny dependency-free formatters (no libc/printf in the Root PD) --- */
 
 static void put_dec(unsigned int v) {
@@ -329,6 +357,30 @@ void init(void) {
   for (size_t i = 0; i < ROOT_MAX_CHILDREN; i++) {
     child_records[i] = (root_child_record){};
   }
+  const uint64_t frequency = root_clock_freq();
+  if (root_clock_init(&root_clock_state, frequency, ROOT_CLOCK_MIN_HZ,
+                      ROOT_CLOCK_MAX_HZ) != root_clock_ok ||
+      root_clock_observe(&root_clock_state, root_now_ticks()) !=
+          root_clock_ok) {
+    microkit_dbg_puts("ROOT|clock|unavailable\n");
+  } else {
+    microkit_dbg_puts("ROOT|clock|freq=");
+    put_hex(frequency);
+    microkit_dbg_puts("\n");
+  }
+#ifdef ROOT_TEST_BUDGET
+  uint64_t interval = 0;
+  if (root_clock_interval(&root_clock_state, root_test_leak_ms, &interval) ==
+      root_clock_ok) {
+    root_test_budget = (root_budget_policy){
+        .capacity = root_test_window_capacity,
+        .lifetime_limit = root_test_lifetime_limit,
+        .leak_interval_ticks = interval,
+    };
+  } else {
+    root_test_budget = (root_budget_policy){};
+  }
+#endif
   microkit_dbg_puts("ROOT|init|budget=");
   put_dec(ROOT_RESTART_BUDGET);
   microkit_dbg_puts("|beam-budget=");
@@ -442,13 +494,48 @@ static void root_giveup(root_child child, const char *reason) {
 static void root_restart_child(root_child child, const char *request) {
   root_child_record *record = &child_records[child.value];
   const seL4_Word entry = root_restart_entry(child);
-  const root_restart_action action =
-      root_restart_decide(record, root_restart_budget(child), entry);
+  const unsigned int legacy_budget = root_restart_budget(child);
+  if (root_clock_state.available &&
+      root_clock_observe(&root_clock_state, root_now_ticks()) !=
+          root_clock_ok) {
+    microkit_dbg_puts("ROOT|clock|unavailable\n");
+  }
+  root_restart_action action;
+  bool timed_charge = false;
+#ifdef ROOT_TEST_BUDGET
+  if (root_clock_state.available && root_test_budget.capacity != 0) {
+    const root_timed_decision decision = root_restart_decide_at(
+        record, &root_test_budget, entry, root_clock_state.last_ticks);
+    if (decision.error == root_timed_valid) {
+      action = decision.action;
+      if (action == root_restart_resume) {
+        *record = decision.next;
+        timed_charge = true;
+      }
+    } else {
+      root_clock_state.available = false;
+      microkit_dbg_puts("ROOT|policy|invalid\n");
+      action = root_restart_giveup_budget_exhausted;
+    }
+  } else {
+    /* A clock unavailable at boot or lost later selects a lifetime-only
+     * ceiling. It cannot grant a time-based refill. Keep the smaller of the
+     * current image budget and this test policy's lifetime ceiling. */
+    const unsigned int ceiling = legacy_budget < root_test_lifetime_limit
+                                     ? legacy_budget
+                                     : root_test_lifetime_limit;
+    action = root_restart_decide(record, ceiling, entry);
+  }
+#else
+  action = root_restart_decide(record, legacy_budget, entry);
+#endif
   switch (action) {
   case root_restart_ignore_gone:
     root_log_ignored(child, request);
     return;
   case root_restart_giveup_budget_exhausted:
+  case root_restart_giveup_window_exhausted:
+  case root_restart_giveup_lifetime_exhausted:
   case root_restart_giveup_no_entry:
     root_giveup(child, root_restart_giveup_reason(action));
     return;
@@ -460,14 +547,20 @@ static void root_restart_child(root_child child, const char *request) {
    * restart so that if the child faults again immediately (the crasher PD
    * does exactly this, re-faulting inside init()), the re-entrant fault()
    * observes the already-charged count and the budget still converges. */
-  root_record_charge(record);
+  if (!timed_charge) {
+    root_record_charge(record);
+  }
   microkit_pd_restart(child.value, entry);
   microkit_dbg_puts("ROOT|");
   microkit_dbg_puts(request);
   microkit_dbg_puts("|child=");
   put_dec(child.value);
   microkit_dbg_puts("|count=");
-  put_dec(record->count);
+  put_dec(record->lifetime_count);
+#ifdef ROOT_TEST_BUDGET
+  microkit_dbg_puts("|window=");
+  put_dec(record->window_count);
+#endif
   microkit_dbg_puts("\n");
 }
 

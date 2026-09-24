@@ -10,6 +10,8 @@
 #     - the ERTS-linked image (erl_start handoff).
 #   packages.cothread-probe-image
 #     - diagnostic bring-up image with native pthread checks.
+#   packages.budget-decay-image
+#     - restart topology with a test Root that enables timed fault budgets.
 {
   perSystem =
     {
@@ -75,6 +77,7 @@
         {
           imgName,
           beamElf,
+          rootElf ? "${config.packages.beam-zig}/bin/root.elf",
           # Which generated SDF to synthesise against (default topology, or the
           # --with-crasher variant for the restart test).
           sdf ? config.packages.sdf,
@@ -101,8 +104,8 @@
             ${pkgs.lib.concatMapStringsSep "\n" (e: "cp ${e} build/") extraElfs}
             # Driver/virtualiser PDs from the root build.zig (beamZig), the
             # serial/timer client PDs (beam_server) come from beamElf above.
-            cp ${config.packages.beam-zig}/bin/root.elf \
-               ${config.packages.beam-zig}/bin/serial_driver.elf \
+            cp ${rootElf} build/root.elf
+            cp ${config.packages.beam-zig}/bin/serial_driver.elf \
                ${config.packages.beam-zig}/bin/timer_driver.elf \
                ${config.packages.beam-zig}/bin/serial_virt_tx.elf \
                ${config.packages.beam-zig}/bin/serial_virt_rx.elf \
@@ -468,10 +471,14 @@
               otp=${otp}
               rel=$(ls $otp/releases | grep -E '^[0-9]+$' | head -1)
 
+              # FAT stores local timestamps. Pin the clock, zone and generated
+              # identifiers so identical derivations produce identical bytes.
+              export SOURCE_DATE_EPOCH=315532800 TZ=UTC
+
               # Build a populated FAT32 partition image.
               part=part.fat
               truncate -s 96M $part
-              mkfs.fat -F 32 -n CHRYSO $part
+              mkfs.fat --invariant -F 32 -n CHRYSO $part
               export MTOOLS_SKIP_CHECK=1
 
               mmd -i $part ::/dev ::/bin ::/lib ::/releases "::/releases/$rel"
@@ -525,6 +532,7 @@
               off=2048
               truncate -s 100M $out
               echo "label: dos
+              label-id: 0x43485259
               start=$off, type=c" | sfdisk $out
               dd if=$part of=$out bs=512 seek=$off conv=notrunc status=none
             '';
@@ -568,6 +576,17 @@
         restart-image = mkSel4Image {
           imgName = "sel4-beam-restart-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+          sdf = config.packages.sdf-restart;
+          extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
+          restartDebug = true;
+        };
+
+        # Same restart SDF, but Root selects a short test-only fault window.
+        # The normal root.elf remains the sole Root in shipped images.
+        budget-decay-image = mkSel4Image {
+          imgName = "sel4-beam-budget-decay-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+          rootElf = "${config.packages.beam-zig}/bin/root_budget_test.elf";
           sdf = config.packages.sdf-restart;
           extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
           restartDebug = true;

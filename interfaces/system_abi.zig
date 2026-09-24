@@ -27,6 +27,8 @@ pub const Contract = struct {
     restart: struct {
         driver_budget: u32,
         beam_budget: u32,
+        clock_min_hz: u64,
+        clock_max_hz: u64,
         entry_fallback: u64,
         exit_fault_base: u64,
         exit_fault_size: u64,
@@ -96,6 +98,10 @@ pub const values: Contract = .{
     .restart = .{
         .driver_budget = 8,
         .beam_budget = 64,
+        // The selected QEMU virt board reports 62.5 MHz. These bounds reject
+        // an unusable counter without treating that board value as an ABI.
+        .clock_min_hz = 1_000_000,
+        .clock_max_hz = 1_000_000_000,
         .entry_fallback = 2097152,
         .exit_fault_base = 3198156800,
         .exit_fault_size = 4096,
@@ -163,6 +169,8 @@ pub fn validate(contract: Contract) !void {
     if (contract.restart.config_words != 2 or contract.restart.word_bytes != 8) return error.InvalidRestartConfigLayout;
     if (contract.restart.pd_modes != 2) return error.InvalidPdRestartModeCount;
     if (contract.restart.driver_budget == 0 or contract.restart.beam_budget == 0) return error.InvalidRestartBudget;
+    if (contract.restart.clock_min_hz < 1000 or contract.restart.clock_min_hz > contract.restart.clock_max_hz or
+        contract.restart.clock_max_hz > 4_294_967_295) return error.InvalidRootClockBounds;
     if (contract.restart.exit_fault_size == 0 or contract.restart.exit_fault_size % page_size != 0) return error.InvalidExitFaultRange;
     if (contract.restart.exit_fault_base % page_size != 0) return error.InvalidExitFaultRange;
 
@@ -245,6 +253,10 @@ test "typed ABI is valid and rejects conflicting values" {
     bad = values;
     bad.version = 2;
     try std.testing.expectError(error.UnsupportedAbiVersion, validate(bad));
+
+    bad = values;
+    bad.restart.clock_min_hz = bad.restart.clock_max_hz + 1;
+    try std.testing.expectError(error.InvalidRootClockBounds, validate(bad));
 }
 
 test "required ABI fields cannot be omitted" {

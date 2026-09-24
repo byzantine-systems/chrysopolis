@@ -25,14 +25,10 @@ Chrysopolis aims to run the BEAM on the [seL4 microkernel](https://sel4.systems/
 
 ### Build-time ABI
 
-[`interfaces/system_abi.zig`](interfaces/system_abi.zig) owns child and channel IDs, restart
-limits, fixed virtual-memory regions, ELF config sections, and the mapping from generated sDDF
-blobs to PD images. The host-only [`tools/abi`](tools/abi) generator validates the typed contract
-and emits [`interfaces/generated/system-abi.json`](interfaces/generated/system-abi.json) for pure
-Nix evaluation. Both Zig builds validate that generated projection before consuming it.
-Regenerate the projection with `nix build .#abi-tool` followed by
-`result/bin/gen-system-abi interfaces/generated/system-abi.json`; the
-`abi-stale` flake check rejects a stale or hand-edited copy.
+[`interfaces/system_abi.zig`](interfaces/system_abi.zig) owns child and channel IDs, restart limits, fixed virtual-memory regions, ELF config sections, and the mapping from generated sDDF blobs to PD images. The host-only [`tools/abi`](tools/abi) generator validates the typed contract and emits [`interfaces/generated/system-abi.json`](interfaces/generated/system-abi.json) for pure Nix evaluation. Both Zig builds validate that generated projection before consuming it:
+
+- To regenerate the projection, run `nix build .#abi-tool` followed by `result/bin/gen-system-abi interfaces/generated/system-abi.json`
+- The `abi-stale` flake check rejects a stale or hand-edited copy.
 
 ```mermaid
 flowchart LR
@@ -99,9 +95,7 @@ nix flake check -L
 nix build .#checks.x86_64-linux.boot-smoke -L
 ```
 
-All QEMU checks gate the build. Each boots an image under emulation and asserts on the serial
-trace or drives an external peer. Host-only checks validate pure runtime logic, ABI values,
-generated topology, ELF layout, test modules, diagnostics, and formatting.
+All QEMU checks gate the build. Each boots an image under emulation and asserts on the serial trace or drives an external peer. Host-only checks validate pure runtime logic, ABI values, generated topology, ELF layout, test modules, diagnostics, and formatting.
 
 Core function:
 
@@ -116,6 +110,7 @@ Core function:
 Crash and restart:
 
 - **`restart-smoke`**: Root catches a deliberately faulting child, restarts it until the budget is spent, then gives up.
+- **`budget-decay-smoke`**: A test Root uses the AArch64 counter to refill a fault window while retaining a hard lifetime restart ceiling.
 - **`beam-restart-smoke`**: An ERTS exit (`init:stop()`, then `erlang:halt(3)`) restarts `beam_server` to a fresh `1>`, carrying the exit code to Root, with none of the previous VM's state surviving.
 - **`serial-restart-smoke`**, **`timer-restart-smoke`**, **`blk-restart-smoke`**, **`net-restart-smoke`**: A healthy driver of each class is restarted on request and its subsystem must keep working.
 - **`serial-fault-smoke`**, **`timer-fault-smoke`**, **`blk-fault-smoke`**, **`net-fault-smoke`**: Each real driver is forced to take a genuine seL4 fault, Root catches and restarts it, and its subsystem must recover. The block case includes a client request in flight.
@@ -124,17 +119,13 @@ Crash and restart:
 Pure and generated-artifact gates include:
 
 - **`runtime-host-tests`** runs every pure runtime suite with Debug/UBSan and ReleaseFast.
-- **`abi-contract`** proves both generated SDF variants represent the declared ABI and emit every
-  configured data blob.
+- **`abi-contract`** proves both generated SDF variants represent the declared ABI and emit every configured data blob.
 - **`production-sdf-gate`** asserts test-only restart affordances stay out of the shipped topology.
-- **`restart-topology`** checks Root's children, entries, priorities, fault endpoints, and relevant
-  capability slots against the SDF and ABI.
+- **`restart-topology`** checks Root's children, entries, priorities, fault endpoints, and relevant capability slots against the SDF and ABI.
 - **`test-modules`** compiles the guest-side probes in `tests/`.
 - **`c23-diagnostic`** compiles first-party C with stricter diagnostics and warnings as errors.
 - **`treefmt`** checks Nix, Gleam, Erlang, C, and Zig formatting.
-- **`phase-zero-baseline`** compares the current normalized SDF, Microkit report, ELF, image,
-  toolchain, host-test, and behavioral-contract facts with the checked snapshot in
-  [`baselines/phase-zero`](baselines/phase-zero).
+- **`phase-zero-baseline`** regenerates normalized SDF, Microkit report, ELF, image, toolchain, host-test, and behavioral-contract facts and checks their fingerprint against [`baselines/phase-zero`](baselines/phase-zero).
 
 ### Running the BEAM shell
 

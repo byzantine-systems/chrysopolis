@@ -1,8 +1,8 @@
 # Phase-zero baseline
 
-This directory records the facts that define the current Chrysopolis image. It is not a second test suite. It collects the contracts and outputs of the existing checks into one deterministic, reviewable comparison.
+This directory records the contracts and a compact fingerprint of the current Chrysopolis image. CI generates the full baseline JSON from pinned inputs. The fingerprint keeps unexpected changes visible without storing the generated JSON in Git.
 
-`expected-v1.json` contains normalized facts derived from the pinned flake inputs:
+The generated baseline contains normalized facts derived from the pinned flake inputs:
 
 - The current runtime ABI and relevant dependency revisions.
 - Generated production and restart SDF topology, capacity, and config-blob identities.
@@ -22,12 +22,14 @@ Run the focused comparison with:
 nix build .#checks.x86_64-linux.phase-zero-baseline -L
 ```
 
-The derivation captures the current facts twice and first proves that capture is deterministic. It then performs a formatted JSON diff against `expected-v1.json`, so a mismatch identifies the changed field. Generate the current candidate without accepting it with:
+The derivation captures the facts twice, checks that both captures match, then compares the generated JSON with `expected.sha256`. To review a change, generate the current JSON and inspect its contents before updating the fingerprint:
 
 ```bash
 nix build .#phase-zero-baseline-current -L
-diff -u baselines/phase-zero/expected-v1.json result/baseline.json
+(cd result && sha256sum baseline.json)
 ```
+
+The fingerprint must be recorded with the filename `baseline.json`, as in `expected.sha256`. The previous generated snapshots remain available in Git history for comparison.
 
 The complete verification remains:
 
@@ -36,6 +38,6 @@ cd tests/host && zig build test --summary all
 nix build .#checks.x86_64-linux.runtime-host-tests -L
 nix build .#checks.x86_64-linux.production-sdf-gate -L
 nix build .#checks.x86_64-linux.restart-topology -L
-nix build .#test-image .#default .#disk .#restart-image -L
+nix build .#test-image .#default .#disk .#restart-image .#budget-decay-image -L
 nix flake check -L
 ```
