@@ -23,20 +23,6 @@
       "BEAM_MARK_AFTER|absent"
     ]
   },
-  "blk-fault-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "a genuine block-driver fault reaches Root",
-      "the virtualiser reconciles idle and in-flight requests",
-      "filesystem service recovers"
-    ],
-    "required_markers": [
-      "ROOT|fault|child=2",
-      "ROOT|restart|child=2|count=1",
-      "driver restarted, reconciling",
-      "FS_AFTER_INFLIGHT|"
-    ]
-  },
   "blk-giveup-smoke": {
     "kind": "qemu",
     "protects": [
@@ -53,38 +39,55 @@
       "BLKGONE_ALIVE|42"
     ]
   },
-  "blk-restart-smoke": {
+  "blk-recovery": {
     "kind": "qemu",
     "protects": [
       "a requested healthy block-driver restart is authorized",
       "idle and in-flight filesystem requests reconcile",
-      "filesystem service remains usable"
+      "filesystem service remains usable",
+      "a genuine block-driver fault reaches Root",
+      "the virtualiser reconciles idle and in-flight requests",
+      "filesystem service recovers"
     ],
     "required_markers": [
       "PD_RESTART|request|class=blk",
       "ROOT|debug-restart|child=2",
       "driver restarted, reconciling",
-      "FS_AFTER_INFLIGHT|"
+      "FS_AFTER_INFLIGHT|",
+      "ROOT|fault|child=2",
+      "ROOT|restart|child=2|count=3",
+      "ROOT|restart|child=2|count=4",
+      "FS_FAULT_AFTER_INFLIGHT|"
     ]
   },
-  "boot-smoke": {
-    "forbidden_markers": [
-      "unexpected PD fault",
-      "unexpected beam_server fault"
-    ],
+  "boot-shell-tcp": {
     "kind": "qemu",
     "protects": [
       "ERTS starts",
       "FAT is detected",
       "the sDDF monotonic clock works",
-      "the Erlang shell becomes ready"
+      "the Erlang shell becomes ready",
+      "guest Erlang test modules load from FAT",
+      "interactive Eshell input and output work",
+      "guest gen_tcp accepts host connections",
+      "guest gen_tcp connects to a host listener",
+      "TCP payloads survive in both directions"
     ],
     "required_markers": [
       "beam_server up on the LionsOS reference stack.",
       "monotonic clock via sDDF timer:",
       "Handing off to ERTS core loop...",
       "MBR partitioning detected",
-      "Eshell"
+      "Eshell",
+      "TEST_MODULES|",
+      "SHELL_EVAL|2",
+      "LISTENER_UP",
+      "ECHOED",
+      "NET_OK|CHRYSO_PING"
+    ],
+    "forbidden_markers": [
+      "unexpected PD fault",
+      "unexpected beam_server fault"
     ]
   },
   "budget-decay-smoke": {
@@ -139,32 +142,23 @@
       "BEAM|lifecycle|FATAL|stage=config|status=config-serial|code=1"
     ]
   },
-  "net-fault-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "a genuine network-driver fault reaches Root",
-      "network queues are reclaimed",
-      "outbound TCP service recovers"
-    ],
-    "required_markers": [
-      "ROOT|fault|child=3",
-      "ROOT|restart|child=3|count=1",
-      "ETH|restart|reclaimed|",
-      "NET_OK|"
-    ]
-  },
-  "net-restart-smoke": {
+  "net-recovery": {
     "kind": "qemu",
     "protects": [
       "a requested healthy network-driver restart is authorized",
       "network queues are reclaimed",
-      "outbound TCP service recovers"
+      "outbound TCP service recovers",
+      "a genuine network-driver fault reaches Root"
     ],
     "required_markers": [
       "PD_RESTART|request|class=eth",
       "ROOT|debug-restart|child=3",
       "ETH|restart|reclaimed|",
-      "NET_OK|"
+      "NET_OK|",
+      "ROOT|fault|child=3",
+      "ROOT|restart|child=3|count=3",
+      "ROOT|restart|child=3|count=4",
+      "NET_OK|FAULT_AFTER2"
     ]
   },
   "phase-zero-baseline": {
@@ -182,19 +176,6 @@
       "the crasher PD does not enter production",
       "beam_server remains a Root child",
       "the Root to blk_virt give-up channel remains present"
-    ]
-  },
-  "restart-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "Root catches a deliberately faulting child",
-      "restart counts are monotonic",
-      "Root gives up after the configured budget"
-    ],
-    "required_markers": [
-      "CRASHER|init|n=",
-      "ROOT|restart|child=4|count=",
-      "ROOT|giveup|child=4|reason=budget-exhausted"
     ]
   },
   "restart-topology": {
@@ -224,41 +205,26 @@
       "pure runtime policies pass in ReleaseFast"
     ]
   },
-  "serial-fault-smoke": {
+  "serial-recovery": {
     "kind": "qemu",
     "protects": [
-      "a genuine serial-driver fault reaches Root",
-      "serial transmit and receive recover"
-    ],
-    "required_markers": [
-      "ROOT|fault|child=0",
-      "ROOT|restart|child=0|count=1",
-      "SERIAL_AFTER|42",
-      "SERIAL_RX|3"
-    ]
-  },
-  "serial-restart-smoke": {
-    "kind": "qemu",
-    "protects": [
+      "Root catches a deliberately faulting child",
+      "restart counts are monotonic",
+      "Root gives up after the configured budget",
       "a requested healthy serial-driver restart is authorized",
-      "serial transmit and receive recover"
+      "serial transmit and receive recover",
+      "a genuine serial-driver fault reaches Root"
     ],
     "required_markers": [
+      "CRASHER|init|n=",
+      "ROOT|restart|child=4|count=",
+      "ROOT|giveup|child=4|reason=budget-exhausted",
       "PD_RESTART|request|class=serial",
       "ROOT|debug-restart|child=0",
       "SERIAL_AFTER|42",
-      "SERIAL_RX|3"
-    ]
-  },
-  "shell-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "guest Erlang test modules load from FAT",
-      "interactive Eshell input and output work"
-    ],
-    "required_markers": [
-      "TEST_MODULES|",
-      "SHELL_EVAL|2"
+      "SERIAL_RX|3",
+      "ROOT|fault|child=0",
+      "ROOT|restart|child=0|count=2"
     ]
   },
   "socket-smoke": {
@@ -272,47 +238,26 @@
       "SOCKET_SMOKE|PASS"
     ]
   },
-  "tcp-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "guest gen_tcp accepts host connections",
-      "guest gen_tcp connects to a host listener",
-      "TCP payloads survive in both directions"
-    ],
-    "required_markers": [
-      "LISTENER_UP",
-      "ECHOED",
-      "NET_OK|CHRYSO_PING"
-    ]
-  },
   "test-modules": {
     "kind": "compile",
     "protects": [
       "guest Erlang probes compile with warnings as errors"
     ]
   },
-  "timer-fault-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "a genuine timer-driver fault reaches Root",
-      "monotonic time and delayed sends recover"
-    ],
-    "required_markers": [
-      "ROOT|fault|child=1",
-      "ROOT|restart|child=1|count=1",
-      "TIMER_AFTER|"
-    ]
-  },
-  "timer-restart-smoke": {
+  "timer-recovery": {
     "kind": "qemu",
     "protects": [
       "a requested healthy timer-driver restart is authorized",
-      "monotonic time and delayed sends recover"
+      "monotonic time and delayed sends recover",
+      "a genuine timer-driver fault reaches Root"
     ],
     "required_markers": [
       "PD_RESTART|request|class=timer",
       "ROOT|debug-restart|child=1",
-      "TIMER_AFTER|"
+      "TIMER_AFTER|",
+      "ROOT|fault|child=1",
+      "ROOT|restart|child=1|count=2",
+      "SLEPT_FAULT_AFTER|"
     ]
   },
   "treefmt": {

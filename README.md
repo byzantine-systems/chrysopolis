@@ -92,10 +92,14 @@ nix fmt
 # All hermetic QEMU checks
 nix flake check -L
 # ...or one at a time:
-nix build .#checks.x86_64-linux.boot-smoke -L
+nix build .#checks.x86_64-linux.boot-shell-tcp -L
+# The same grouped test is linked to the image package:
+nix build .#test-image.tests.boot-shell-tcp -L
+# Run an isolated scenario while debugging:
+nix build .#vm-scenario-shell-smoke -L
 ```
 
-All QEMU checks gate the build. Each boots an image under emulation and asserts on the serial trace or drives an external peer. Host-only checks validate pure runtime logic, ABI values, generated topology, ELF layout, test modules, diagnostics, and formatting.
+All QEMU checks gate the build. Compatible scenarios share a QEMU boot in the `boot-shell-tcp`, `serial-recovery`, `timer-recovery`, `blk-recovery`, and `net-recovery` checks. The scenarios merged into these groups remain available as `vm-scenario-<name>` packages for isolated debugging. The remaining checks retain separate boots, including both boots in `rng-smoke`. Host-only checks validate pure runtime logic, ABI values, generated topology, ELF layout, test modules, diagnostics, and formatting.
 
 Core function:
 

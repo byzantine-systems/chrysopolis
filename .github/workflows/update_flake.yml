@@ -17,11 +17,16 @@ jobs:
         with:
           lfs: true
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: cachix/install-nix-action@v31
       - name: Update flake.lock
-        uses: DeterminateSystems/update-flake-lock@main
+        run: nix flake update
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@v8
         with:
-          pr-title: "[Nix] Update flake.lock"
-          pr-labels: |
+          add-paths: flake.lock
+          branch: automation/update-flake-lock
+          commit-message: "[Nix] Update flake.lock"
+          title: "[Nix] Update flake.lock"
+          labels: |
             dependencies
             automation
