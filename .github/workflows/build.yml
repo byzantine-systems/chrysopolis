@@ -1,14 +1,5 @@
-# CI pipeline: formatting, compilation safety, image packaging
-# and a headless QEMU boot of the synthesized system image.
-#
-# Staged pipeline (https://nixcademy.com/posts/nixos-integration-test-on-github/):
-#   1. treefmt gates everything
-#   1b. The pure gates (production SDF, tests/*.erl compile) run in parallel
-#      with the image build: seconds each, no QEMU, no cross build to wait on.
-#   2. The images (bring-up + ERTS-linked) and the FAT disk build ONCE.
-#   3. QEMU smoke tests, at most 3 at a time to stay within shared-runner
-#      limits. They restore the images from the cache, build only their own
-#      test derivation, and their post-run upload is a few KB of test log.
+# Build images once, transfer their Nix store closure, then run grouped QEMU
+# checks. Formatting and pure gates start alongside the image build.
 name: "[Nix] Build & Test"
 
 on:
@@ -23,6 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
+      - run: python3 nix/ci-check-vm-matrix.py
       - run: nix build .#checks.x86_64-linux.treefmt --print-build-logs
 
   # Cheap, pure gate: no QEMU, so it runs alongside the image build rather than
@@ -30,7 +22,6 @@ jobs:
   # beam_server -> root debug channels) stay out of the production topology.
   sdf-gate:
     name: "[Nix] Production SDF gate"
-    needs: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -42,7 +33,6 @@ jobs:
   # under a minute instead of behind the cross build in the image job.
   test-modules:
     name: "[Nix] Compile test probes"
-    needs: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -54,7 +44,6 @@ jobs:
   # fails in seconds on a broken boundary or state transition.
   runtime-host-tests:
     name: "[Nix] Runtime host tests"
-    needs: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -63,24 +52,31 @@ jobs:
 
   image:
     name: "[Nix] Build images + disk"
-    needs: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
       # Everything the smoke tests boot: the ERTS-linked image, the bring-up
-      # image, the restart and budget-decay images, and their FAT disk. Built
-      # once here so the fanned-out test jobs
-      # restore them from the cache instead of each rebuilding them.
-      - run: nix build .#test-image .#default .#disk .#restart-image .#budget-decay-image --print-build-logs
+      # image, every test variant, and their FAT disk. Export their closure to
+      # /nix, which has space for it on the CI runner.
+      - run: sudo install -d -o "$USER" -g "$USER" /nix/ci-image-transfer
+      - run: bash nix/ci-transfer-images.sh export /nix/ci-image-transfer
       # Generate the normalized artifact baseline from these images and check
       # its compact fingerprint against the reviewed value in the repository.
       - run: nix build .#checks.x86_64-linux.phase-zero-baseline --print-build-logs
+      - name: Upload image closure
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-image-closure
+          path: /nix/ci-image-transfer/
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 1
 
   # Root's restart topology read from the Microkit tool's report.txt for both
   # the production and restart images: entries, priorities, fault endpoints,
   # TCB cap slots and restart channels. No QEMU, but it needs the images, so it
-  # restores them from the cache after the image job.
+  # imports them after the image job.
   restart-topology:
     name: "[Nix] Restart topology"
     needs: image
@@ -88,6 +84,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
+      - run: sudo install -d -o "$USER" -g "$USER" /nix/ci-image-transfer
+      - name: Download image closure
+        uses: actions/download-artifact@v8
+        with:
+          name: ci-image-closure
+          path: /nix/ci-image-transfer
+      - run: bash nix/ci-transfer-images.sh import /nix/ci-image-transfer
+      - run: python3 nix/ci-check-image-store.py restart-topology
       - run: nix build .#checks.x86_64-linux.restart-topology --print-build-logs
 
   test:
@@ -97,40 +101,30 @@ jobs:
     strategy:
       # Let independent smoke tests finish even if one fails.
       fail-fast: false
-      max-parallel: ${{ fromJSON(vars.MAX_PARALLEL_JOBS) }}
+      max-parallel: 3
       matrix:
         check:
-          - boot-smoke
+          - boot-shell-tcp
           - socket-smoke
-          - shell-smoke
-          - tcp-smoke
           - rng-smoke
-          # Fault detection: root catches a deliberately faulting child, restarts
-          # it until the budget is spent, then gives up.
-          - restart-smoke
-          # The test Root refills a timed window while retaining a hard
-          # lifetime ceiling. Production still uses the original policy.
           - budget-decay-smoke
-          # BEAM PD recovery: an ERTS exit restarts beam_server to a fresh 1>
-          # with none of the previous VM's state.
           - beam-restart-smoke
-          # Per-class recovery: a HEALTHY driver is restarted on request and the
-          # subsystem must keep working.
-          - serial-restart-smoke
-          - timer-restart-smoke
-          - blk-restart-smoke
-          - net-restart-smoke
-          # Composed production path: each real driver faults, root catches it,
-          # and the same subsystem recovery assertions pass afterwards.
-          - serial-fault-smoke
-          - timer-fault-smoke
-          - blk-fault-smoke
-          - net-fault-smoke
-          # End of the ladder: the restart budget is spent, root stops the
-          # driver for good, and the system must degrade rather than wedge. The
-          # budget is spent through genuine block-driver faults only.
+          - serial-recovery
+          - timer-recovery
+          - blk-recovery
+          - net-recovery
           - blk-giveup-smoke
+          - cothread-smoke
+          - lifecycle-config-failure-smoke
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
+      - run: sudo install -d -o "$USER" -g "$USER" /nix/ci-image-transfer
+      - name: Download image closure
+        uses: actions/download-artifact@v8
+        with:
+          name: ci-image-closure
+          path: /nix/ci-image-transfer
+      - run: bash nix/ci-transfer-images.sh import /nix/ci-image-transfer
+      - run: python3 nix/ci-check-image-store.py ${{ matrix.check }}
       - run: nix build .#checks.x86_64-linux.${{ matrix.check }} --print-build-logs

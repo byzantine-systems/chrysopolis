@@ -23,6 +23,36 @@
         name = "chrysopolis-abi-dependencies";
       };
       hex = value: "0x${pkgs.lib.toHexString value}";
+      individualVmNames = [
+        "boot-smoke"
+        "shell-smoke"
+        "tcp-smoke"
+        "restart-smoke"
+        "serial-restart-smoke"
+        "serial-fault-smoke"
+        "timer-restart-smoke"
+        "timer-fault-smoke"
+        "blk-restart-smoke"
+        "blk-fault-smoke"
+        "net-restart-smoke"
+        "net-fault-smoke"
+      ];
+      vmTests = import ../tests.nix {
+        inherit pkgs;
+        sel4SystemImage = config.packages.default;
+        sel4TestImage = config.packages.test-image;
+        sel4RestartImage = config.packages.restart-image;
+        sel4BudgetDecayImage = config.packages.budget-decay-image;
+        sel4LifecycleFailureImage = config.packages.lifecycle-failure-image;
+        sel4ThreadProbeImage = config.packages.cothread-probe-image;
+        fatDisk = config.packages.disk;
+      };
+      vmScenarioPackages = builtins.listToAttrs (
+        map (name: {
+          name = "vm-scenario-${name}";
+          value = vmTests.${name};
+        }) individualVmNames
+      );
 
       # The behavioral baseline documents every check visible in the final
       # flake output, including treefmt, which is contributed by devshell.nix.
@@ -121,7 +151,8 @@
           mv "$out/current-a.json" "$out/baseline.json"
           rm "$out/current-b.json"
         '';
-      };
+      }
+      // vmScenarioPackages;
 
       checks = {
         # Dependency direction, explicit first-party source membership,
@@ -366,16 +397,7 @@
             cp ${config.packages.phase-zero-baseline-current}/baseline.json $out
           '';
         }
-        // import ../tests.nix {
-          inherit pkgs;
-          sel4SystemImage = config.packages.default;
-          sel4TestImage = config.packages.test-image;
-          sel4RestartImage = config.packages.restart-image;
-          sel4BudgetDecayImage = config.packages.budget-decay-image;
-          sel4LifecycleFailureImage = config.packages.lifecycle-failure-image;
-          sel4ThreadProbeImage = config.packages.cothread-probe-image;
-          fatDisk = config.packages.disk;
-        }
+        // builtins.removeAttrs vmTests individualVmNames
       );
     };
 }

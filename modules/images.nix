@@ -418,6 +418,23 @@
               -r $out/report.txt
           '';
         };
+
+      # Package review tooling can discover grouped checks through
+      # passthru.tests. This metadata does not change an image's build inputs.
+      withImageTests =
+        image: names:
+        image.overrideAttrs (old: {
+          passthru =
+            (old.passthru or { })
+            // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+              tests = builtins.listToAttrs (
+                map (name: {
+                  inherit name;
+                  value = config.checks.${name};
+                }) names
+              );
+            };
+        });
     in
     {
       packages = {
@@ -538,29 +555,36 @@
             '';
 
         # Bring-up image (console + clock + heap, no ERTS).
-        default = mkSel4Image {
+        default = withImageTests (mkSel4Image {
           imgName = "sel4-beam-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_server.elf";
-        };
+        }) [ "socket-smoke" ];
 
         # ERTS-linked image: the same PD topology with liberts.a linked in,
         # so beam_server's init() hands off to erl_start.
-        test-image = mkSel4Image {
-          imgName = "sel4-beam-test-image";
-          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
-        };
+        test-image =
+          withImageTests
+            (mkSel4Image {
+              imgName = "sel4-beam-test-image";
+              beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+            })
+            [
+              "boot-shell-tcp"
+              "rng-smoke"
+              "beam-restart-smoke"
+            ];
 
         # Diagnostic C pthread probe on the bring-up topology. The probe code
         # is compiled only by beam-zig-diagnostic and is absent from shipped
         # beam_server and ERTS-linked images.
-        cothread-probe-image = mkSel4Image {
+        cothread-probe-image = withImageTests (mkSel4Image {
           imgName = "sel4-beam-cothread-probe-image";
           beamElf = "${config.packages.beam-zig-diagnostic}/bin/beam_server.elf";
-        };
+        }) [ "cothread-smoke" ];
 
         # Test-only image with a correctly sized but invalid required config.
         # The runtime must catch this before following any patched address.
-        lifecycle-failure-image = mkSel4Image {
+        lifecycle-failure-image = withImageTests (mkSel4Image {
           imgName = "sel4-beam-lifecycle-failure-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_server.elf";
           corruptConfig = {
@@ -568,29 +592,38 @@
             section = runtimeAbi.sections.serial_client;
             elf = "beam_server.elf";
           };
-        };
+        }) [ "lifecycle-config-failure-smoke" ];
 
         # ERTS image plus test-only control channels and the crasher child of
         # root. The restart/fault checks share this image so each boots the same
         # topology while selecting how the target driver goes down.
-        restart-image = mkSel4Image {
-          imgName = "sel4-beam-restart-image";
-          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
-          sdf = config.packages.sdf-restart;
-          extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
-          restartDebug = true;
-        };
+        restart-image =
+          withImageTests
+            (mkSel4Image {
+              imgName = "sel4-beam-restart-image";
+              beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+              sdf = config.packages.sdf-restart;
+              extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
+              restartDebug = true;
+            })
+            [
+              "serial-recovery"
+              "timer-recovery"
+              "blk-recovery"
+              "net-recovery"
+              "blk-giveup-smoke"
+            ];
 
         # Same restart SDF, but Root selects a short test-only fault window.
         # The normal root.elf remains the sole Root in shipped images.
-        budget-decay-image = mkSel4Image {
+        budget-decay-image = withImageTests (mkSel4Image {
           imgName = "sel4-beam-budget-decay-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
           rootElf = "${config.packages.beam-zig}/bin/root_budget_test.elf";
           sdf = config.packages.sdf-restart;
           extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
           restartDebug = true;
-        };
+        }) [ "budget-decay-smoke" ];
       };
     };
 }

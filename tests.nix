@@ -122,6 +122,27 @@ let
     ''
       import re
       import time
+      import json
+      import os
+      from pathlib import Path
+
+      group_observations = []
+
+      def record_observation(scenario, **facts):
+          group_observations.append({"scenario": scenario, **facts})
+
+      def save_group_observations(machine, name):
+          """Keep stable host observations in the test output."""
+          output = os.environ.get("out")
+          if output is None:
+              return
+          directory = Path(output)
+          try:
+              (directory / f"{name}.observations.json").write_text(
+                  json.dumps(group_observations, indent=2, sort_keys=True) + "\n"
+              )
+          except OSError as err:
+              machine.log(f"could not save grouped observations: {err}")
 
       def wait_console(machine, regex, timeout):
           """Wait until `regex` matches the accumulated console log."""
@@ -152,6 +173,33 @@ let
           seen = len(re.findall(regex, machine.get_console_log()))
           raise Exception(
               f"timed out waiting for {count}x {regex!r} on console (saw {seen})"
+          )
+
+      def wait_console_since(machine, regex, offset, timeout):
+          """Match only output emitted after an earlier scenario's log offset."""
+          with machine.nested(f"waiting for {regex!r} after offset {offset}"):
+              deadline = time.time() + timeout
+              while time.time() < deadline:
+                  match = re.search(regex, machine.get_console_log()[offset:])
+                  if match is not None:
+                      return match
+                  time.sleep(1)
+          raise Exception(f"timed out waiting for new {regex!r} on console")
+
+      def assert_fault_event(machine, child, restart_count, offset):
+          """Prove an injected fault caused the expected restart in this stage."""
+          log = machine.get_console_log()[offset:]
+          injection = re.search(r"ROOT\|fault-inject\|child=%d" % child, log)
+          fault = re.search(r"ROOT\|fault\|child=%d(?:\||$)" % child, log)
+          restart = re.search(
+              r"ROOT\|restart\|child=%d\|count=%d" % (child, restart_count),
+              log,
+          )
+          assert injection and fault and restart, (
+              f"child {child}: missing injected fault or restart {restart_count}"
+          )
+          assert injection.start() < fault.start() < restart.start(), (
+              f"child {child}: injected fault and restart were out of order"
           )
 
       def assert_fault_sequence(machine, child, count):
@@ -1499,6 +1547,410 @@ in
               "network fault test used the healthy debug-restart path"
           assert_no_pd_fault(chryso)
       finally:
+          power_off(chryso)
+    '';
+  };
+
+  # One production boot covers the boot milestones, shell, and both TCP
+  # directions. The host forwarding rule is harmless until the TCP subtest.
+  boot-shell-tcp = mkSel4Test {
+    name = "boot-shell-tcp";
+    image = sel4TestImage;
+    netdev = "user,id=net0,hostfwd=tcp::5555-:5555";
+    testScript = ''
+      import socket
+
+      try:
+          with subtest("boot-smoke"):
+              wait_console(chryso, r"Eshell", 300)
+              log = chryso.get_console_log()
+              for milestone in [
+                  "beam_server up on the LionsOS reference stack.",
+                  "monotonic clock via sDDF timer:",
+                  "Handing off to ERTS core loop...",
+                  "MBR partitioning detected",
+              ]:
+                  assert milestone in log, f"missing boot milestone: {milestone}"
+              assert_no_pd_fault(chryso)
+              assert_no_beam_fault(chryso)
+              record_observation("boot-smoke", milestone_count=4)
+
+          with subtest("shell-smoke"):
+              load_test_modules(chryso)
+              chryso.send_console("chryso_test:eval_check().\r")
+              wait_console(chryso, r"SHELL_EVAL\|2", 60)
+              wait_console(chryso, r"(?m)2\x1b\[0m|^2$", 60)
+              assert_no_pd_fault(chryso)
+              assert_no_beam_fault(chryso)
+              record_observation("shell-smoke", result=2)
+
+          with subtest("tcp-smoke host to guest"):
+              wait_console(chryso, r"SOCKET_SMOKE\|DHCP:", 300)
+              chryso.send_console("chryso_net:echo_server(5555).\r")
+              wait_console(chryso, r"LISTENER_UP", 60)
+              time.sleep(3)
+              payload = b"CHRYSO_ECHO"
+              echoed = None
+              for attempt in range(30):
+                  try:
+                      with socket.create_connection(("127.0.0.1", 5555), timeout=3) as conn:
+                          conn.settimeout(3)
+                          conn.sendall(payload)
+                          echoed = recv_exactly(conn, len(payload), "echo")
+                      if echoed == payload:
+                          break
+                  except OSError as err:
+                      chryso.log(f"echo attempt {attempt}: {err}")
+                  time.sleep(2)
+              assert echoed == payload, "host to guest gen_tcp echo failed"
+              wait_console(chryso, r"ECHOED", 60)
+              record_observation("tcp-smoke-host-to-guest", payload=echoed.decode())
+
+          with subtest("tcp-smoke guest to host"):
+              with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+                  srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                  srv.bind(("127.0.0.1", 5566))
+                  srv.listen(1)
+                  srv.settimeout(120)
+                  chryso.send_console("chryso_net:ping('chryso_ping', 5566).\r")
+                  try:
+                      conn, _addr = srv.accept()
+                  except TimeoutError:
+                      raise AssertionError("guest never connected to host listener") from None
+                  with conn:
+                      conn.settimeout(30)
+                      got = recv_exactly(conn, len(b"CHRYSO_PING"), "chryso_ping")
+              assert got == b"CHRYSO_PING", f"host listener received {got!r}"
+              wait_console(chryso, r"NET_OK\|CHRYSO_PING", 60)
+              assert_no_pd_fault(chryso)
+              assert_no_beam_fault(chryso)
+              record_observation("tcp-smoke-guest-to-host", payload=got.decode())
+      finally:
+          save_group_observations(chryso, "boot-shell-tcp")
+          power_off(chryso)
+    '';
+  };
+
+  # The crasher's fault ladder happens at boot. Serial's requested restart
+  # and injected fault then use the same restart topology and console.
+  serial-recovery = mkSel4Test {
+    name = "serial-recovery";
+    image = sel4RestartImage;
+    testScript = ''
+      try:
+          with subtest("restart-smoke"):
+              wait_console(chryso, r"Eshell", 300)
+              log = chryso.get_console_log()
+              ns = [int(n) for n in re.findall(r"CRASHER\|init\|n=(\d+)", log)]
+              assert ns and max(ns) >= 2, f"crasher never restarted: {ns}"
+              restarts = [
+                  int(n) for n in re.findall(
+                      r"ROOT\|restart\|child=4\|count=(\d+)", log
+                  )
+              ]
+              assert restarts and max(restarts) >= 2, (
+                  f"crasher restart count never climbed: {restarts}"
+              )
+              assert re.search(
+                  r"ROOT\|giveup\|child=4\|reason=budget-exhausted", log
+              ), "root never gave up on the crasher"
+              assert_no_pd_fault(chryso)
+              record_observation("restart-smoke", budget_exhausted=True)
+
+          load_test_modules(chryso)
+          with subtest("serial-restart-smoke"):
+              chryso.send_console("chryso_test:serial_before().\r")
+              wait_console(chryso, r"SERIAL_BEFORE\|2", 60)
+              chryso.send_console("chryso_test:restart_pd('serial').\r")
+              wait_console(chryso, r"PD_RESTART\|request\|class=serial", 60)
+              wait_console(chryso, r"ROOT\|debug-restart\|child=${serialChild}\|count=1", 60)
+              chryso.send_console("chryso_test:serial_after().\r")
+              wait_console(chryso, r"SERIAL_AFTER\|42", 120)
+              chryso.send_console("chryso_test:serial_rx().\r")
+              wait_console(chryso, r"SERIAL_RX\|3", 120)
+              assert_no_pd_fault(chryso)
+              record_observation("serial-restart-smoke", restart_count=1)
+
+          with subtest("serial-fault-smoke"):
+              offset = len(chryso.get_console_log())
+              chryso.send_console("chryso_test:serial_before().\r")
+              wait_console_since(chryso, r"SERIAL_BEFORE\|2", offset, 60)
+              chryso.send_console("chryso_test:fault_pd('serial').\r")
+              wait_console_since(
+                  chryso, r"PD_RESTART\|request\|class=serial\|mode=fault",
+                  offset, 60,
+              )
+              wait_console_since(
+                  chryso, r"ROOT\|restart\|child=${serialChild}\|count=2",
+                  offset, 60,
+              )
+              assert_fault_event(chryso, ${serialChild}, 2, offset)
+              chryso.send_console("chryso_test:serial_after().\r")
+              wait_console_since(chryso, r"SERIAL_AFTER\|42", offset, 120)
+              chryso.send_console("chryso_test:serial_rx().\r")
+              wait_console_since(chryso, r"SERIAL_RX\|3", offset, 120)
+              assert "ROOT|debug-restart|child=${serialChild}" not in (
+                  chryso.get_console_log()[offset:]
+              ), "serial fault used the requested-restart path"
+              assert_no_pd_fault(chryso)
+              record_observation("serial-fault-smoke", restart_count=2)
+      finally:
+          save_group_observations(chryso, "serial-recovery")
+          power_off(chryso)
+    '';
+  };
+
+  timer-recovery = mkSel4Test {
+    name = "timer-recovery";
+    image = sel4RestartImage;
+    testScript = ''
+      def monotonic(tag):
+          label = "CLOCK_" + tag.upper()
+          chryso.send_console("chryso_clock:now_tagged('" + tag + "').\r")
+          wait_console(chryso, label + r"\|-?\d+", 60)
+          values = re.findall(label + r"\|(-?\d+)", chryso.get_console_log())
+          assert values, f"no {label} reading"
+          return int(values[-1])
+
+      def sleep_works(tag, timeout):
+          label = tag.upper()
+          chryso.send_console("chryso_clock:sleep_check('" + tag + "').\r")
+          wait_console(chryso, label + r"\|\d+", timeout)
+          values = re.findall(label + r"\|(\d+)", chryso.get_console_log())
+          assert values and int(values[-1]) >= 500, (
+              f"{label}: timer:sleep(500) returned too early"
+          )
+
+      try:
+          load_test_modules(chryso)
+          with subtest("timer-restart-smoke"):
+              sleep_works("slept_before", 120)
+              before = monotonic("before")
+              chryso.send_console("chryso_test:restart_pd('timer').\r")
+              wait_console(chryso, r"PD_RESTART\|request\|class=timer", 60)
+              wait_console(
+                  chryso, r"ROOT\|debug-restart\|child=${timerChild}\|count=1", 60
+              )
+              after = monotonic("after")
+              assert after > before, f"clock did not advance: {before} -> {after}"
+              sleep_works("slept_after", 180)
+              assert_no_pd_fault(chryso)
+              record_observation("timer-restart-smoke", clock_advanced=True)
+
+          with subtest("timer-fault-smoke"):
+              offset = len(chryso.get_console_log())
+              sleep_works("slept_fault_before", 120)
+              before = monotonic("fault_before")
+              chryso.send_console("chryso_test:fault_pd('timer').\r")
+              wait_console_since(
+                  chryso, r"PD_RESTART\|request\|class=timer\|mode=fault",
+                  offset, 60,
+              )
+              wait_console_since(
+                  chryso, r"ROOT\|restart\|child=${timerChild}\|count=2",
+                  offset, 60,
+              )
+              assert_fault_event(chryso, ${timerChild}, 2, offset)
+              after = monotonic("fault_after")
+              assert after > before, f"clock did not advance: {before} -> {after}"
+              sleep_works("slept_fault_after", 180)
+              assert "ROOT|debug-restart|child=${timerChild}" not in (
+                  chryso.get_console_log()[offset:]
+              ), "timer fault used the requested-restart path"
+              assert_no_pd_fault(chryso)
+              record_observation("timer-fault-smoke", clock_advanced=True)
+      finally:
+          save_group_observations(chryso, "timer-recovery")
+          power_off(chryso)
+    '';
+  };
+
+  blk-recovery = mkSel4Test {
+    name = "blk-recovery";
+    image = sel4RestartImage;
+    testScript = ''
+      try:
+          load_test_modules(chryso)
+          with subtest("blk-restart-smoke idle"):
+              chryso.send_console("chryso_fs:read_tagged('before', lists).\r")
+              wait_console(chryso, r"FS_BEFORE\|\d+", 120)
+              chryso.send_console("chryso_test:restart_pd('blk').\r")
+              wait_console(chryso, r"PD_RESTART\|request\|class=blk", 60)
+              wait_console(
+                  chryso, r"ROOT\|debug-restart\|child=${blkChild}\|count=1", 60
+              )
+              wait_console(chryso, r"driver restarted, reconciling", 60)
+              wait_console(
+                  chryso, r"driver restarted: failed \d+ client request", 60
+              )
+              chryso.send_console("chryso_fs:read_tagged('after_idle', lists).\r")
+              wait_console(chryso, r"FS_AFTER_IDLE\|\d+", 180)
+              record_observation("blk-restart-smoke-idle", restart_count=1)
+
+          with subtest("blk-restart-smoke in flight"):
+              offset = len(chryso.get_console_log())
+              chryso.send_console("chryso_fs:read_inflight(dict).\r")
+              chryso.send_console("chryso_test:restart_pd('blk').\r")
+              wait_console_since(
+                  chryso, r"ROOT\|debug-restart\|child=${blkChild}\|count=2",
+                  offset, 60,
+              )
+              wait_console_since(
+                  chryso, r"FS_INFLIGHT\|(ok|error|EXIT)", offset, 180
+              )
+              chryso.send_console("chryso_fs:read_tagged('after_inflight', lists).\r")
+              wait_console(chryso, r"FS_AFTER_INFLIGHT\|\d+", 180)
+              assert_no_pd_fault(chryso)
+              record_observation("blk-restart-smoke-in-flight", restart_count=2)
+
+          with subtest("blk-fault-smoke idle"):
+              offset = len(chryso.get_console_log())
+              chryso.send_console(
+                  "chryso_fs:read_tagged('fault_before', lists).\r"
+              )
+              wait_console(chryso, r"FS_FAULT_BEFORE\|\d+", 120)
+              chryso.send_console("chryso_test:fault_pd('blk').\r")
+              wait_console_since(
+                  chryso, r"PD_RESTART\|request\|class=blk\|mode=fault",
+                  offset, 60,
+              )
+              wait_console_since(
+                  chryso, r"ROOT\|restart\|child=${blkChild}\|count=3",
+                  offset, 60,
+              )
+              assert_fault_event(chryso, ${blkChild}, 3, offset)
+              wait_console_since(
+                  chryso, r"driver restarted, reconciling", offset, 60
+              )
+              chryso.send_console(
+                  "chryso_fs:read_tagged('fault_after_idle', lists).\r"
+              )
+              wait_console(chryso, r"FS_FAULT_AFTER_IDLE\|\d+", 180)
+              record_observation("blk-fault-smoke-idle", restart_count=3)
+
+          with subtest("blk-fault-smoke in flight"):
+              offset = len(chryso.get_console_log())
+              chryso.send_console("chryso_fs:read_during_fault().\r")
+              wait_console_since(
+                  chryso, r"ROOT\|restart\|child=${blkChild}\|count=4",
+                  offset, 60,
+              )
+              assert_fault_event(chryso, ${blkChild}, 4, offset)
+              wait_console_since(
+                  chryso, r"driver restarted, reconciling", offset, 60
+              )
+              outcome = wait_console_since(
+                  chryso, r"FS_INFLIGHT\|(ok|error|EXIT)", offset, 180
+              )
+              stage = chryso.get_console_log()[offset:]
+              fault = re.search(r"ROOT\|fault\|child=${blkChild}(?:\||$)", stage)
+              assert fault and fault.start() < outcome.start(), (
+                  "in-flight block client answered before the injected fault"
+              )
+              chryso.send_console(
+                  "chryso_fs:read_tagged('fault_after_inflight', lists).\r"
+              )
+              wait_console(chryso, r"FS_FAULT_AFTER_INFLIGHT\|\d+", 180)
+              assert "ROOT|debug-restart|child=${blkChild}" not in stage, (
+                  "block fault used the requested-restart path"
+              )
+              assert_no_pd_fault(chryso)
+              record_observation("blk-fault-smoke-in-flight", restart_count=4)
+      finally:
+          save_group_observations(chryso, "blk-recovery")
+          power_off(chryso)
+    '';
+  };
+
+  net-recovery = mkSel4Test {
+    name = "net-recovery";
+    image = sel4RestartImage;
+    testScript = ''
+      import socket
+
+      def tcp_ping(tag, port):
+          expected = tag.upper().encode()
+          try:
+              with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+                  srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                  srv.bind(("127.0.0.1", port))
+                  srv.listen(1)
+                  srv.settimeout(180)
+                  chryso.send_console(
+                      "chryso_net:ping('" + tag + "', " + str(port) + ").\r"
+                  )
+                  try:
+                      conn, _addr = srv.accept()
+                  except TimeoutError:
+                      raise AssertionError(f"{tag}: guest never connected") from None
+                  with conn:
+                      conn.settimeout(60)
+                      got = recv_exactly(conn, len(expected), tag)
+              assert got == expected, f"{tag}: host received {got!r}"
+              wait_console(chryso, r"NET_OK\|" + tag.upper(), 60)
+          except AssertionError:
+              net_postmortem(chryso, tag, port)
+              raise
+
+      def restart_eth(count):
+          offset = len(chryso.get_console_log())
+          chryso.send_console("chryso_test:restart_pd('eth').\r")
+          wait_console_since(
+              chryso, r"PD_RESTART\|request\|class=eth", offset, 60
+          )
+          wait_console_since(
+              chryso, r"ROOT\|debug-restart\|child=${ethChild}\|count="
+              + str(count), offset, 60,
+          )
+          wait_console_since(
+              chryso, r"ETH\|restart\|reclaimed\|rx=\d+\|tx=\d+",
+              offset, 60,
+          )
+
+      def fault_eth(count):
+          offset = len(chryso.get_console_log())
+          chryso.send_console("chryso_test:fault_pd('eth').\r")
+          wait_console_since(
+              chryso, r"PD_RESTART\|request\|class=eth\|mode=fault",
+              offset, 60,
+          )
+          wait_console_since(
+              chryso, r"ROOT\|restart\|child=${ethChild}\|count="
+              + str(count), offset, 60,
+          )
+          assert_fault_event(chryso, ${ethChild}, count, offset)
+          wait_console_since(
+              chryso, r"ETH\|restart\|reclaimed\|rx=\d+\|tx=\d+",
+              offset, 60,
+          )
+          assert "ROOT|debug-restart|child=${ethChild}" not in (
+              chryso.get_console_log()[offset:]
+          ), "network fault used the requested-restart path"
+
+      try:
+          wait_console(chryso, r"SOCKET_SMOKE\|DHCP:", 300)
+          load_test_modules(chryso)
+          with subtest("net-restart-smoke baseline"):
+              tcp_ping("before", 5570)
+              record_observation("net-restart-smoke-baseline", port=5570)
+          with subtest("net-restart-smoke twice"):
+              restart_eth(1)
+              tcp_ping("after1", 5571)
+              restart_eth(2)
+              tcp_ping("after2", 5572)
+              assert_no_pd_fault(chryso)
+              record_observation("net-restart-smoke", restart_count=2)
+
+          with subtest("net-fault-smoke twice"):
+              tcp_ping("fault_before", 5580)
+              fault_eth(3)
+              tcp_ping("fault_after1", 5581)
+              fault_eth(4)
+              tcp_ping("fault_after2", 5582)
+              assert_no_pd_fault(chryso)
+              record_observation("net-fault-smoke", restart_count=4)
+      finally:
+          save_group_observations(chryso, "net-recovery")
           power_off(chryso)
     '';
   };

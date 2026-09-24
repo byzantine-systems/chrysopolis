@@ -1,8 +1,7 @@
-# Shared Nix setup for all CI jobs, based on
-# https://nixcademy.com/posts/nixos-integration-test-on-github/
-# with Magic Nix Cache sharing builds between the pipeline stages.
+# Shared Nix setup for all CI jobs. The image and VM jobs configure the
+# GitHub cache separately, so this action only installs Nix.
 name: "Setup Nix"
-description: "Reclaim disk space, install Nix, and enable the build cache"
+description: "Reclaim disk space and install Nix"
 runs:
   using: "composite"
   steps:
@@ -16,6 +15,6 @@ runs:
       shell: bash
       run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-    - uses: DeterminateSystems/nix-installer-action@v22
-
-    - uses: DeterminateSystems/magic-nix-cache-action@v14
+    - uses: cachix/install-nix-action@v31
+      with:
+        set_as_trusted_user: true
