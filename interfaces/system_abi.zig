@@ -1,9 +1,8 @@
-//! Parser and invariant checks for runtime-abi.json.
+//! Typed authority and invariant checks for the existing system ABI.
 //!
-//! The JSON file is the value authority shared by the two Zig builds, the
-//! first-party C runtime, Nix image assembly, and integration tests. This file
-//! owns schema validation only. It deliberately does not supply fallback
-//! values, because a malformed or incomplete ABI must stop the build.
+//! The values below are the single authority. The host ABI tool serializes
+//! them to JSON for pure Nix evaluation; both Zig builds validate that
+//! projection before consuming it. No missing field has a fallback value.
 
 const std = @import("std");
 
@@ -83,6 +82,73 @@ pub const ConfigSection = struct {
     elf: []const u8,
 };
 
+pub const values: Contract = .{
+    .version = 1,
+    .microkit = .{ .id_count = 62, .absent_id = 255 },
+    .children = .{ .crasher = 4, .beam = 5 },
+    .drivers = .{
+        .{ .name = "serial", .child = 0, .root_debug_channel = 0, .root_fault_channel = 4, .beam_debug_channel = 58, .beam_fault_channel = 54 },
+        .{ .name = "timer", .child = 1, .root_debug_channel = 1, .root_fault_channel = 5, .beam_debug_channel = 59, .beam_fault_channel = 55 },
+        .{ .name = "blk", .child = 2, .root_debug_channel = 2, .root_fault_channel = 6, .beam_debug_channel = 60, .beam_fault_channel = 56 },
+        .{ .name = "eth", .child = 3, .root_debug_channel = 3, .root_fault_channel = 7, .beam_debug_channel = 61, .beam_fault_channel = 57 },
+    },
+    .giveup = .{ .root_blk_channel = 10, .blk_virt_channel = 61 },
+    .restart = .{
+        .driver_budget = 8,
+        .beam_budget = 64,
+        .entry_fallback = 2097152,
+        .exit_fault_base = 3198156800,
+        .exit_fault_size = 4096,
+        .config_section = ".restart_config",
+        .config_words = 2,
+        .word_bytes = 8,
+        .pd_config_section = ".pd_restart_config",
+        .pd_modes = 2,
+    },
+    .memory = .{
+        .heap = .{ .size = 536870912, .vaddr = 1073741824, .setvar = "beam_heap_start" },
+        .snapshot = .{
+            .size = 524288,
+            .vaddr = 805306368,
+            .setvar = "beam_snapshot_start",
+            .reset_stack_offset = 4096,
+            .reset_stack_size = 16384,
+            .survivors_offset = 20480,
+            .survivors_size = 4096,
+            .data_offset = 24576,
+        },
+    },
+    .sections = .{
+        .serial_client = ".serial_client_config",
+        .timer_client = ".timer_client_config",
+        .fs_client = ".fs_client_config",
+        .net_client = ".net_client_config",
+        .lwip = ".lib_sddf_lwip_config",
+    },
+    .config_sections = &.{
+        .{ .section = ".device_resources", .blob = "serial_driver_device_resources.data", .elf = "serial_driver.elf" },
+        .{ .section = ".serial_driver_config", .blob = "serial_driver_config.data", .elf = "serial_driver.elf" },
+        .{ .section = ".serial_virt_tx_config", .blob = "serial_virt_tx.data", .elf = "serial_virt_tx.elf" },
+        .{ .section = ".serial_virt_rx_config", .blob = "serial_virt_rx.data", .elf = "serial_virt_rx.elf" },
+        .{ .section = ".device_resources", .blob = "timer_driver_device_resources.data", .elf = "timer_driver.elf" },
+        .{ .section = ".serial_client_config", .blob = "serial_client_beam_server.data", .elf = "beam_server.elf" },
+        .{ .section = ".timer_client_config", .blob = "timer_client_beam_server.data", .elf = "beam_server.elf" },
+        .{ .section = ".device_resources", .blob = "blk_driver_device_resources.data", .elf = "blk_driver.elf" },
+        .{ .section = ".blk_driver_config", .blob = "blk_driver.data", .elf = "blk_driver.elf" },
+        .{ .section = ".blk_virt_config", .blob = "blk_virt.data", .elf = "blk_virt.elf" },
+        .{ .section = ".blk_client_config", .blob = "blk_client_fatfs.data", .elf = "fat.elf" },
+        .{ .section = ".fs_server_config", .blob = "fs_server_fatfs.data", .elf = "fat.elf" },
+        .{ .section = ".fs_client_config", .blob = "fs_client_beam_server.data", .elf = "beam_server.elf" },
+        .{ .section = ".device_resources", .blob = "eth_driver_device_resources.data", .elf = "eth_driver.elf" },
+        .{ .section = ".net_driver_config", .blob = "net_driver.data", .elf = "eth_driver.elf" },
+        .{ .section = ".net_virt_rx_config", .blob = "net_virt_rx.data", .elf = "net_virt_rx.elf" },
+        .{ .section = ".net_virt_tx_config", .blob = "net_virt_tx.data", .elf = "net_virt_tx.elf" },
+        .{ .section = ".net_copy_config", .blob = "net_copy_net_copy.data", .elf = "net_copy.elf" },
+        .{ .section = ".net_client_config", .blob = "net_client_beam_server.data", .elf = "beam_server.elf" },
+        .{ .section = ".lib_sddf_lwip_config", .blob = "lib_sddf_lwip_config_beam_server.data", .elf = "beam_server.elf" },
+    },
+};
+
 pub fn load(allocator: std.mem.Allocator, path: []const u8) !Contract {
     const bytes = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
     const contract = try std.json.parseFromSliceLeaky(Contract, allocator, bytes, .{});
@@ -111,7 +177,7 @@ pub fn validate(contract: Contract) !void {
     const reset_stack_top = try std.math.add(u64, snapshot.reset_stack_offset, snapshot.reset_stack_size);
     const survivors_end = try std.math.add(u64, snapshot.survivors_offset, snapshot.survivors_size);
     if (snapshot.reset_stack_offset < page_size or reset_stack_top > snapshot.survivors_offset) return error.InvalidResetStackLayout;
-    // src/runtime/restart.c's _reset installs this top as SP (AAPCS64 wants it
+    // src/pd/beam/restart/restart.c's _reset installs this top as SP (AAPCS64 wants it
     // 16-byte aligned) and loads it with a 16-bit `mov` immediate.
     if (reset_stack_top % 16 != 0 or reset_stack_top > 0xffff) return error.InvalidResetStackLayout;
     if (survivors_end > snapshot.data_offset or snapshot.data_offset >= snapshot.size) return error.InvalidSnapshotDataLayout;
@@ -163,4 +229,24 @@ fn rangesOverlap(a_start: u64, a_size: u64, b_start: u64, b_size: u64) bool {
     const a_end = std.math.add(u64, a_start, a_size) catch return true;
     const b_end = std.math.add(u64, b_start, b_size) catch return true;
     return a_start < b_end and b_start < a_end;
+}
+
+test "typed ABI is valid and rejects conflicting values" {
+    try validate(values);
+
+    var bad = values;
+    bad.children.beam = bad.children.crasher;
+    try std.testing.expectError(error.DuplicateId, validate(bad));
+
+    bad = values;
+    bad.memory.snapshot.vaddr = bad.memory.heap.vaddr;
+    try std.testing.expectError(error.OverlappingRuntimeRegions, validate(bad));
+
+    bad = values;
+    bad.version = 2;
+    try std.testing.expectError(error.UnsupportedAbiVersion, validate(bad));
+}
+
+test "required ABI fields cannot be omitted" {
+    try std.testing.expectError(error.MissingField, std.json.parseFromSliceLeaky(Contract, std.testing.allocator, "{}", .{}));
 }

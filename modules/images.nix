@@ -19,7 +19,7 @@
       ...
     }:
     let
-      runtimeAbi = builtins.fromJSON (builtins.readFile ../tools/sdf/runtime-abi.json);
+      runtimeAbi = builtins.fromJSON (builtins.readFile ../interfaces/generated/system-abi.json);
       inherit (runtimeAbi) config_sections;
       drivers = runtimeAbi.drivers;
 
@@ -33,13 +33,17 @@
       # build.zig.zon + committed build.zig.zon2json-lock and fetches the
       # sdfgen/dtb/sddf Zig packages through Nix, so `zig build` runs
       # offline. A host tool (we run it at build time to emit the SDF).
-      zigSdfTool = chryso.zigEnv.package {
-        src = ../tools/sdf;
-      };
+      sdfToolSource = pkgs.runCommand "chrysopolis-sdf-tool-source" { } ''
+        mkdir -p $out
+        cp -r ${../tools/sdf}/. $out/
+        cp ${../interfaces/system_abi.zig} $out/system_abi.zig
+        cp ${../interfaces/generated/system-abi.json} $out/system-abi.json
+      '';
+      zigSdfTool = chryso.zigEnv.package { src = sdfToolSource; };
 
       # Which gen-sdf config blob lands in which ELF section, as data rather
       # than as twenty near-identical shell lines. The objcopy loop below is
-      # generated from runtime-abi.json, which keeps the mapping readable and
+      # generated from the typed system ABI, which keeps the mapping readable and
       # makes an addition one manifest edit.
       #
       # Worth knowing when this list changes: sdfgen writes the blob and an
@@ -175,7 +179,7 @@
             # universal constant, so derive it from the linked child ELFs rather
             # than hardcoding it. Assert it is uniform across the restartable
             # children (they share microkit.ld, so it must be), then patch it
-            # into root.elf's .restart_config section (root.c reads it there).
+            # into root.elf's .restart_config section (src/pd/root/main.c reads it there).
             # Every child of root is checked, not just a representative pair:
             # root restarts them all to the same address, so a divergent entry
             # anywhere means a silent restart into garbage. beam_server is
@@ -220,11 +224,11 @@
             # tens of megabytes of ERTS/libc state that has to be pristine
             # before the emulator can boot again, so _reset restores its
             # writable segment first and only then enters the normal boot (see
-            # src/runtime/restart.c). Resolve the symbol rather than hardcoding
+            # src/pd/beam/restart/restart.c). Resolve the symbol rather than hardcoding
             # it: unlike _start it has no fixed address.
             if ! beam_reset=$(sym_of beam_server.elf _reset); then
               echo "restart-entry: beam_server.elf exports no _reset symbol;" \
-                   "src/runtime/restart.c must be linked into the beam glue" >&2
+                   "src/pd/beam/restart/restart.c must be linked into the beam glue" >&2
               exit 1
             fi
 
@@ -245,7 +249,7 @@
             for sym in __init_array_start _bss; do
               sym_of beam_server.elf "$sym" > /dev/null || {
                 echo "restart-snapshot: beam_server.elf has no $sym symbol;" \
-                     "src/runtime/restart.c reads the writable-segment bounds" \
+                     "src/pd/beam/restart/restart.c reads the writable-segment bounds" \
                      "from the board's microkit.ld" >&2
                 exit 1
               }
@@ -256,7 +260,7 @@
             if [ "$data_len" -gt "$data_capacity" ]; then
               echo "restart-snapshot: beam_server's writable data is $data_len bytes," \
                    "which exceeds the $data_capacity byte snapshot data area;" \
-                   "raise the snapshot size in tools/sdf/runtime-abi.json" >&2
+                   "raise the snapshot size in interfaces/system_abi.zig" >&2
               exit 1
             fi
             echo "restart-snapshot: data=$data_len/$data_capacity bytes"
@@ -360,7 +364,7 @@
             ${pkgs.lib.optionalString restartDebug ''
               # Test-only /dev/pd-restart trigger: patch the beam_server-side
               # channel ids of the beam_server -> root debug channels
-              # into beam_server.elf's .pd_restart_config (src/runtime/runtime_pd_restart.c
+              # into beam_server.elf's .pd_restart_config (src/pd/beam/restart/runtime_pd_restart.c
               # reads them there). The first four bytes are healthy restart
               # channels in serial, timer, blk, eth order; the next four are
               # fault-injection channels in the same class order. This matches

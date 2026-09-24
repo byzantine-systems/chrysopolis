@@ -20,8 +20,31 @@ Chrysopolis aims to run the BEAM on the [seL4 microkernel](https://sel4.systems/
     - A [flake-parts](https://flake.parts/)-structured flake (`flake.nix` + one module per concern under [modules/](modules)) cross-compiles ERTS, builds musl `libc.a` (autotools), and pins every input in `flake.lock`. 
     - **Zig** is invoked by Nix as the build driver via two `build.zig` metaprograms: 
         - [tools/sdf](tools/sdf) generates the Microkit system description.
-        - the root [build.zig](build.zig) builds [libmicrokitco](https://github.com/au-ts/libmicrokitco), the sDDF driver/virtualiser PDs, and compiles and links the `beam_server` PD (ERTS glue) from [src/runtime](src/runtime). 
+        - the root [build.zig](build.zig) builds [libmicrokitco](https://github.com/au-ts/libmicrokitco), the sDDF driver/virtualiser PDs, and compiles and links the `beam_server` PD (ERTS glue) from [src/pd/beam](src/pd/beam).
     - ERTS loads its OTP modules and boot script from a FAT filesystem (`fatfs` PD -> sDDF block subsystem), the result is a hermetic, reproducible `sel4-beam.img`.
+
+### Build-time ABI
+
+[`interfaces/system_abi.zig`](interfaces/system_abi.zig) owns child and channel IDs, restart
+limits, fixed virtual-memory regions, ELF config sections, and the mapping from generated sDDF
+blobs to PD images. The host-only [`tools/abi`](tools/abi) generator validates the typed contract
+and emits [`interfaces/generated/system-abi.json`](interfaces/generated/system-abi.json) for pure
+Nix evaluation. Both Zig builds validate that generated projection before consuming it.
+Regenerate the projection with `nix build .#abi-tool` followed by
+`result/bin/gen-system-abi interfaces/generated/system-abi.json`; the
+`abi-stale` flake check rejects a stale or hand-edited copy.
+
+```mermaid
+flowchart LR
+    abi["system_abi.zig<br/>typed values + invariants"] --> generator["tools/abi<br/>JSON projection"]
+    generator --> json["system-abi.json"]
+    json --> sdf["tools/sdf<br/>system.sdf + config blobs"]
+    json --> native["build.zig<br/>runtime_abi.h + PD ELFs"]
+    json --> nix["Nix evaluation<br/>section injection + checks"]
+    sdf --> image["Microkit image"]
+    native --> image
+    nix --> image
+```
 
 ## Architecture
 
@@ -76,7 +99,9 @@ nix flake check -L
 nix build .#checks.x86_64-linux.boot-smoke -L
 ```
 
-All QEMU checks gate the build (each boots an image under emulation and asserts on the serial trace), plus two pure checks that run on every platform.
+All QEMU checks gate the build. Each boots an image under emulation and asserts on the serial
+trace or drives an external peer. Host-only checks validate pure runtime logic, ABI values,
+generated topology, ELF layout, test modules, diagnostics, and formatting.
 
 Core function:
 
@@ -96,9 +121,20 @@ Crash and restart:
 - **`serial-fault-smoke`**, **`timer-fault-smoke`**, **`blk-fault-smoke`**, **`net-fault-smoke`**: Each real driver is forced to take a genuine seL4 fault, Root catches and restarts it, and its subsystem must recover. The block case includes a client request in flight.
 - **`blk-giveup-smoke`**: Genuine block-driver faults spend the entire restart budget, Root stops the driver for good, and the system must degrade rather than wedge.
 
-Pure (non-QEMU): 
-- **`production-sdf-gate`** asserts the test-only restart affordances stay out of the shipped topology.
+Pure and generated-artifact gates include:
+
+- **`runtime-host-tests`** runs every pure runtime suite with Debug/UBSan and ReleaseFast.
+- **`abi-contract`** proves both generated SDF variants represent the declared ABI and emit every
+  configured data blob.
+- **`production-sdf-gate`** asserts test-only restart affordances stay out of the shipped topology.
+- **`restart-topology`** checks Root's children, entries, priorities, fault endpoints, and relevant
+  capability slots against the SDF and ABI.
 - **`test-modules`** compiles the guest-side probes in `tests/`.
+- **`c23-diagnostic`** compiles first-party C with stricter diagnostics and warnings as errors.
+- **`treefmt`** checks Nix, Gleam, Erlang, C, and Zig formatting.
+- **`phase-zero-baseline`** compares the current normalized SDF, Microkit report, ELF, image,
+  toolchain, host-test, and behavioral-contract facts with the checked snapshot in
+  [`baselines/phase-zero`](baselines/phase-zero).
 
 ### Running the BEAM shell
 

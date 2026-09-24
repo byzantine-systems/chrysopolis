@@ -35,9 +35,12 @@
               ../build.zig
               ../build.zig.zon
               ../build.zig.zon2json-lock
-              ../src/runtime
-              ../tools/sdf/abi.zig
-              ../tools/sdf/runtime-abi.json
+              ../build
+              ../src/pd/beam
+              ../src/pd/root
+              ../src/pd/test_support
+              ../interfaces/system_abi.zig
+              ../interfaces/generated/system-abi.json
             ];
           };
 
@@ -170,7 +173,8 @@
             root = ../.;
             fileset = pkgs.lib.fileset.unions [
               ../tests/host
-              ../src/runtime
+              ../src/pd/beam
+              ../src/pd/root/policy
             ];
           };
           nativeBuildInputs = [ inputs'.zig2nix.packages."zig-0_15_2" ];

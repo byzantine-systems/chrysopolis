@@ -1,4 +1,4 @@
-/* root_policy.h: child id validation, restart budgets, the terminal gone
+/* Root's root_policy.h: child id validation, restart budgets, the terminal gone
  * state, give-up reasons and channel routing. */
 #include "check.h"
 
@@ -120,7 +120,7 @@ static void test_giveup_reasons(void) {
 enum : unsigned int { max_channels = 62, no_gone = UINT_MAX };
 
 static void test_layout_validity(void) {
-  /* The layout runtime-abi.json uses today. */
+  /* The layout system_abi.zig uses today. */
   root_channel_layout layout = {.debug_first = 0, .fault_first = 4, .count = 4};
   CHECK(root_channel_layout_valid(&layout, max_channels, 10));
   CHECK(root_channel_layout_valid(&layout, max_channels, no_gone));

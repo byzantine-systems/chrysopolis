@@ -20,7 +20,7 @@
       # NULL, so beam_server cannot re-register the getrandom /
       # clock_gettime / openat slots libc_init claims at startup.
       # libc_redefine_syscall() REPLACES a claimed slot and returns the old
-      # handler so the RNG shims (src/runtime/runtime_sys_*.c) can chain to
+      # handler so the RNG shims (src/pd/beam/compat/syscall/runtime_sys_*.c) can chain to
       # upstream. ~10 lines, an upstream candidate alongside the TCP fixes.
       # Appended (not patched by line number) so it survives lionsos bumps.
       libcRedefineC = pkgs.writeText "libc_redefine_syscall.c" ''

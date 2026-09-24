@@ -10,39 +10,159 @@
   perSystem =
     {
       pkgs,
+      inputs',
       config,
       chryso,
       ...
     }:
     let
-      runtimeAbi = builtins.fromJSON (builtins.readFile ../tools/sdf/runtime-abi.json);
+      runtimeAbi = builtins.fromJSON (builtins.readFile ../interfaces/generated/system-abi.json);
       drivers = runtimeAbi.drivers;
+      abiToolDeps = chryso.zigEnv.deriveLockFile ../tools/abi/build.zig.zon2json-lock {
+        inherit (chryso.zigEnv) zig;
+        name = "chrysopolis-abi-dependencies";
+      };
       hex = value: "0x${pkgs.lib.toHexString value}";
+
+      # The behavioral baseline documents every check visible in the final
+      # flake output, including treefmt, which is contributed by devshell.nix.
+      # Only the attribute names are forced here. Check derivation values are
+      # not evaluated, avoiding a dependency from the baseline capture back to
+      # the checks whose contracts it inventories.
+      phaseZeroCheckNames = pkgs.writeText "chrysopolis-phase-zero-check-names.json" (
+        builtins.toJSON (
+          pkgs.lib.subtractLists [ "abi-stale" "project-structure" ] (builtins.attrNames config.checks)
+        )
+      );
+
+      capturePhaseZeroBaseline = output: ''
+        ${pkgs.python3}/bin/python ${../nix/capture-phase-zero-baseline.py} \
+          --abi ${../interfaces/generated/system-abi.json} \
+          --flake-lock ${../flake.lock} \
+          --host-build ${../tests/host/build.zig} \
+          --contracts ${../baselines/phase-zero/contracts.json} \
+          --check-names ${phaseZeroCheckNames} \
+          --production-sdf ${config.packages.sdf} \
+          --restart-sdf ${config.packages.sdf-restart} \
+          --beam-zig ${config.packages.beam-zig} \
+          --production-image ${config.packages.default} \
+          --test-image ${config.packages.test-image} \
+          --restart-image ${config.packages.restart-image} \
+          --disk ${config.packages.disk} \
+          --readelf ${chryso.llvm.libllvm}/bin/llvm-readelf \
+          --microkit-version ${chryso.microkitVersion} \
+          --microkit-board ${chryso.microkitBoard} \
+          --microkit-config ${chryso.microkitConfig} \
+          --zig-version 0.15.2 \
+          --llvm-version ${chryso.llvm.release_version} \
+          --otp-version ${pkgs.beamPackages.erlang.version} \
+          --output ${output}
+      '';
 
       # Runs one image's report.txt through the topology checker, against the
       # SDF that image was synthesised from.
       checkTopology = mode: image: sdf: ''
         ${pkgs.lib.getExe config.packages.check-restart-topology} \
           ${image}/report.txt ${sdf}/system.sdf \
-          ${chryso.boardDir}/include/microkit.h ${../tools/sdf/runtime-abi.json} \
+          ${chryso.boardDir}/include/microkit.h ${../interfaces/generated/system-abi.json} \
           ${mode}
       '';
     in
     {
       # The report.txt parser behind the restart-topology check, exposed so it
       # can be run by hand against a modified report or SDF.
-      packages.check-restart-topology = pkgs.writeShellApplication {
-        name = "check-restart-topology";
-        runtimeInputs = [
-          pkgs.gawk
-          pkgs.gnugrep
-          pkgs.jq
-          pkgs.coreutils
-        ];
-        text = builtins.readFile ../nix/check-restart-topology.sh;
+      packages = {
+        abi-tool =
+          let
+            source = pkgs.lib.fileset.toSource {
+              root = ../.;
+              fileset = pkgs.lib.fileset.unions [
+                ../tools/abi
+                ../interfaces/system_abi.zig
+              ];
+            };
+          in
+          pkgs.stdenvNoCC.mkDerivation {
+            name = "chrysopolis-abi-tool";
+            src = source;
+            nativeBuildInputs = [ inputs'.zig2nix.packages."zig-0_15_2" ];
+            buildPhase = ''
+              runHook preBuild
+              export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+              mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
+              ln -s ${abiToolDeps} "$ZIG_GLOBAL_CACHE_DIR"/p
+              zig test interfaces/system_abi.zig
+              cd tools/abi
+              zig build --prefix $out -Doptimize=ReleaseSafe
+              runHook postBuild
+            '';
+            dontInstall = true;
+          };
+        check-restart-topology = pkgs.writeShellApplication {
+          name = "check-restart-topology";
+          runtimeInputs = [
+            pkgs.gawk
+            pkgs.gnugrep
+            pkgs.jq
+            pkgs.coreutils
+          ];
+          text = builtins.readFile ../nix/check-restart-topology.sh;
+        };
+      }
+      // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        # A reviewable snapshot of all phase-zero facts. Generate it twice in
+        # one derivation and compare the results so accidental iteration or
+        # path ordering cannot produce a baseline that changes between runs.
+        phase-zero-baseline-current = pkgs.runCommand "chrysopolis-phase-zero-baseline-current" { } ''
+          mkdir -p $out
+          ${capturePhaseZeroBaseline "$out/current-a.json"}
+          ${capturePhaseZeroBaseline "$out/current-b.json"}
+          cmp "$out/current-a.json" "$out/current-b.json"
+          mv "$out/current-a.json" "$out/baseline.json"
+          rm "$out/current-b.json"
+        '';
       };
 
       checks = {
+        # Dependency direction, explicit first-party source membership,
+        # public header isolation and the vendored TCP formatting boundary.
+        project-structure = pkgs.stdenvNoCC.mkDerivation {
+          name = "chrysopolis-project-structure";
+          src = pkgs.lib.fileset.toSource {
+            root = ../.;
+            fileset = pkgs.lib.fileset.unions [
+              ../build.zig
+              ../build.zig.zon
+              ../build
+              ../src
+              ../include
+              ../interfaces
+              ../modules
+              ../nix/check-project-structure.py
+              ../nix/test-project-structure.py
+            ];
+          };
+          nativeBuildInputs = [
+            pkgs.python3
+            chryso.llvm.clang
+          ];
+          dontConfigure = true;
+          dontInstall = true;
+          buildPhase = ''
+            runHook preBuild
+            python nix/test-project-structure.py
+            python nix/check-project-structure.py .
+            touch $out
+            runHook postBuild
+          '';
+        };
+        abi-stale = pkgs.runCommand "chrysopolis-abi-stale" { } ''
+          ${config.packages.abi-tool}/bin/gen-system-abi first.json
+          ${config.packages.abi-tool}/bin/gen-system-abi second.json
+          cmp first.json second.json
+          cmp first.json ${../interfaces/generated/system-abi.json}
+          touch $out
+        '';
         # Compile gate for the console-driving probes in tests/. Exposed as a
         # named check, not left as a transitive dependency of .#disk, so that a
         # typo in an .erl file fails in seconds instead of behind a multi-minute
@@ -228,12 +348,22 @@
           # which PDs fault to Root, their entry and priority, Root's TCB caps
           # and the notification caps between Root and its peers, read from
           # report.txt and cross-checked against the generated SDF and
-          # runtime-abi.json. Both images, because the restart image adds the
+          # system-abi.json. Both images, because the restart image adds the
           # crasher and the debug channels and production must have neither.
           restart-topology = pkgs.runCommand "chrysopolis-restart-topology" { } ''
             ${checkTopology "production" config.packages.default config.packages.sdf}
             ${checkTopology "restart" config.packages.restart-image config.packages.sdf-restart}
             touch $out
+          '';
+
+          # The checked artifact and behavior reference. A mismatch prints a
+          # field-level unified diff. The expected file is intentionally not
+          # regenerated inside this check: updating it is a reviewed decision.
+          phase-zero-baseline = pkgs.runCommand "chrysopolis-phase-zero-baseline" { } ''
+            diff -u \
+              ${../baselines/phase-zero/expected-v1.json} \
+              ${config.packages.phase-zero-baseline-current}/baseline.json
+            cp ${config.packages.phase-zero-baseline-current}/baseline.json $out
           '';
         }
         // import ../tests.nix {

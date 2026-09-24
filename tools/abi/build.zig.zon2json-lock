@@ -1,0 +1,7 @@
+{
+  "serde-1.0.1-1DszT7B_DQByGB4OA1ofuxMNznusFipIeMMqCeXbu2cY": {
+    "name": "serde",
+    "url": "https://github.com/OrlovEvgeny/serde.zig/archive/refs/tags/v1.0.6.tar.gz",
+    "hash": "sha256-RzL9DPE1A/jWCC6QawVkUWVW0vMdkU1S4elOxOCq1Rw="
+  }
+}

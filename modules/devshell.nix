@@ -15,7 +15,7 @@
         projectRootFile = "flake.nix";
         # tcp.c is vendored from LionsOS lib/sock/tcp.c with local patches;
         # keep upstream's formatting so the diff stays upstreamable.
-        settings.global.excludes = [ "src/runtime/tcp.c" ];
+        settings.global.excludes = [ "src/pd/beam/io/tcp.c" ];
         programs.clang-format.enable = true;
         programs.erlfmt.enable = true;
         programs.nixfmt.enable = true;

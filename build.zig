@@ -1,34 +1,12 @@
 const std = @import("std");
-const abi_schema = @import("tools/sdf/abi.zig");
-
-const first_party_cflags = [_][]const u8{
-    "-std=c23",
-    "-ffreestanding",
-    "-O2",
-    "-g",
-    "-Wall",
-    "-Wextra",
-    "-Wpedantic",
-    // The LionsOS libc boundary intentionally exposes POSIX clocks and env.
-    "-D_POSIX_C_SOURCE=200809L",
-    // seL4's public headers use GNU's bare spelling even in otherwise
-    // standards-compatible declarations. Keep that extension at the boundary.
-    "-Dasm=__asm__",
-};
-const diagnostic_cflags = first_party_cflags ++ [_][]const u8{"-Werror"};
-const runtime_contract_diagnostic_cflags = diagnostic_cflags ++ [_][]const u8{
-    "-Wmissing-prototypes",
-    "-Wmissing-variable-declarations",
-    "-DCHRYSO_DIAGNOSTIC=1",
-};
-
-fn firstPartyCFlags(diagnostic: bool) []const []const u8 {
-    return if (diagnostic) &diagnostic_cflags else &first_party_cflags;
-}
-
-fn runtimeCFlags(diagnostic: bool) []const []const u8 {
-    return if (diagnostic) &runtime_contract_diagnostic_cflags else &first_party_cflags;
-}
+const abi_schema = @import("interfaces/system_abi.zig");
+const cflags = @import("build/cflags.zig");
+const components = @import("build/components.zig");
+const diagnostics = @import("build/diagnostics.zig");
+const microkit = @import("build/microkit.zig");
+const options = @import("build/options.zig");
+const pds = @import("build/pds.zig");
+const target_cfg = @import("build/target.zig");
 
 fn runtimeAbiConfigHeader(b: *std.Build, abi: abi_schema.Contract) *std.Build.Step.ConfigHeader {
     const snapshot = abi.memory.snapshot;
@@ -95,7 +73,7 @@ fn runtimeAbiConfigHeader(b: *std.Build, abi: abi_schema.Contract) *std.Build.St
 //
 //   tools/libmicrokitco  -> the cooperative cothread runtime (lib/libmicrokitco.a)
 //   tools/sddf-drivers   -> the sDDF driver/virtualiser Protection Domains
-//   src/runtime          -> the beam_server PD glue + ERTS link (beam_*.elf)
+//   src/pd/beam          -> the beam_server PD glue + ERTS link (beam_*.elf)
 //
 // They duplicated the same boilerplate: the cross target (one
 // resolveTargetQuery), the Microkit `addPd` recipe (libmicrokit + microkit.ld +
@@ -124,98 +102,33 @@ fn runtimeAbiConfigHeader(b: *std.Build, abi: abi_schema.Contract) *std.Build.St
 //   bin/beam_server.elf            (bring-up: console + clock + heap)
 //   bin/beam_test.elf              (with -Dwith-erts: the same glue + static ERTS)
 
-// Per-subsystem driver class for a board (sDDF has one source dir per class).
-const BoardCfg = struct {
-    serial: []const u8,
-    timer: []const u8,
-    blk: []const u8,
-    net: []const u8,
-    // virtio drivers (blk/net) split the bus transport into its own unit
-    // (virtio/transport/<*_transport>.c) the driver links against.
-    blk_transport: []const u8,
-    net_transport: []const u8,
-};
-
-fn boardCfg(board: []const u8) BoardCfg {
-    if (std.mem.eql(u8, board, "qemu_virt_aarch64"))
-        return .{ .serial = "arm", .timer = "arm", .blk = "virtio", .net = "virtio", .blk_transport = "mmio", .net_transport = "mmio" };
-    std.debug.panic("unknown -Dboard={s}; add it to boardCfg()", .{board});
-}
-
-// Shared link inputs for the beam_server/beam_test executables.
-const BeamCfg = struct {
-    glue_obj: std.Build.LazyPath,
-    microkitco_obj: std.Build.LazyPath,
-    // lib_sddf_lwip.a: the lwIP stack + sDDF glue, linked into beam so the
-    // libc socket layer has an AF_INET path.
-    lwip_obj: std.Build.LazyPath,
-    // src/runtime/tcp.c: the LionsOS socket backend, a separate object rather
-    // than a member of the archive above so it can carry our own diagnostics.
-    tcp_obj: std.Build.LazyPath,
-    // libbearssl_drbg.a: the HMAC-DRBG subset backing rng.c (src/runtime/rng.c).
-    bearssl_obj: std.Build.LazyPath,
-    board_dir: []const u8,
-    lions_libc: []const u8,
-    libc_dir: []const u8,
-    erts_dir: ?[]const u8,
-    lazy: std.Build.Module.LinkSystemLibraryOptions,
-};
-
 // The sDDF source tree (-Dsddf) and Microkit board paths (-Dboard-dir), set in
 // build() and shared by the driver helpers below.
 var sddf: []const u8 = undefined;
 var libmicrokit: std.Build.LazyPath = undefined;
 var libmicrokit_include: std.Build.LazyPath = undefined;
 var libmicrokit_linker_script: std.Build.LazyPath = undefined;
+var microkit_context: microkit.Context = undefined;
 // Shared across every driver PD, built once in build().
 var util: *std.Build.Step.Compile = undefined;
 var util_putchar_debug: *std.Build.Step.Compile = undefined;
 
-// The single source of truth for the cross target (replaces
-// `-target aarch64-none-elf -mcpu=cortex-a53 -mstrict-align`): aarch64
-// freestanding, cortex-a53, strict alignment (seL4 faults on unaligned access).
-fn crossTarget(b: *std.Build) std.Build.ResolvedTarget {
-    return b.resolveTargetQuery(.{
-        .cpu_arch = .aarch64,
-        .os_tag = .freestanding,
-        .abi = .none,
-        .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.cortex_a53 },
-        .cpu_features_add = std.Target.aarch64.featureSet(&.{.strict_align}),
-    });
-}
-
-fn sddfPath(b: *std.Build, sub: []const u8) std.Build.LazyPath {
-    return .{ .cwd_relative = b.fmt("{s}/{s}", .{ sddf, sub }) };
-}
-
-// The shared sDDF include set every driver PD/lib compiles against.
-fn addSddfIncludes(b: *std.Build, mod: *std.Build.Module) void {
-    mod.addIncludePath(sddfPath(b, "include"));
-    mod.addIncludePath(sddfPath(b, "include/sddf/util/custom_libc"));
-    mod.addIncludePath(sddfPath(b, "include/microkit"));
-}
-
-// A Microkit PD: libmicrokit (whole archive) + the board linker script + the
-// board include dir, exactly as sDDF's own addPd does.
-fn addPd(
-    b: *std.Build,
-    name: []const u8,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const pd = b.addExecutable(.{
-        .name = name,
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .strip = false,
-        }),
-    });
-    pd.addObjectFile(libmicrokit);
-    pd.setLinkerScript(libmicrokit_linker_script);
-    pd.root_module.addSystemIncludePath(libmicrokit_include);
-    return pd;
-}
+// Private BEAM headers remain with their owning subsystem. These are explicit
+// because a source move must not change which headers the glue can see.
+const beam_include_dirs = [_][]const u8{
+    "src/pd/beam/config",
+    "src/pd/beam/compat/fd",
+    "src/pd/beam/compat/poll",
+    "src/pd/beam/compat/pthread",
+    "src/pd/beam/compat/syscall",
+    "src/pd/beam/compat/time",
+    "src/pd/beam/io/console",
+    "src/pd/beam/io/filesystem",
+    "src/pd/beam/io/network",
+    "src/pd/beam/io/timer",
+    "src/pd/beam/restart",
+    "src/pd/beam/security",
+};
 
 // Build + install one sDDF component PD: its sources, the shared sDDF includes,
 // any per-driver include dir, and the shared util libs.
@@ -228,85 +141,12 @@ fn component(
     extra_includes: []const []const u8,
     defines: []const []const u8,
 ) void {
-    const pd = addPd(b, name, target, optimize);
-    for (srcs) |s| pd.root_module.addCSourceFile(.{ .file = sddfPath(b, s) });
-    addSddfIncludes(b, pd.root_module);
-    for (extra_includes) |inc| pd.root_module.addIncludePath(sddfPath(b, inc));
-    for (defines) |d| pd.root_module.addCMacro(d, "1");
-    pd.root_module.linkLibrary(util);
-    pd.root_module.linkLibrary(util_putchar_debug);
-    b.installArtifact(pd);
-}
-
-// One beam_server/beam_test executable. The two variants differ only by name,
-// the merged ERTS archive, and forcing the emulator entry live.
-fn addBeamExe(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    cfg: BeamCfg,
-    name: []const u8,
-    with_erts: bool,
-) void {
-    const exe = b.addExecutable(.{
-        .name = name,
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = .ReleaseFast,
-            .strip = false,
-        }),
-    });
-
-    // Link order mirrors the old Makefile: glue object, libmicrokitco, [ERTS],
-    // then libmicrokit + libc so later archives resolve earlier references. The
-    // glue is linked as an object (not module C) so it precedes the prebuilt
-    // archives (Zig emits a module's own objects AFTER all link inputs). The
-    // glue defines no libc overrides, posix.o pulls libc.a's real file.o for the
-    // fs syscalls (open/read/stat/lseek → the FAT fs_server).
-    exe.root_module.addObjectFile(cfg.glue_obj);
-    // libmicrokitco.a (built in this same build). addObjectFile whole-archives
-    // it, pulling both libco + libmicrokitco objects.
-    exe.root_module.addObjectFile(cfg.microkitco_obj);
-    // lib_sddf_lwip.a: the lwIP stack and its sDDF glue.
-    exe.root_module.addObjectFile(cfg.lwip_obj);
-    // tcp.o: the socket backend. A plain object, not an archive member, so its
-    // socket_config is always linked for the lazily-linked libc.a sock.c
-    // without needing the archive to be pulled in whole.
-    exe.root_module.addObjectFile(cfg.tcp_obj);
-    // libbearssl_drbg.a: whole-archived so rng.o's br_hmac_drbg_* / br_sha256
-    // references (pulled from the glue object linked above) resolve.
-    exe.root_module.addObjectFile(cfg.bearssl_obj);
-    // lwIP routes its diagnostics through sDDF's printf (sddf_printf_/sddf_dprintf
-    // -> seL4 debug putchar) and uses sDDF's _assert_fail.
-    // util_putchar_debug provides both, the same lib the driver PDs link.
-    exe.root_module.linkLibrary(util_putchar_debug);
-
-    exe.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{cfg.board_dir}) });
-    exe.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{cfg.lions_libc}) });
-    exe.root_module.addLibraryPath(.{ .cwd_relative = cfg.libc_dir });
-
-    if (with_erts) {
-        exe.root_module.addLibraryPath(.{ .cwd_relative = cfg.erts_dir.? });
-        exe.root_module.linkSystemLibrary("erts_all", cfg.lazy);
-    }
-
-    exe.root_module.linkSystemLibrary("microkit", cfg.lazy);
-    // Zig special-cases the library name "c" (it tries to PROVIDE a libc, which
-    // fails for a freestanding target), so the LionsOS libc.a is linked through
-    // an alias the flake stages as liblionsc.a.
-    exe.root_module.linkSystemLibrary("lionsc", cfg.lazy);
-
-    // microkit.ld defines the memory layout + ENTRY. No PIE, no bundled
-    // compiler_rt (the link supplies libc/libgcc/libmicrokitco), and no
-    // --gc-sections so the config sections objcopy patches survive.
-    exe.setLinkerScript(.{ .cwd_relative = b.fmt("{s}/lib/microkit.ld", .{cfg.board_dir}) });
-    exe.pie = false;
-    exe.bundle_compiler_rt = false;
-    exe.link_gc_sections = false;
-    // -u erl_start: force the emulator entry live so the ERTS archive members
-    // get pulled even though runtime_payload.c's reference is weak.
-    if (with_erts) exe.forceUndefinedSymbol("erl_start");
-
-    b.installArtifact(exe);
+    _ = b;
+    components.add(.{
+        .microkit = microkit_context,
+        .util = util,
+        .util_putchar_debug = util_putchar_debug,
+    }, target, optimize, name, srcs, extra_includes, defines);
 }
 
 // The LionsOS FAT fs_server PD (fat.elf): FatFs (dep/ff15) + the fat component
@@ -347,7 +187,7 @@ fn addFatServer(
     microkitco_fat.root_module.addIncludePath(libmicrokit_include);
     microkitco_fat.root_module.addIncludePath(.{ .cwd_relative = fat_config_inc }); // libmicrokitco_opts.h + fat_config.h
 
-    const fat = addPd(b, "fat.elf", target, optimize);
+    const fat = microkit.addPd(microkit_context, "fat.elf", target, optimize);
     fat.root_module.addCSourceFiles(.{
         .root = .{ .cwd_relative = b.fmt("{s}/dep/ff15", .{lionsos_src}) },
         .files = &.{ "ff.c", "ffunicode.c" },
@@ -405,16 +245,16 @@ fn addLwipIncludes(
     // sDDF headers WITHOUT include/sddf/util/custom_libc: the lwIP stack + tcp.c
     // link against musl (lions_libc), so the standard headers must resolve to
     // musl's (custom_libc's stdlib.h lacks rand, which lwIP's LWIP_RAND needs).
-    mod.addIncludePath(sddfPath(b, "include"));
-    mod.addIncludePath(sddfPath(b, "include/microkit")); // os/sddf.h
+    mod.addIncludePath(target_cfg.sddfPath(b, sddf, "include"));
+    mod.addIncludePath(target_cfg.sddfPath(b, sddf, "include/microkit")); // os/sddf.h
     mod.addIncludePath(libmicrokit_include); // microkit.h
     mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lionsos_src}) }); // lions/*
     mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) }); // musl headers
     mod.addIncludePath(.{ .cwd_relative = libmicrokitco_src }); // libmicrokitco.h
     mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
-    mod.addIncludePath(b.path("src/runtime")); // libmicrokitco_opts.h (beam variant)
+    mod.addIncludePath(b.path("src/pd/beam/compat/pthread")); // libmicrokitco_opts.h (beam variant)
     mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
-    mod.addIncludePath(b.path("src/runtime/lwip_include")); // lwipopts.h, arch/cc.h
+    mod.addIncludePath(b.path("src/pd/beam/io/network/lwip_include")); // lwipopts.h, arch/cc.h
 }
 
 // lib_sddf_lwip.a: the lwIP TCP/IP stack + sDDF glue + LionsOS socket backend,
@@ -478,7 +318,7 @@ fn addLwipLib(
 }
 
 // The Chrysopolis-patched TCP socket backend (it defines the socket_config
-// that sock.c dereferences). Vendored at src/runtime/tcp.c: it lets recv()
+// that sock.c dereferences). Vendored at src/pd/beam/io/tcp.c: it lets recv()
 // drain buffered data after the peer closes the connection (closed_by_peer),
 // validates every socket index the libc layer hands over, and owns the
 // conversions that cross lwIP's u16_t and u8_t boundaries.
@@ -491,7 +331,7 @@ fn addLwipLib(
 // The include paths it needs are the same as lwIP's, but added with
 // addSystemIncludePath so the warnings above apply to this file and not to
 // the musl, seL4, Microkit and sDDF headers it pulls in, which do not compile
-// clean under them and which we do not maintain. Only src/runtime and the
+// clean under them and which we do not maintain. Only our BEAM directories and the
 // vendored lwip_include stay plain -I: those are ours.
 fn addTcpObject(
     b: *std.Build,
@@ -535,13 +375,15 @@ fn addTcpObject(
     else
         &base;
     obj.root_module.addCSourceFile(.{
-        .file = b.path("src/runtime/tcp.c"),
+        .file = b.path("src/pd/beam/io/tcp.c"),
         .flags = tcp_flags,
     });
-    obj.root_module.addIncludePath(b.path("src/runtime"));
-    obj.root_module.addIncludePath(b.path("src/runtime/lwip_include")); // lwipopts.h, arch/cc.h
-    obj.root_module.addSystemIncludePath(sddfPath(b, "include"));
-    obj.root_module.addSystemIncludePath(sddfPath(b, "include/microkit")); // os/sddf.h
+    obj.root_module.addIncludePath(b.path("src/pd/beam/io/network"));
+    obj.root_module.addIncludePath(b.path("src/pd/beam/config")); // runtime_network.h -> runtime_lifecycle.h
+    obj.root_module.addIncludePath(b.path("src/pd/beam/compat/pthread")); // libmicrokitco_opts.h
+    obj.root_module.addIncludePath(b.path("src/pd/beam/io/network/lwip_include")); // lwipopts.h, arch/cc.h
+    obj.root_module.addSystemIncludePath(target_cfg.sddfPath(b, sddf, "include"));
+    obj.root_module.addSystemIncludePath(target_cfg.sddfPath(b, sddf, "include/microkit")); // os/sddf.h
     obj.root_module.addSystemIncludePath(libmicrokit_include); // microkit.h
     obj.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lionsos_src}) });
     obj.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
@@ -552,26 +394,25 @@ fn addTcpObject(
 }
 
 pub fn build(b: *std.Build) void {
-    const target = crossTarget(b);
+    const target = target_cfg.crossTarget(b);
+    const opts = options.Options.init(b);
     const optimize: std.builtin.OptimizeMode = .ReleaseFast;
-    const diagnostic = b.option(bool, "diagnostic", "build first-party C with ReleaseSafe and warnings as errors") orelse false;
+    const diagnostic = opts.diagnostic;
     const first_party_optimize: std.builtin.OptimizeMode = if (diagnostic) .ReleaseSafe else .ReleaseFast;
-    const first_party_flags = firstPartyCFlags(diagnostic);
-    const runtime_flags = runtimeCFlags(diagnostic);
-    const runtime_abi = abi_schema.load(b.allocator, "tools/sdf/runtime-abi.json") catch |err| {
-        std.debug.panic("invalid tools/sdf/runtime-abi.json: {s}", .{@errorName(err)});
+    const first_party_flags = cflags.firstParty(diagnostic);
+    const runtime_flags = cflags.runtime(diagnostic);
+    const runtime_abi = abi_schema.load(b.allocator, "interfaces/generated/system-abi.json") catch |err| {
+        std.debug.panic("invalid interfaces/generated/system-abi.json: {s}", .{@errorName(err)});
     };
     const generated_abi = runtimeAbiConfigHeader(b, runtime_abi);
 
-    // Nix store paths supplied by the derivation (see modules/beam.nix).
-    const board_dir = b.option([]const u8, "board-dir", "Microkit board dir ($MICROKIT_SDK/board/<board>/<config>)") orelse @panic("set -Dboard-dir");
-    const board = b.option([]const u8, "board", "Microkit board name (selects driver classes)") orelse "qemu_virt_aarch64";
-    sddf = b.option([]const u8, "sddf", "sDDF source tree") orelse @panic("set -Dsddf");
-    const libmicrokitco_src = b.option([]const u8, "libmicrokitco-src", "libmicrokitco source tree") orelse @panic("set -Dlibmicrokitco-src");
-    const lions_libc = b.option([]const u8, "lions-libc", "lions-stack output (lib/libc.a + include/)") orelse @panic("set -Dlions-libc");
-    const lionsos_src = b.option([]const u8, "lionsos-src", "LionsOS source tree (headers)") orelse @panic("set -Dlionsos-src");
-    const libc_dir = b.option([]const u8, "libc-dir", "dir holding liblionsc.a (LionsOS libc.a, aliased off the special name 'c')") orelse @panic("set -Dlibc-dir");
-    const with_erts = b.option(bool, "with-erts", "also build beam_test.elf (the static ERTS link)") orelse false;
+    const board_dir = opts.board_dir;
+    sddf = opts.sddf;
+    const libmicrokitco_src = opts.libmicrokitco_src;
+    const lions_libc = opts.lions_libc;
+    const lionsos_src = opts.lionsos_src;
+    const libc_dir = opts.libc_dir;
+    const with_erts = opts.with_erts;
 
     // BearSSL, a real Zig package dependency (build.zig.zon): a raw C source
     // tree (no build.zig), consumed via .path(). Under Nix the flake symlinks
@@ -579,14 +420,14 @@ pub fn build(b: *std.Build) void {
     // resolves offline from the committed build.zig.zon2json-lock.
     const bearssl_dep = b.dependency("bearssl", .{});
 
-    const cfg = boardCfg(board);
+    const cfg = target_cfg.boardCfg(opts.board);
 
     // Subsystem toggles. serial+timer are today's image, blk and net are off until the SDF wires them.
-    const with_serial = b.option(bool, "with-serial", "build the serial driver + virtualisers") orelse true;
-    const with_timer = b.option(bool, "with-timer", "build the timer driver") orelse true;
-    const with_blk = b.option(bool, "with-blk", "build the block driver + virtualiser") orelse false;
-    const with_fs = b.option(bool, "with-fs", "build the FAT fs_server (fat.elf)") orelse false;
-    const with_net = b.option(bool, "with-net", "build the network driver + virtualisers") orelse false;
+    const with_serial = opts.with_serial;
+    const with_timer = opts.with_timer;
+    const with_blk = opts.with_blk;
+    const with_fs = opts.with_fs;
+    const with_net = opts.with_net;
     // crasher.elf is the test-only faulting child of root. The default is false
     // for a bare `zig build`; it is NOT the production gate. modules/beam.nix
     // passes -Dwith-crasher=true unconditionally because there is one shared
@@ -594,79 +435,24 @@ pub fn build(b: *std.Build) void {
     // the restart image only. The real gate is the SDF (--with-crasher in
     // tools/sdf/system.zig): an ELF the system description never references is
     // inert, so production images carry no crasher PD.
-    const with_crasher = b.option(bool, "with-crasher", "build crasher.elf (test-only faulting child of root)") orelse false;
-    // Socket-state tracing in src/runtime/tcp.c (TCP_DEBUG). Off by default and
+    const with_crasher = opts.with_crasher;
+    // Socket-state tracing in src/pd/beam/io/tcp.c (TCP_DEBUG). Off by default and
     // never set by the images: it prints a line per socket event through
     // microkit_dbg_puts, which is far too chatty for a normal boot but is the
     // only way to see the ERTS/lwIP state races this layer produces. Turn it on
     // for an investigation with `zig build -Dtcp-debug=true`.
-    const tcp_debug = b.option(bool, "tcp-debug", "trace socket state transitions in tcp.c (TCP_DEBUG)") orelse false;
+    const tcp_debug = opts.tcp_debug;
 
     libmicrokit = .{ .cwd_relative = b.fmt("{s}/lib/libmicrokit.a", .{board_dir}) };
     libmicrokit_include = .{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) };
     libmicrokit_linker_script = .{ .cwd_relative = b.fmt("{s}/lib/microkit.ld", .{board_dir}) };
+    microkit_context = microkit.init(b, board_dir, sddf);
 
-    // === libmicrokitco: the cooperative cothread runtime ERTS's helper threads
-    // spawn onto. Mirrors libmicrokitco.mk (libco/libco.c #includes the
-    // arch-specific file, so it is the only libco unit, plus libmicrokitco.c).
-    // The opts header is src/runtime/libmicrokitco_opts.h, on the include path
-    // via b.path. Output: $out/lib/libmicrokitco.a, also linked into beam below.
-    const microkitco = b.addLibrary(.{
-        .name = "microkitco",
-        .linkage = .static,
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .strip = false }),
-    });
-    microkitco.root_module.addCSourceFiles(.{
-        .root = .{ .cwd_relative = libmicrokitco_src },
-        .files = &.{ "libco/libco.c", "libmicrokitco.c" },
-        .flags = &.{ "-ffreestanding", "-O2", "-g", "-Wall" },
-    });
-    microkitco.root_module.addIncludePath(.{ .cwd_relative = libmicrokitco_src }); // libmicrokitco.h
-    microkitco.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libco", .{libmicrokitco_src}) }); // <libco.h>
-    microkitco.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
-    microkitco.root_module.addIncludePath(libmicrokit_include); // microkit.h/sel4
-    microkitco.root_module.addIncludePath(b.path("src/runtime")); // <libmicrokitco_opts.h>
-    b.installArtifact(microkitco);
-
-    // === sDDF drivers. util: sDDF's freestanding helpers + its custom libc
-    // (incl. aarch64 asm). The drivers use this, NOT musl.
-    util = b.addLibrary(.{
-        .name = "util",
-        .linkage = .static,
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
-    });
-    util.root_module.addCSourceFiles(.{
-        .root = .{ .cwd_relative = sddf },
-        .files = &.{
-            "util/cache.c",
-            "util/fsmalloc.c",
-            "util/bitarray.c",
-            "util/assert.c",
-            "util/custom_libc/libc.c",
-            "util/custom_libc/aarch64/memcmp.S",
-            "util/custom_libc/aarch64/memcpy.S",
-            "util/custom_libc/aarch64/memset.S",
-            "util/custom_libc/aarch64/strcmp.S",
-            "util/custom_libc/aarch64/strcpy.S",
-            "util/custom_libc/aarch64/strlen.S",
-            "util/custom_libc/aarch64/strncmp.S",
-        },
-    });
-    addSddfIncludes(b, util.root_module);
-    util.root_module.addIncludePath(libmicrokit_include);
-
-    // util_putchar_debug: routes sDDF debug prints to the seL4 debug putchar.
-    util_putchar_debug = b.addLibrary(.{
-        .name = "util_putchar_debug",
-        .linkage = .static,
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
-    });
-    util_putchar_debug.root_module.addCSourceFiles(.{
-        .root = .{ .cwd_relative = sddf },
-        .files = &.{ "util/assert.c", "util/printf.c", "util/putchar_debug.c" },
-    });
-    addSddfIncludes(b, util_putchar_debug.root_module);
-    util_putchar_debug.root_module.addIncludePath(libmicrokit_include);
+    const lionsos = @import("build/lionsos.zig");
+    const libraries = lionsos.buildLibraries(microkit_context, target, optimize, libmicrokitco_src);
+    const microkitco = libraries.microkitco;
+    util = libraries.util;
+    util_putchar_debug = libraries.util_putchar_debug;
 
     // Serial: console + logging.
     if (with_serial) {
@@ -726,7 +512,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // === Root fault handler and its test-only faulting child.
-    // Neither is an sDDF component: root.c and crasher.c include only
+    // Neither is an sDDF component: Root's main.c and crasher.c include only
     // <microkit.h> and print only via microkit_dbg_puts (supplied by
     // libmicrokit.a, which addPd already links), so they need none of the sDDF
     // include set nor the util/util_putchar_debug libs that component() adds.
@@ -737,8 +523,15 @@ pub fn build(b: *std.Build) void {
     // its restart entry point from the .restart_config section that
     // modules/images.nix objcopies in per board, falling back to the 0x200000
     // literal compiled in here for a bare `zig build`.
-    const root_pd = addPd(b, "root.elf", target, first_party_optimize);
-    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/root.c"), .flags = first_party_flags });
+    const root_pd = microkit.addPd(microkit_context, "root.elf", target, first_party_optimize);
+    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/main.c"), .flags = first_party_flags });
+    root_pd.root_module.addIncludePath(b.path("src/pd/root/policy"));
+    if (diagnostic) {
+        root_pd.root_module.addCSourceFile(.{
+            .file = b.path("src/pd/root/policy/header_probe.c"),
+            .flags = runtime_flags,
+        });
+    }
     root_pd.root_module.addConfigHeader(generated_abi);
     // Same reason the beam exe and fat.elf disable it: modules/images.nix patches
     // the per-board child entry point into .restart_config with
@@ -748,8 +541,8 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(root_pd);
 
     if (with_crasher) {
-        const crasher_pd = addPd(b, "crasher.elf", target, first_party_optimize);
-        crasher_pd.root_module.addCSourceFile(.{ .file = b.path("src/runtime/crasher.c"), .flags = first_party_flags });
+        const crasher_pd = microkit.addPd(microkit_context, "crasher.elf", target, first_party_optimize);
+        crasher_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/test_support/crasher.c"), .flags = first_party_flags });
         b.installArtifact(crasher_pd);
     }
 
@@ -768,56 +561,56 @@ pub fn build(b: *std.Build) void {
         }),
     });
     glue.root_module.addCSourceFiles(.{
-        .root = b.path("src/runtime"),
+        .root = b.path("src/pd/beam"),
         // restart.c defines _start, replacing libmicrokit.a's crt0.o. That
         // object defines only _start and references only main, so with _start
         // already defined by this object the lazily-linked libmicrokit archive
         // never extracts it and there is no duplicate symbol. It also defines
         // _reset, the entry root resumes this PD at.
         .files = &.{
-            "c23_probe.c",
+            "config/c23_probe.c",
             "main.c",
-            "runtime_lifecycle.c",
-            "runtime_status.c",
-            "runtime_config.c",
-            "runtime_timer.c",
-            "runtime_fs.c",
-            "runtime_network.c",
-            "runtime_payload.c",
-            "runtime_syscalls.c",
-            "runtime_console.c",
-            "runtime_fd.c",
-            "runtime_fd_pair.c",
-            "runtime_sys_fd.c",
-            "runtime_sys_poll.c",
-            "runtime_epoll_table.c",
-            "runtime_sys_time.c",
-            "runtime_sys_sync.c",
-            "runtime_sys_identity.c",
-            "runtime_sys_devices.c",
-            "runtime_pd_restart.c",
-            "runtime_pd_restart_parse.c",
-            "runtime_cothread.c",
-            "runtime_stack.c",
-            "runtime_wait.c",
-            "runtime_pthread_handle.c",
-            "runtime_pthread.c",
-            "runtime_pthread_attr.c",
-            "runtime_pthread_tls.c",
-            "runtime_tls_row.c",
-            "runtime_pthread_locks.c",
-            "runtime_pthread_cond.c",
-            "rng.c",
-            "rng_select.c",
-            "restart.c",
-            "beam_snapshot_codec.c",
+            "config/runtime_lifecycle.c",
+            "config/runtime_status.c",
+            "config/runtime_config.c",
+            "io/timer/runtime_timer.c",
+            "io/filesystem/runtime_fs.c",
+            "io/network/runtime_network.c",
+            "payload/runtime_payload.c",
+            "compat/syscall/runtime_syscalls.c",
+            "io/console/runtime_console.c",
+            "compat/fd/runtime_fd.c",
+            "compat/fd/runtime_fd_pair.c",
+            "compat/fd/runtime_sys_fd.c",
+            "compat/poll/runtime_sys_poll.c",
+            "compat/poll/runtime_epoll_table.c",
+            "compat/time/runtime_sys_time.c",
+            "compat/syscall/runtime_sys_sync.c",
+            "compat/syscall/runtime_sys_identity.c",
+            "compat/syscall/runtime_sys_devices.c",
+            "restart/runtime_pd_restart.c",
+            "restart/runtime_pd_restart_parse.c",
+            "compat/pthread/runtime_cothread.c",
+            "compat/pthread/runtime_stack.c",
+            "compat/pthread/runtime_wait.c",
+            "compat/pthread/runtime_pthread_handle.c",
+            "compat/pthread/runtime_pthread.c",
+            "compat/pthread/runtime_pthread_attr.c",
+            "compat/pthread/runtime_pthread_tls.c",
+            "compat/pthread/runtime_tls_row.c",
+            "compat/pthread/runtime_pthread_locks.c",
+            "compat/pthread/runtime_pthread_cond.c",
+            "security/rng.c",
+            "security/rng_select.c",
+            "restart/restart.c",
+            "restart/beam_snapshot_codec.c",
         },
         .flags = runtime_flags,
     });
 
     if (diagnostic) {
         glue.root_module.addCSourceFile(.{
-            .file = b.path("src/runtime/runtime_thread_probe.c"),
+            .file = b.path("src/pd/beam/compat/pthread/runtime_thread_probe.c"),
             .flags = runtime_flags,
         });
     }
@@ -825,56 +618,16 @@ pub fn build(b: *std.Build) void {
     if (diagnostic) {
         // Compile each internal contract header alone and include it twice.
         // This rejects hidden include-order dependencies and missing guards.
-        const runtime_contract_headers = [_][]const u8{
-            "runtime_boot.h",
-            "runtime_config.h",
-            "runtime_fs.h",
-            "runtime_lifecycle.h",
-            "runtime_status.h",
-            "runtime_futex_cmd.h",
-            "runtime_timer.h",
-            "runtime_wait.h",
-            "runtime_cothread.h",
-            "runtime_cothread_state.h",
-            "runtime_stack.h",
-            "runtime_pthread_abi.h",
-            "runtime_pthread_handle.h",
-            "runtime_pthread_tls.h",
-            "runtime_tls_row.h",
-            "runtime_token_counter.h",
-            "runtime_thread_probe.h",
-            "runtime_network.h",
-            "runtime_restart.h",
-            "runtime_syscalls.h",
-            "runtime_syscall_handlers.h",
-            "runtime_console.h",
-            "runtime_fd.h",
-            "runtime_fd_pair.h",
-            "runtime_epoll_table.h",
-            "runtime_deadline.h",
-            "runtime_timer_slot.h",
-            "runtime_pd_restart.h",
-            "runtime_pd_restart_parse.h",
-            "rng.h",
-            "rng_select.h",
-            "root_policy.h",
-            "beam_snapshot_codec.h",
-            "beam_restart_layout.h",
-            "runtime_tcp_logic.h",
-            "runtime_tcp_state.h",
-        };
-        for (runtime_contract_headers) |header| {
-            const probe_flags = b.allocator.alloc([]const u8, runtime_flags.len + 1) catch @panic("OOM");
-            @memcpy(probe_flags[0..runtime_flags.len], runtime_flags);
-            probe_flags[runtime_flags.len] = b.fmt("-DRUNTIME_CONTRACT_HEADER=\"{s}\"", .{header});
-            glue.root_module.addCSourceFile(.{
-                .file = b.path("src/runtime/runtime_contract_header_probe.c"),
-                .flags = probe_flags,
-            });
-        }
+        diagnostics.addContractProbes(
+            b,
+            glue.root_module,
+            b.path("src/pd/beam/config/runtime_contract_header_probe.c"),
+            runtime_flags,
+        );
     }
 
-    glue.root_module.addIncludePath(b.path("src/runtime")); // libmicrokitco_opts.h
+    glue.root_module.addIncludePath(b.path("src/pd/beam")); // owner-qualified diagnostic probes
+    for (beam_include_dirs) |dir| glue.root_module.addIncludePath(b.path(dir));
     glue.root_module.addConfigHeader(generated_abi);
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
@@ -888,7 +641,7 @@ pub fn build(b: *std.Build) void {
     // lwIP headers: runtime_network.c includes this header, which pulls
     // lwip/pbuf.h -> lwipopts.h + arch/cc.h from our vendored lwip_include.
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
-    glue.root_module.addIncludePath(b.path("src/runtime/lwip_include"));
+    glue.root_module.addIncludePath(b.path("src/pd/beam/io/network/lwip_include"));
     // <bearssl.h> for rng.c's HMAC-DRBG calls.
     glue.root_module.addSystemIncludePath(bearssl_dep.path("inc"));
 
@@ -899,7 +652,7 @@ pub fn build(b: *std.Build) void {
     const tcp_obj = addTcpObject(b, target, optimize, lionsos_src, lions_libc, libmicrokitco_src, tcp_debug, diagnostic);
 
     // libbearssl_drbg.a: a five-file subset of BearSSL (HMAC_DRBG/SHA-256,
-    // NIST SP 800-90A) backing src/runtime/rng.c. We compile only what the DRBG
+    // NIST SP 800-90A) backing src/pd/beam/security/rng.c. We compile only what the DRBG
     // needs, not a whole TLS stack; the deliberate choice NOT to hand-roll the
     // CSPRNG. inner.h pulls <string.h>/<limits.h> (musl, via lions_libc),
     // "config.h" (BearSSL's default, in src/) and "bearssl.h" (in inc/).
@@ -922,7 +675,7 @@ pub fn build(b: *std.Build) void {
     bearssl.root_module.addIncludePath(bearssl_dep.path("src"));
     bearssl.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) }); // musl headers
 
-    const beam_cfg = BeamCfg{
+    const beam_cfg = pds.BeamCfg{
         .glue_obj = glue.getEmittedBin(),
         .microkitco_obj = microkitco.getEmittedBin(),
         .lwip_obj = lwip_lib.getEmittedBin(),
@@ -931,13 +684,13 @@ pub fn build(b: *std.Build) void {
         .board_dir = board_dir,
         .lions_libc = lions_libc,
         .libc_dir = libc_dir,
-        .erts_dir = b.option([]const u8, "erts-archive-dir", "dir holding the merged liberts_all.a (with -Dwith-erts)"),
+        .erts_dir = opts.erts_archive_dir,
         .lazy = .{ .preferred_link_mode = .static, .use_pkg_config = .no },
     };
 
-    addBeamExe(b, target, beam_cfg, "beam_server.elf", false);
+    pds.addBeamExe(b, target, beam_cfg, "beam_server.elf", false, util_putchar_debug);
     if (with_erts) {
         if (beam_cfg.erts_dir == null) @panic("set -Derts-archive-dir with -Dwith-erts");
-        addBeamExe(b, target, beam_cfg, "beam_test.elf", true);
+        pds.addBeamExe(b, target, beam_cfg, "beam_test.elf", true, util_putchar_debug);
     }
 }

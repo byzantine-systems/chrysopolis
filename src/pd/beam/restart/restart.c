@@ -91,11 +91,12 @@
  * padding because the reset trampoline below has to compute the stack top in
  * assembly, where offsetof() is not available.
  *
- * The values come from runtime-abi.json, which also configures the matching
- * SDF memory region. tools/sdf/abi.zig rejects a JSON that breaks these rules
- * when the SDF is generated, modules/images.nix asserts at build time that the
- * data area is big enough for this ELF's writable segment, and the checks
- * below hold the same rules against the constants this file compiled with.
+ * The values come from system_abi.zig, which also configures the matching
+ * SDF memory region. interfaces/system_abi.zig rejects a JSON that breaks these
+ * rules when the SDF is generated, modules/images.nix asserts at build time
+ * that the data area is big enough for this ELF's writable segment, and the
+ * checks below hold the same rules against the constants this file compiled
+ * with.
  *
  * The header (beam_snapshot_hdr_t) and the survivor records are laid out in
  * beam_snapshot_codec.h, which pins their offsets. The magic is written last

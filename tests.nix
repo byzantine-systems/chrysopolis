@@ -64,7 +64,7 @@
 }:
 let
   qemu = "${pkgs.qemu}/bin/qemu-system-aarch64";
-  runtimeAbi = builtins.fromJSON (builtins.readFile ./tools/sdf/runtime-abi.json);
+  runtimeAbi = builtins.fromJSON (builtins.readFile ./interfaces/generated/system-abi.json);
   serialChild = toString (builtins.elemAt runtimeAbi.drivers 0).child;
   timerChild = toString (builtins.elemAt runtimeAbi.drivers 1).child;
   blkChild = toString (builtins.elemAt runtimeAbi.drivers 2).child;
@@ -81,7 +81,7 @@ let
   # loaded before it can load the others.
   #
   # Derived rather than discovered ON THE GUEST for a hard reason: the LionsOS
-  # libc registers no getdents64 (see the openat handler in src/runtime/runtime_sys_devices.c),
+  # libc registers no getdents64 (see the openat handler in src/pd/beam/compat/syscall/runtime_sys_devices.c),
   # so file:list_dir/1 cannot work there. For the same reason nothing may pass
   # `cache` to code:add_patha/2, which lists the directory it is given.
   testModules = pkgs.lib.concatStringsSep "," (
@@ -276,7 +276,7 @@ let
           Loaded probes keep working afterwards, which is what lets them report
           the failure the test is there to observe.
 
-          ERTS boots -mode embedded (src/runtime/runtime_payload.c), so a call to an
+          ERTS boots -mode embedded (src/pd/beam/payload/runtime_payload.c), so a call to an
           unloaded module is a plain undef and never an autoload: the code path
           has to be added and each module asked for by name.
           code:ensure_loaded/1 returns {error,embedded} here and is useless;
@@ -690,7 +690,7 @@ in
   #      re-fills timeouts[] with UINT64_MAX, discarding every timeout armed
   #      before the restart, so the client is left waiting on a notification
   #      that will never arrive. Without the lost-timeout recovery in
-  #      beam_timer_arm (src/runtime/runtime_timer.c) the PD wedges permanently here.
+  #      beam_timer_arm (src/pd/beam/io/timer/runtime_timer.c) the PD wedges permanently here.
   #
   # This also exercises the non-passive timer_driver from the client side:
   # sddf_timer_time_now is a PPC, and a restarted PASSIVE PD could never answer
@@ -765,7 +765,7 @@ in
           #
           # The latest upstream bump in d9d49b1 (Microkit 2.3.0 / seL4 16.0.0
           # / sDDF 0.7.0 / LionsOS 0.4.0) seems to have fixed it without any
-          # client-side change, no code in src/runtime was touched.
+          # client-side change, no BEAM runtime code was touched.
           sleep_works(chryso, "slept_after", 180)
 
           assert_no_pd_fault(chryso)
@@ -1201,7 +1201,7 @@ in
 
   # gen_tcp end-to-end: TCP both ways over the real stack:
   #
-  # ERTS inet_drv -> libc sock.c -> src/runtime/tcp.c -> lwIP ->
+  # ERTS inet_drv -> libc sock.c -> src/pd/beam/io/tcp.c -> lwIP ->
   # sDDF net -> virtio-net/slirp.
   #
   #   1. host->guest: a looping gen_tcp echo server on :5555 (hostfwd), the

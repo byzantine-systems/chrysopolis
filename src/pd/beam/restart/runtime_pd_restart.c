@@ -35,7 +35,7 @@
  * per restartable driver class, in the order tools/sdf/system.zig wires the
  * beam_server to Root test channels. The object has its own section and is
  * volatile and used, so the compiler cannot fold the initialiser away and
- * objcopy can overwrite it. root.c's .restart_config and sDDF's per-PD config
+ * objcopy can overwrite it. Root's .restart_config and sDDF's per-PD config
  * blobs use the same mechanism. */
 __attribute__((__section__(PD_RESTART_CONFIG_SECTION), used)) volatile uint8_t
     pd_restart_channels[PD_RESTART_MODE_COUNT][PD_RESTART_CLASS_COUNT] = {
