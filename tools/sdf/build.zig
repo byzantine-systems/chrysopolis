@@ -58,6 +58,30 @@ pub fn build(b: *std.Build) void {
     abi_options.addOption([]const u8, "snapshot_setvar", abi.memory.snapshot.setvar);
     abi_options.addOption(u64, "exit_fault_base", abi.restart.exit_fault_base);
     abi_options.addOption(u64, "exit_fault_size", abi.restart.exit_fault_size);
+    abi_options.addOption(u8, "beam_dynamic_channel_floor", abi.control.beam_dynamic_channel_floor);
+    abi_options.addOption(usize, "non_crasher_pd_count", abi_schema.non_crasher_pd_count);
+    abi_options.addOption([2]u64, "control_beam_vaddrs", .{
+        abi.control.status.beam_vaddr,
+        abi.control.spec.beam_vaddr,
+    });
+    abi_options.addOption([2]u64, "control_sizes", .{
+        abi.control.status.size,
+        abi.control.spec.size,
+    });
+    abi_options.addOption(u8, "pool_slots", abi.pool.slots);
+    abi_options.addOption(u64, "pool_beam_window_stride", abi.pool.beam_window_stride);
+    abi_options.addOption([4]u64, "pool_beam_base_vaddrs", .{
+        abi.pool.identity.beam_base_vaddr,
+        abi.pool.status.beam_base_vaddr,
+        abi.pool.transport.request.beam_base_vaddr,
+        abi.pool.transport.completion.beam_base_vaddr,
+    });
+    abi_options.addOption([4]u64, "pool_region_sizes", .{
+        abi.pool.identity.size,
+        abi.pool.status.size,
+        abi.pool.transport.request.size,
+        abi.pool.transport.completion.size,
+    });
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("system.zig"),

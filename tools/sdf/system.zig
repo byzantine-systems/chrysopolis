@@ -36,6 +36,12 @@ const sddf = mod.sddf;
 const lionsos = mod.lionsos;
 const dtb = mod.dtb;
 
+fn rangesOverlap(a_start: u64, a_size: u64, b_start: u64, b_size: u64) !bool {
+    const a_end = try std.math.add(u64, a_start, a_size);
+    const b_end = try std.math.add(u64, b_start, b_size);
+    return a_start < b_end and b_start < a_end;
+}
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -328,6 +334,23 @@ pub fn main() !void {
         .pd_b_notify = false,
     }));
 
+    // All channels involving beam_server so far were allocated by the sDDF
+    // helpers. Fixed orchestration ids begin at this floor in a later phase.
+    for (sdf.channels.items) |channel| {
+        const beam_id: ?u8 = if (channel.pd_a == &beam_server)
+            channel.pd_a_id
+        else if (channel.pd_b == &beam_server)
+            channel.pd_b_id
+        else
+            null;
+        if (beam_id) |id| {
+            if (id >= abi.beam_dynamic_channel_floor) {
+                std.debug.print("beam_server dynamic channel {d} reaches reserved floor {d}\n", .{ id, abi.beam_dynamic_channel_floor });
+                return error.BeamDynamicChannelRange;
+            }
+        }
+    }
+
     // Test-only restart and fault-injection channels (see the
     // --with-restart-debug comment at the top). Two channels per restartable
     // driver class let the notification carry both the target and operation: a
@@ -395,6 +418,13 @@ pub fn main() !void {
     //
     // The one page from the base covers every encodable exit code (the code is
     // masked to a byte).
+    const pd_count = sdf.pds.items.len + root.child_pds.items.len;
+    const expected_pd_count = abi.non_crasher_pd_count + @as(usize, @intFromBool(with_crasher));
+    if (pd_count != expected_pd_count) {
+        std.debug.print("SDF has {d} PDs, expected {d}\n", .{ pd_count, expected_pd_count });
+        return error.UnexpectedProtectionDomainCount;
+    }
+
     for (beam_server.maps.items) |map| {
         const lo = map.vaddr;
         const hi = map.vaddr + map.mr.size;
@@ -406,6 +436,22 @@ pub fn main() !void {
                 .{ map.mr.name, lo, hi, abi.exit_fault_base },
             );
             std.process.exit(1);
+        }
+        for (abi.control_beam_vaddrs, abi.control_sizes) |base, size| {
+            if (try rangesOverlap(lo, map.mr.size, base, size)) {
+                std.debug.print("beam_server map '{s}' overlaps reserved control window 0x{x}\n", .{ map.mr.name, base });
+                return error.ReservedBeamWindowMapped;
+            }
+        }
+        for (0..abi.pool_slots) |slot| {
+            const offset = try std.math.mul(u64, @intCast(slot), abi.pool_beam_window_stride);
+            for (abi.pool_beam_base_vaddrs, abi.pool_region_sizes) |base, size| {
+                const window = try std.math.add(u64, base, offset);
+                if (try rangesOverlap(lo, map.mr.size, window, size)) {
+                    std.debug.print("beam_server map '{s}' overlaps reserved slot {d} window 0x{x}\n", .{ map.mr.name, slot, window });
+                    return error.ReservedBeamWindowMapped;
+                }
+            }
         }
     }
 

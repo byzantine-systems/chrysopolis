@@ -109,6 +109,7 @@
               fileset = pkgs.lib.fileset.unions [
                 ../tools/abi
                 ../interfaces/system_abi.zig
+                ../interfaces/orchestrator_abi.zig
               ];
             };
           in
@@ -121,8 +122,8 @@
               export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
               mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
               ln -s ${abiToolDeps} "$ZIG_GLOBAL_CACHE_DIR"/p
-              zig test interfaces/system_abi.zig
               cd tools/abi
+              zig build test --summary all
               zig build --prefix $out -Doptimize=ReleaseSafe
               runHook postBuild
             '';
@@ -188,10 +189,11 @@
           '';
         };
         abi-stale = pkgs.runCommand "chrysopolis-abi-stale" { } ''
-          ${config.packages.abi-tool}/bin/gen-system-abi first.json
-          ${config.packages.abi-tool}/bin/gen-system-abi second.json
-          cmp first.json second.json
-          cmp first.json ${../interfaces/generated/system-abi.json}
+          ${config.packages.abi-tool}/bin/gen-abi first-system.json first-orchestrator.json
+          ${config.packages.abi-tool}/bin/gen-abi second-system.json second-orchestrator.json
+          cmp first-system.json second-system.json
+          cmp first-orchestrator.json second-orchestrator.json
+          cmp first-system.json ${../interfaces/generated/system-abi.json}
           touch $out
         '';
         # Compile gate for the console-driving probes in tests/. Exposed as a

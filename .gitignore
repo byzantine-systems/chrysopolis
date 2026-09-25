@@ -62,6 +62,10 @@ zig-out/
 zig-pkg/
 *.o
 
+# Generated for ABI inspection and reproducibility checks; the typed Zig model
+# is the authority. Only system-abi.json is committed for pure Nix evaluation.
+/interfaces/generated/orchestrator-abi.json
+
 # Keep the root Zig build's imported helpers under build/. Ignore generated
 # build products while retaining the checked-in Zig source modules.
 /build/*
