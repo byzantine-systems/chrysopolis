@@ -21,6 +21,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     model.addImport("orchestrator_abi", orchestrator_abi);
+    const validation = b.createModule(.{
+        .root_source_file = b.path("validate.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    validation.addImport("system_abi", system_abi);
+    validation.addImport("orchestrator_abi", orchestrator_abi);
+    validation.addImport("model", model);
     const module = b.createModule(.{
         .root_source_file = b.path("main.zig"),
         .target = target,
@@ -30,11 +38,12 @@ pub fn build(b: *std.Build) void {
     module.addImport("system_abi", system_abi);
     module.addImport("orchestrator_abi", orchestrator_abi);
     module.addImport("model", model);
+    module.addImport("validation", validation);
     const exe = b.addExecutable(.{ .name = "gen-abi", .root_module = module });
     b.installArtifact(exe);
 
     const test_step = b.step("test", "Test both typed ABI contracts and their projection");
-    inline for (.{ system_abi, orchestrator_abi, model }) |test_module| {
+    inline for (.{ system_abi, orchestrator_abi, model, validation }) |test_module| {
         const unit_tests = b.addTest(.{ .root_module = test_module });
         test_step.dependOn(&b.addRunArtifact(unit_tests).step);
     }

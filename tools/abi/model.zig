@@ -182,7 +182,10 @@ pub fn validateRecord(record: Record, diagnostic: *abi.Diagnostic) !void {
             diagnostic.* = .{ .path = record.name, .invariant = "no implicit field padding" };
             return error.InvalidRecordOffset;
         }
-        next_offset = try std.math.add(usize, next_offset, field.size);
+        next_offset = std.math.add(usize, next_offset, field.size) catch {
+            diagnostic.* = .{ .path = record.name, .invariant = "field extent does not overflow" };
+            return error.InvalidRecordSize;
+        };
     }
     if (next_offset != record.size) {
         diagnostic.* = .{ .path = record.name, .invariant = "exact record size" };
@@ -220,7 +223,7 @@ pub fn validateAtomicFields(fields: []const abi.AtomicField, record_list: []cons
                 if (!std.mem.eql(u8, atomic.field, field.name)) continue;
                 found = true;
                 if ((atomic.width != 4 and atomic.width != 8) or field.size != atomic.width or
-                    field.offset % atomic.width != 0)
+                    field.offset % atomic.width != 0 or record.alignment % atomic.width != 0)
                 {
                     diagnostic.* = .{ .path = atomic.record, .invariant = "atomic width and alignment" };
                     return error.InvalidAtomicField;
@@ -240,27 +243,60 @@ pub fn validateAtomicFields(fields: []const abi.AtomicField, record_list: []cons
     }
 }
 
-pub fn validate(diagnostic: *abi.Diagnostic) !void {
+pub fn validateDescription(value: Description, diagnostic: *abi.Diagnostic) !void {
     diagnostic.* = .{};
-    for (description.records) |record| try validateRecord(record, diagnostic);
-    for (description.enums) |enumeration| try validateEnum(enumeration, diagnostic);
-    if (description.atomic_fields.len != 7) {
+    if (value.abi_version != abi.abi_version or value.constants.child_count != abi.child_count or
+        value.constants.event_count != abi.event_count or
+        value.constants.journal_capacity != abi.journal_capacity or
+        value.constants.journal_payload_size != abi.journal_payload_size)
+    {
+        diagnostic.* = .{ .path = "constants", .invariant = "typed ABI version and capacities" };
+        return error.InvalidModelConstants;
+    }
+    if (value.records.len != 16 or value.enums.len != 12 or
+        value.magics.len != 8 or value.transitions.len != abi.slot_transitions.len)
+    {
+        diagnostic.* = .{ .path = "description", .invariant = "complete wire metadata" };
+        return error.IncompleteModel;
+    }
+    for (value.records) |record| try validateRecord(record, diagnostic);
+    for (value.enums) |enumeration| try validateEnum(enumeration, diagnostic);
+    if (value.atomic_fields.len != 7) {
         diagnostic.* = .{ .path = "atomic_fields", .invariant = "all publication fields listed" };
         return error.MissingAtomicField;
     }
-    try validateAtomicFields(description.atomic_fields, description.records, diagnostic);
-    for (description.magics, 0..) |magic, i| {
+    try validateAtomicFields(value.atomic_fields, value.records, diagnostic);
+    for (abi.atomic_fields) |required| {
+        var found = false;
+        for (value.atomic_fields) |field| {
+            if (std.mem.eql(u8, field.record, required.record) and
+                std.mem.eql(u8, field.field, required.field) and field.width == required.width)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            diagnostic.* = .{ .path = required.record, .invariant = "required publication field and width" };
+            return error.MissingAtomicField;
+        }
+    }
+    for (value.magics, 0..) |magic, i| {
         if (magic.bytes.len != 8) {
             diagnostic.* = .{ .path = magic.name, .invariant = "eight magic bytes" };
             return error.InvalidMagic;
         }
-        for (description.magics[0..i]) |prior| {
+        for (value.magics[0..i]) |prior| {
             if (magic.value == prior.value) {
                 diagnostic.* = .{ .path = magic.name, .invariant = "distinct magics" };
                 return error.DuplicateMagic;
             }
         }
     }
+}
+
+pub fn validate(diagnostic: *abi.Diagnostic) !void {
+    try validateDescription(description, diagnostic);
 }
 
 test "reflection describes pinned bank and journal geometry" {

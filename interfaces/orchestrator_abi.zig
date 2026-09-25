@@ -423,6 +423,22 @@ fn assertNoImplicitPadding(comptime T: type) void {
         @compileError(@typeName(T) ++ " has implicit tail padding");
 }
 
+pub fn validateReservedDefaults(comptime T: type, diagnostic: *Diagnostic) !void {
+    diagnostic.* = .{};
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        if (comptime std.mem.startsWith(u8, field.name, "reserved") or std.mem.startsWith(u8, field.name, "pad")) {
+            const declared = field.defaultValue() orelse {
+                diagnostic.* = .{ .path = @typeName(T) ++ "." ++ field.name, .invariant = "reserved field has a zero default" };
+                return error.InvalidReservedDefault;
+            };
+            if (!std.meta.eql(declared, std.mem.zeroes(field.type))) {
+                diagnostic.* = .{ .path = @typeName(T) ++ "." ++ field.name, .invariant = "reserved field has a zero default" };
+                return error.InvalidReservedDefault;
+            }
+        }
+    }
+}
+
 comptime {
     for (.{
         RootStatusHeader, RootChildStatus,      RootEvent,      RootStatusPage,
@@ -434,6 +450,12 @@ comptime {
 
 pub fn validate(diagnostic: *Diagnostic) !void {
     diagnostic.* = .{};
+    inline for (.{
+        RootStatusHeader, RootChildStatus,      RootEvent,      RootStatusPage,
+        SpecHeader,       SpecBank,             SpecPage,       CtlCommand,
+        CtlReply,         WorkerIdentityHeader, WorkerIdentity, WorkerStatusHeader,
+        WorkerStatus,     JournalHeader,        JournalEntry,   JournalPage,
+    }) |T| try validateReservedDefaults(T, diagnostic);
     if (@sizeOf(RootStatusPage) != 16384 or @offsetOf(RootStatusPage, "events") != 5032) {
         diagnostic.* = .{ .path = "RootStatusPage", .invariant = "size and event offset" };
         return error.InvalidWireLayout;
@@ -528,6 +550,12 @@ test "transition validation rejects undeclared and duplicate edges" {
 }
 
 test "reserved fields default to zero" {
+    var diagnostic: Diagnostic = .{};
+    const BadReserved = extern struct { value: u32, reserved: u32 = 1 };
+    try std.testing.expectError(error.InvalidReservedDefault, validateReservedDefaults(BadReserved, &diagnostic));
+    try std.testing.expect(std.mem.endsWith(u8, diagnostic.path, ".BadReserved.reserved"));
+    try std.testing.expectEqualStrings("reserved field has a zero default", diagnostic.invariant);
+
     const command: CtlCommand = .{
         .magic = magic.command,
         .version = abi_version,
