@@ -9,5 +9,5 @@
             .hash = "serde-1.0.1-1DszT7B_DQByGB4OA1ofuxMNznusFipIeMMqCeXbu2cY",
         },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig", "model.zig" },
 }

@@ -8,6 +8,7 @@ const std = @import("std");
 
 pub const driver_count = 4;
 pub const page_size = 0x1000;
+pub const non_crasher_pd_count = 13;
 
 pub const Contract = struct {
     version: u32,
@@ -42,6 +43,8 @@ pub const Contract = struct {
         heap: Region,
         snapshot: SnapshotRegion,
     },
+    control: Control,
+    pool: Pool,
     sections: struct {
         serial_client: []const u8,
         timer_client: []const u8,
@@ -84,6 +87,93 @@ pub const ConfigSection = struct {
     elf: []const u8,
 };
 
+pub const ChannelPair = struct {
+    root: u8,
+    beam: u8,
+};
+
+pub const ControlRegion = struct {
+    size: u64,
+    root_vaddr: u64,
+    beam_vaddr: u64,
+    root_setvar: []const u8,
+    beam_setvar: []const u8,
+    root_cached: bool,
+    beam_cached: bool,
+};
+
+pub const SpecRegion = struct {
+    size: u64,
+    root_vaddr: u64,
+    beam_vaddr: u64,
+    root_setvar: []const u8,
+    beam_setvar: []const u8,
+    root_cached: bool,
+    beam_cached: bool,
+    header_size: u32,
+    bank_size: u32,
+    banks: u8,
+};
+
+pub const Control = struct {
+    abi_version: u32,
+    pp_channel: ChannelPair,
+    beam_dynamic_channel_floor: u8,
+    status: ControlRegion,
+    spec: SpecRegion,
+    hard_budget_max: u32,
+    command_rate: struct { tokens: u32, refill_ms: u32 },
+    event_ring_entries: u32,
+};
+
+pub const WorkerClass = struct {
+    name: []const u8,
+    count: u8,
+    priority: u8,
+    budget: u32,
+    period: u32,
+    heap_size: u64,
+    stack_size: u64,
+};
+
+pub const WorkerRegion = struct {
+    size: u64,
+    worker_vaddr: u64,
+    beam_base_vaddr: u64,
+    worker_setvar: []const u8,
+    worker_cached: bool,
+    beam_cached: bool,
+};
+
+pub const Pool = struct {
+    elf: []const u8,
+    child_base: u8,
+    slots: u8,
+    beam_window_stride: u64,
+    classes: [2]WorkerClass,
+    identity: WorkerRegion,
+    status: WorkerRegion,
+    transport: struct {
+        beam_channel_base: u8,
+        worker_channel: u8,
+        beam_config_section: []const u8,
+        journal_header_size: u32,
+        journal_entry_size: u32,
+        journal_entries: u8,
+        journal_payload_size: u32,
+        request: WorkerRegion,
+        completion: WorkerRegion,
+    },
+    heap: struct {
+        worker_vaddr: u64,
+        setvar: []const u8,
+    },
+    runtime_profile: struct {
+        wamr_slots: u8,
+        module_staging_size: u64,
+    },
+};
+
 pub const values: Contract = .{
     .version = 1,
     .microkit = .{ .id_count = 62, .absent_id = 255 },
@@ -123,6 +213,88 @@ pub const values: Contract = .{
             .survivors_size = 4096,
             .data_offset = 24576,
         },
+    },
+    .control = .{
+        .abi_version = 1,
+        .pp_channel = .{ .root = 11, .beam = 53 },
+        .beam_dynamic_channel_floor = 6,
+        .status = .{
+            .size = 16384,
+            .root_vaddr = 0x40000000,
+            .beam_vaddr = 0x32000000,
+            .root_setvar = "root_status_start",
+            .beam_setvar = "root_status_view",
+            .root_cached = true,
+            .beam_cached = true,
+        },
+        .spec = .{
+            .size = 4096,
+            .root_vaddr = 0x40004000,
+            .beam_vaddr = 0x32004000,
+            .root_setvar = "orchestrator_spec_view",
+            .beam_setvar = "orchestrator_spec_start",
+            .root_cached = true,
+            .beam_cached = true,
+            .header_size = 64,
+            .bank_size = 2016,
+            .banks = 2,
+        },
+        .hard_budget_max = 64,
+        .command_rate = .{ .tokens = 32, .refill_ms = 1000 },
+        .event_ring_entries = 128,
+    },
+    .pool = .{
+        .elf = "worker.elf",
+        .child_base = 6,
+        .slots = 16,
+        .beam_window_stride = 0x10000,
+        .classes = .{
+            .{ .name = "small", .count = 12, .priority = 40, .budget = 1000, .period = 4000, .heap_size = 4194304, .stack_size = 65536 },
+            .{ .name = "large", .count = 4, .priority = 60, .budget = 2000, .period = 4000, .heap_size = 16777216, .stack_size = 131072 },
+        },
+        .identity = .{
+            .size = 4096,
+            .worker_vaddr = 0x10000000,
+            .beam_base_vaddr = 0x34000000,
+            .worker_setvar = "worker_identity",
+            .worker_cached = true,
+            .beam_cached = true,
+        },
+        .status = .{
+            .size = 4096,
+            .worker_vaddr = 0x10001000,
+            .beam_base_vaddr = 0x34001000,
+            .worker_setvar = "worker_status",
+            .worker_cached = true,
+            .beam_cached = true,
+        },
+        .transport = .{
+            .beam_channel_base = 6,
+            .worker_channel = 0,
+            .beam_config_section = ".pool_transport_config",
+            .journal_header_size = 256,
+            .journal_entry_size = 256,
+            .journal_entries = 15,
+            .journal_payload_size = 192,
+            .request = .{
+                .size = 4096,
+                .worker_vaddr = 0x10002000,
+                .beam_base_vaddr = 0x34002000,
+                .worker_setvar = "worker_request_view",
+                .worker_cached = true,
+                .beam_cached = true,
+            },
+            .completion = .{
+                .size = 4096,
+                .worker_vaddr = 0x10003000,
+                .beam_base_vaddr = 0x34003000,
+                .worker_setvar = "worker_completion_start",
+                .worker_cached = true,
+                .beam_cached = true,
+            },
+        },
+        .heap = .{ .worker_vaddr = 0x20000000, .setvar = "worker_heap_start" },
+        .runtime_profile = .{ .wamr_slots = 4, .module_staging_size = 2097152 },
     },
     .sections = .{
         .serial_client = ".serial_client_config",
@@ -173,6 +345,24 @@ pub fn validate(contract: Contract) !void {
         contract.restart.clock_max_hz > 4_294_967_295) return error.InvalidRootClockBounds;
     if (contract.restart.exit_fault_size == 0 or contract.restart.exit_fault_size % page_size != 0) return error.InvalidExitFaultRange;
     if (contract.restart.exit_fault_base % page_size != 0) return error.InvalidExitFaultRange;
+    if (contract.control.abi_version != 1 or contract.control.beam_dynamic_channel_floor == 0) return error.InvalidControlVersion;
+    if (contract.control.status.size != 16384 or contract.control.spec.size != 4096 or
+        contract.control.spec.header_size != 64 or contract.control.spec.bank_size != 2016 or
+        contract.control.spec.banks != 2 or contract.control.event_ring_entries != 128)
+        return error.InvalidControlGeometry;
+    if (contract.pool.slots != 16 or contract.pool.child_base != 6 or
+        contract.pool.beam_window_stride < 4 * page_size or
+        contract.pool.beam_window_stride % page_size != 0)
+        return error.InvalidPoolGeometry;
+    if (contract.pool.transport.journal_header_size != 256 or contract.pool.transport.journal_entry_size != 256 or
+        contract.pool.transport.journal_entries != 15 or contract.pool.transport.journal_payload_size != 192)
+        return error.InvalidJournalGeometry;
+    try validateControlRegion(contract.control.status);
+    try validateControlRegion(contract.control.spec);
+    try validateWorkerRegion(contract.pool.identity);
+    try validateWorkerRegion(contract.pool.status);
+    try validateWorkerRegion(contract.pool.transport.request);
+    try validateWorkerRegion(contract.pool.transport.completion);
 
     const heap = contract.memory.heap;
     const snapshot = contract.memory.snapshot;
@@ -224,6 +414,20 @@ pub fn validate(contract: Contract) !void {
     }
 }
 
+fn validateControlRegion(region: anytype) !void {
+    if (region.size == 0 or region.size % page_size != 0 or
+        region.root_vaddr % page_size != 0 or region.beam_vaddr % page_size != 0)
+        return error.InvalidControlRegion;
+    if (!region.root_cached or !region.beam_cached) return error.UncachedControlRegion;
+}
+
+fn validateWorkerRegion(region: WorkerRegion) !void {
+    if (region.size != page_size or region.worker_vaddr % page_size != 0 or
+        region.beam_base_vaddr % page_size != 0)
+        return error.InvalidWorkerRegion;
+    if (!region.worker_cached or !region.beam_cached) return error.UncachedWorkerRegion;
+}
+
 fn validateIds(ids: []const u8, id_count: u8) !void {
     for (ids, 0..) |id, i| {
         if (id >= id_count) return error.IdOutOfRange;
@@ -261,4 +465,26 @@ test "typed ABI is valid and rejects conflicting values" {
 
 test "required ABI fields cannot be omitted" {
     try std.testing.expectError(error.MissingField, std.json.parseFromSliceLeaky(Contract, std.testing.allocator, "{}", .{}));
+}
+
+test "new control and pool geometry is required" {
+    var bad = values;
+    bad.control.status.root_cached = false;
+    try std.testing.expectError(error.UncachedControlRegion, validate(bad));
+
+    bad = values;
+    bad.control.status.root_vaddr += 1;
+    try std.testing.expectError(error.InvalidControlRegion, validate(bad));
+
+    bad = values;
+    bad.pool.transport.request.beam_cached = false;
+    try std.testing.expectError(error.UncachedWorkerRegion, validate(bad));
+
+    bad = values;
+    bad.pool.transport.request.beam_base_vaddr += 1;
+    try std.testing.expectError(error.InvalidWorkerRegion, validate(bad));
+
+    bad = values;
+    bad.pool.transport.journal_entries = 16;
+    try std.testing.expectError(error.InvalidJournalGeometry, validate(bad));
 }
