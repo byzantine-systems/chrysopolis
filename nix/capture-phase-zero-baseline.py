@@ -499,9 +499,21 @@ def parse_host_tests(path: Path) -> dict[str, Any]:
             text,
         )
     ]
+    # Zig test roots (the generated-C differential test) run once per variant too.
+    zig_tests = re.findall(
+        r'b\.addTest\(\.\{\s*\.name\s*=\s*b\.fmt\("([a-z0-9_]+)_\{s\}"',
+        text,
+    )
     if not suites or not variants:
         fail(f"{path}: could not find host suite and variant declarations")
-    return {"suites": suites, "variants": variants, "executions": len(suites) * len(variants)}
+    if len(zig_tests) != text.count("b.addTest("):
+        fail(f"{path}: every b.addTest must be named b.fmt(\"<name>_{{s}}\", variant.suffix)")
+    return {
+        "suites": suites,
+        "zig_tests": zig_tests,
+        "variants": variants,
+        "executions": (len(suites) + len(zig_tests)) * len(variants),
+    }
 
 
 def resolve_lock_inputs(path: Path) -> dict[str, Any]:

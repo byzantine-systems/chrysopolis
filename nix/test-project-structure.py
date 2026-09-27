@@ -82,6 +82,24 @@ class StructureFixtures(unittest.TestCase):
         (self.root / "include/chrysopolis/runtime_abi.h").write_text("#pragma once\n")
         self.reject("generated-header")
 
+    def test_generated_orchestration_header_anywhere(self) -> None:
+        path = self.root / "tests/host/lib/abi/root_control.h"
+        path.parent.mkdir(parents=True)
+        path.write_text("#pragma once\n")
+        self.reject("generated-header")
+
+    def test_generated_erlang_contract(self) -> None:
+        path = self.root / "apps/chryso_abi/include/orchestrator_abi.hrl"
+        path.parent.mkdir(parents=True)
+        path.write_text("-define(CHRYSO_ABI_VERSION, 1).\n")
+        self.reject("generated-erlang")
+
+    def test_generated_names_in_build_outputs_are_allowed(self) -> None:
+        path = self.root / "tests/host/.zig-cache/o/abi/chrysopolis/root_control.h"
+        path.parent.mkdir(parents=True)
+        path.write_text("#pragma once\n")
+        checker.check(self.root, "clang")
+
     def test_tcp_formatting_exclusion(self) -> None:
         path = self.root / "modules/devshell.nix"
         path.write_text(path.read_text().replace('"src/pd/beam/io/tcp.c"', '"src/pd/beam/io/not-tcp.c"'))

@@ -24,7 +24,18 @@ BEAM_LIST = re.compile(
     r'\.root\s*=\s*b\.path\("src/pd/beam"\).*?\.files\s*=\s*&\.\{(.*?)\n\s*\},',
     re.DOTALL,
 )
-GENERATED_HEADER_NAMES = {"runtime_abi.h", "system_abi.h"}
+GENERATED_HEADER_NAMES = {
+    "runtime_abi.h",
+    "system_abi.h",
+    "orchestrator_abi.h",
+    "root_control.h",
+    "worker_identity.h",
+    "worker_status.h",
+    "worker_protocol.h",
+}
+GENERATED_ERLANG_NAMES = {"orchestrator_abi.hrl", "chryso_abi_codec.erl"}
+# Build outputs and caches; generated files legitimately live there.
+UNSCANNED_DIRS = {".git", ".zig-cache", "zig-out", "zig-pkg", "_build", ".direnv", ".devenv"}
 TCP = "src/pd/beam/io/tcp.c"
 BEAM = "src/pd/beam/"
 ROOT = "src/pd/root/"
@@ -160,12 +171,26 @@ def check_stale_paths(root: Path) -> None:
             fail("stale-path", relative, "operational reference to src/runtime")
 
 
+def tree_files(root: Path):
+    """Every file outside build outputs, caches and result links."""
+    for path in root.rglob("*"):
+        parts = path.relative_to(root).parts
+        if any(part in UNSCANNED_DIRS or part.startswith("result") for part in parts):
+            continue
+        if path.is_file():
+            yield path
+
+
 def check_generated_headers(root: Path) -> None:
-    for base in ("src", "include", "interfaces"):
-        for path in (root / base).rglob("*.h"):
-            relative = path.relative_to(root).as_posix()
-            if path.name in GENERATED_HEADER_NAMES or relative.startswith("interfaces/generated/"):
-                fail("generated-header", relative, "generated C headers belong in build outputs")
+    for path in tree_files(root):
+        relative = path.relative_to(root).as_posix()
+        header = path.suffix == ".h" and (
+            path.name in GENERATED_HEADER_NAMES or relative.startswith("interfaces/generated/")
+        )
+        if header:
+            fail("generated-header", relative, "generated C headers belong in build outputs")
+        if path.name in GENERATED_ERLANG_NAMES:
+            fail("generated-erlang", relative, "generated Erlang contracts belong in build outputs")
 
 
 def check_tcp_exclusion(root: Path) -> None:

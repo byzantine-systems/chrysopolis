@@ -1,49 +1,88 @@
-//! Host-only projection of the typed system and orchestration ABIs for pure Nix evaluation.
+//! Typed ABI tools. Standalone it tests the contracts and builds both generators; as a path
+//! dependency it gives other builds the generated C headers (`orchestrator-abi`) and the
+//! `orchestrator_abi` and `checks` modules. serde is lazy, so dependents never fetch it.
 const std = @import("std");
+
+pub const headers = @import("headers.zig").names;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const serde = b.dependency("serde", .{ .target = target, .optimize = optimize });
-    const system_abi = b.createModule(.{
-        .root_source_file = b.path("../../interfaces/system_abi.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const orchestrator_abi = b.createModule(.{
+    const module = struct {
+        fn make(owner: *std.Build, path: []const u8, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+            return owner.createModule(.{ .root_source_file = owner.path(path), .target = t, .optimize = o });
+        }
+    }.make;
+    const system_abi = module(b, "../../interfaces/system_abi.zig", target, optimize);
+    const orchestrator_abi = b.addModule("orchestrator_abi", .{
         .root_source_file = b.path("../../interfaces/orchestrator_abi.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const model = b.createModule(.{
-        .root_source_file = b.path("model.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    const model = module(b, "model.zig", target, optimize);
     model.addImport("orchestrator_abi", orchestrator_abi);
-    const validation = b.createModule(.{
-        .root_source_file = b.path("validate.zig"),
+    const checks = b.addModule("checks", .{
+        .root_source_file = b.path("checks.zig"),
         .target = target,
         .optimize = optimize,
     });
-    validation.addImport("system_abi", system_abi);
-    validation.addImport("orchestrator_abi", orchestrator_abi);
-    validation.addImport("model", model);
-    const module = b.createModule(.{
-        .root_source_file = b.path("main.zig"),
-        .target = target,
-        .optimize = optimize,
+    checks.addImport("orchestrator_abi", orchestrator_abi);
+    checks.addImport("model", model);
+    const validation = module(b, "validate.zig", target, optimize);
+    const generate_c = module(b, "generate_c.zig", target, optimize);
+    for ([_]*std.Build.Module{ validation, generate_c }) |consumer| {
+        consumer.addImport("system_abi", system_abi);
+        consumer.addImport("orchestrator_abi", orchestrator_abi);
+        consumer.addImport("model", model);
+        consumer.addImport("checks", checks);
+    }
+
+    const generator = b.addExecutable(.{
+        .name = "gen-orchestrator-abi",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("gen_orchestrator_abi.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "system_abi", .module = system_abi },
+                .{ .name = "orchestrator_abi", .module = orchestrator_abi },
+                .{ .name = "model", .module = model },
+                .{ .name = "validation", .module = validation },
+                .{ .name = "generate_c", .module = generate_c },
+            },
+        }),
     });
-    module.addImport("serde", serde.module("serde"));
-    module.addImport("system_abi", system_abi);
-    module.addImport("orchestrator_abi", orchestrator_abi);
-    module.addImport("model", model);
-    module.addImport("validation", validation);
-    const exe = b.addExecutable(.{ .name = "gen-abi", .root_module = module });
-    b.installArtifact(exe);
+    // Dependents pass a musl target: the Nix sandbox has no dynamic linker to detect.
+    if (target.result.abi == .musl) generator.linkage = .static;
+    b.installArtifact(generator);
+    const generate = b.addRunArtifact(generator);
+    generate.addArg("c");
+    b.addNamedLazyPath("orchestrator-abi", generate.addOutputDirectoryArg("orchestrator-abi"));
+
+    // The JSON projection needs serde. Ask for it only as the root build: a lazyDependency
+    // call from a dependent's configure still fetches, and the Nix sandbox is offline.
+    const serde = if (b.dep_prefix.len == 0) b.lazyDependency("serde", .{ .target = target, .optimize = optimize }) else null;
+    if (serde) |dep| {
+        const gen_abi = b.addExecutable(.{
+            .name = "gen-abi",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "serde", .module = dep.module("serde") },
+                    .{ .name = "system_abi", .module = system_abi },
+                    .{ .name = "orchestrator_abi", .module = orchestrator_abi },
+                    .{ .name = "model", .module = model },
+                    .{ .name = "validation", .module = validation },
+                },
+            }),
+        });
+        b.installArtifact(gen_abi);
+    }
 
     const test_step = b.step("test", "Test both typed ABI contracts and their projection");
-    inline for (.{ system_abi, orchestrator_abi, model, validation }) |test_module| {
+    for ([_]*std.Build.Module{ system_abi, orchestrator_abi, model, checks, validation, generate_c }) |test_module| {
         const unit_tests = b.addTest(.{ .root_module = test_module });
         test_step.dependOn(&b.addRunArtifact(unit_tests).step);
     }

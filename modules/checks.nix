@@ -170,6 +170,10 @@
               ../include
               ../interfaces
               ../modules
+              # Scanned for generated ABI files that must not be committed.
+              ../tools
+              ../tests
+              (pkgs.lib.fileset.maybeMissing ../apps)
               ../nix/check-project-structure.py
               ../nix/test-project-structure.py
             ];

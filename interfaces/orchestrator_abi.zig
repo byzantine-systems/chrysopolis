@@ -260,6 +260,10 @@ pub const RootStatusHeader = extern struct {
     cntfrq: u64,
     event_head: u64,
     event_dropped: u64,
+    // The spec Root last applied (observedGeneration); 0 is the compiled-in safe policy.
+    applied_spec_generation: u64,
+    applied_bank: u32,
+    reserved0: u32 = 0,
 };
 
 pub const RootChildStatus = extern struct {
@@ -294,7 +298,7 @@ pub const RootStatusPage = extern struct {
     header: RootStatusHeader,
     children: [child_count]RootChildStatus,
     events: [event_count]RootEvent,
-    reserved_tail: [7256]u8 = [_]u8{0} ** 7256,
+    reserved_tail: [7240]u8 = [_]u8{0} ** 7240,
 };
 
 pub const SpecHeader = extern struct {
@@ -456,7 +460,7 @@ pub fn validate(diagnostic: *Diagnostic) !void {
         CtlReply,         WorkerIdentityHeader, WorkerIdentity, WorkerStatusHeader,
         WorkerStatus,     JournalHeader,        JournalEntry,   JournalPage,
     }) |T| try validateReservedDefaults(T, diagnostic);
-    if (@sizeOf(RootStatusPage) != 16384 or @offsetOf(RootStatusPage, "events") != 5032) {
+    if (@sizeOf(RootStatusPage) != 16384 or @offsetOf(RootStatusPage, "events") != 5048) {
         diagnostic.* = .{ .path = "RootStatusPage", .invariant = "size and event offset" };
         return error.InvalidWireLayout;
     }
@@ -487,11 +491,11 @@ pub fn validate(diagnostic: *Diagnostic) !void {
 }
 
 test "wire records have pinned sizes and offsets" {
-    try std.testing.expectEqual(@as(usize, 72), @sizeOf(RootStatusHeader));
+    try std.testing.expectEqual(@as(usize, 88), @sizeOf(RootStatusHeader));
     try std.testing.expectEqual(@as(usize, 80), @sizeOf(RootChildStatus));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(RootEvent));
     try std.testing.expectEqual(@as(usize, 16384), @sizeOf(RootStatusPage));
-    try std.testing.expectEqual(@as(usize, 5032), @offsetOf(RootStatusPage, "events"));
+    try std.testing.expectEqual(@as(usize, 5048), @offsetOf(RootStatusPage, "events"));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(RootStatusHeader, "seq"));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(SpecHeader));
     try std.testing.expectEqual(@as(usize, 2016), @sizeOf(SpecBank));

@@ -4,10 +4,24 @@
     .fingerprint = 0x825a5923ee295fdc,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
+        // Only gen-abi (the JSON projection) needs serde; lazy keeps dependents offline.
         .serde = .{
             .url = "https://github.com/OrlovEvgeny/serde.zig/archive/refs/tags/v1.0.6.tar.gz",
             .hash = "serde-1.0.1-1DszT7B_DQByGB4OA1ofuxMNznusFipIeMMqCeXbu2cY",
+            .lazy = true,
         },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "main.zig", "model.zig" },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "checks.zig",
+        "fixtures",
+        "gen_orchestrator_abi.zig",
+        "generate_c.zig",
+        "headers.zig",
+        "main.zig",
+        "model.zig",
+        "samples.zig",
+        "validate.zig",
+    },
 }

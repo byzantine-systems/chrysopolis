@@ -1,3 +1,4 @@
+# C + Zig
 # Prerequisites
 *.d
 
@@ -55,7 +56,7 @@ dkms.conf
 *.dwo
 
 # ---
-# Zig
+# Zig Only
 # ---
 .zig-cache/
 zig-out/
@@ -86,6 +87,11 @@ zig-pkg/
 /result*
 .devenv*
 .direnv/
+
+# From python testing suites
+__pycache__/
+*.py[codz]
+*$py.class
 
 # -----
 # Misc.

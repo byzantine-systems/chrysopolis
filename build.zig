@@ -3,6 +3,7 @@ const abi_schema = @import("interfaces/system_abi.zig");
 const cflags = @import("build/cflags.zig");
 const components = @import("build/components.zig");
 const diagnostics = @import("build/diagnostics.zig");
+const abi_probes = @import("build/abi.zig");
 const microkit = @import("build/microkit.zig");
 const options = @import("build/options.zig");
 const pds = @import("build/pds.zig");
@@ -631,6 +632,11 @@ pub fn build(b: *std.Build) void {
             .file = b.path("src/pd/beam/compat/pthread/runtime_thread_probe.c"),
             .flags = runtime_flags,
         });
+    }
+
+    if (diagnostic) {
+        // Generated orchestration headers: standalone compiles and the linked atomic probe.
+        abi_probes.addProbes(b, target, runtime_flags, generated_abi);
     }
 
     if (diagnostic) {

@@ -5,6 +5,7 @@ const std = @import("std");
 const system = @import("system_abi");
 const orchestration = @import("orchestrator_abi");
 const model = @import("model");
+const checks = @import("checks");
 
 pub fn validateAll(sys: system.Contract, description: model.Description, diagnostic: *orchestration.Diagnostic) !void {
     diagnostic.* = .{};
@@ -23,7 +24,7 @@ pub fn validateAll(sys: system.Contract, description: model.Description, diagnos
     if (sys.control.status.size != @sizeOf(orchestration.RootStatusPage) or
         sys.control.event_ring_entries != orchestration.event_count or
         sys.microkit.id_count != orchestration.child_count or
-        @offsetOf(orchestration.RootStatusPage, "events") != 5032)
+        @offsetOf(orchestration.RootStatusPage, "events") != 5048)
     {
         diagnostic.* = .{ .path = "control.status.size", .invariant = "status page matches typed wire layout" };
         return error.InvalidCrossContract;
@@ -48,6 +49,7 @@ pub fn validateAll(sys: system.Contract, description: model.Description, diagnos
         return error.InvalidCrossContract;
     }
     try model.validateDescription(description, diagnostic);
+    try checks.validateChecks(&checks.checkers, description, diagnostic);
 }
 
 fn expectInvalid(sys: system.Contract, expected_path: []const u8, expected_invariant: []const u8) !void {
@@ -219,7 +221,7 @@ test "metadata fixtures reject sparse enum collisions and shifted atomic fields"
     try std.testing.expectEqualStrings("Duplicate", diagnostic.path);
     try std.testing.expectEqualStrings("unique enum name and value", diagnostic.invariant);
 
-    const fields = [_]model.Field{.{ .name = "seq", .offset = 1, .size = 8, .type = "u64" }};
+    const fields = [_]model.Field{.{ .name = "seq", .offset = 1, .size = 8, .type = "u64", .element = "u64", .count = 1, .is_record = false }};
     const records = [_]model.Record{.{ .name = "Shifted", .size = 9, .alignment = 1, .fields = &fields }};
     const atomics = [_]orchestration.AtomicField{.{ .record = "Shifted", .field = "seq", .width = 8 }};
     try std.testing.expectError(error.InvalidAtomicField, model.validateAtomicFields(&atomics, &records, &diagnostic));
