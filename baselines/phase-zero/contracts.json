@@ -6,6 +6,14 @@
       "every declared configuration blob is emitted"
     ]
   },
+  "abi-erlang": {
+    "kind": "host-test",
+    "protects": [
+      "the generated Erlang codec compiles with warnings, specs and docs as errors",
+      "Erlang checkers reject each class in the same precedence as the C checkers",
+      "PropEr round-trip, totality and reserved-byte properties hold"
+    ]
+  },
   "beam-restart-smoke": {
     "forbidden_markers": [
       "BEAM_MARK_AFTER|present"

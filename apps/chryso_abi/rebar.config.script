@@ -1,0 +1,40 @@
+%% Adds the generated codec to the build. CHRYSO_ABI_GENERATED names the Erlang projection
+%% (the directory holding src/ and include/), for example
+%%   CHRYSO_ABI_GENERATED=$(nix build --no-link --print-out-paths .#orchestrator-abi)/erlang
+%% rebar3 cannot take an absolute src_dir, so the files are copied under _build, which Git
+%% ignores and the project-structure gate skips.
+case os:getenv("CHRYSO_ABI_GENERATED") of
+    false ->
+        io:format(
+            standard_error,
+            "chryso_abi: CHRYSO_ABI_GENERATED is unset; the codec will be missing~n",
+            []
+        ),
+        CONFIG;
+    Generated ->
+        Dest = filename:join(["_build", "chryso_abi_generated"]),
+        %% A fresh copy, so a file the generator stops emitting cannot linger.
+        case file:del_dir_r(Dest) of
+            ok -> ok;
+            {error, enoent} -> ok
+        end,
+        Copy = fun(Sub) ->
+            Files = filelib:wildcard(filename:join([Generated, Sub, "*"])),
+            Files =/= [] orelse error({missing_generated, filename:join(Generated, Sub)}),
+            ok = filelib:ensure_path(filename:join(Dest, Sub)),
+            [
+                {ok, _} = file:copy(F, filename:join([Dest, Sub, filename:basename(F)]))
+             || F <- Files
+            ],
+            ok
+        end,
+        ok = Copy("src"),
+        ok = Copy("include"),
+        ErlOpts = proplists:get_value(erl_opts, CONFIG, []),
+        WithSrc = lists:keystore(
+            src_dirs, 1, CONFIG, {src_dirs, ["src", filename:join(Dest, "src")]}
+        ),
+        lists:keystore(
+            erl_opts, 1, WithSrc, {erl_opts, [{i, filename:join(Dest, "include")} | ErlOpts]}
+        )
+end.

@@ -72,27 +72,7 @@ comptime {
     }
 }
 
-fn writeSnake(w: *Writer, name: []const u8) Writer.Error!void {
-    for (name, 0..) |byte, i| {
-        if (std.ascii.isUpper(byte)) {
-            if (i != 0) try w.writeByte('_');
-            try w.writeByte(std.ascii.toLower(byte));
-        } else {
-            try w.writeByte(byte);
-        }
-    }
-}
-
-const Snake = struct {
-    name: []const u8,
-    pub fn format(self: Snake, w: *Writer) Writer.Error!void {
-        try writeSnake(w, self.name);
-    }
-};
-
-fn snake(name: []const u8) Snake {
-    return .{ .name = name };
-}
+const snake = @import("naming").snake;
 
 fn scalarType(width: usize) []const u8 {
     return switch (width) {

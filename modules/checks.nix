@@ -23,6 +23,13 @@
         name = "chrysopolis-abi-dependencies";
       };
       hex = value: "0x${pkgs.lib.toHexString value}";
+      # apps/chryso_abi's rebar3 deps, exported by the rebar3_nix plugin
+      # (`rebar3 as test nix lock -o rebar-deps.nix`), so nothing comes from Hex at build time.
+      chrysoAbiDeps = import ../apps/chryso_abi/rebar-deps.nix {
+        inherit (pkgs.beamPackages) fetchHex;
+        inherit (pkgs) fetchgit fetchFromGitHub;
+        builder = pkgs.beamPackages.buildRebar3;
+      };
       individualVmNames = [
         "boot-smoke"
         "shell-smoke"
@@ -129,6 +136,18 @@
             '';
             dontInstall = true;
           };
+        # Both projections of the orchestration ABI: C headers under c/ and the
+        # Erlang codec under erlang/. The two must carry the same layout digest.
+        orchestrator-abi = pkgs.runCommand "chrysopolis-orchestrator-abi" { } ''
+          ${config.packages.abi-tool}/bin/gen-orchestrator-abi c $out/c
+          ${config.packages.abi-tool}/bin/gen-orchestrator-abi erlang $out/erlang
+          c=$(sed -n 's/.*chryso_abi_layout_digest = 0x\([0-9a-f]*\)u;.*/\1/p' $out/c/chrysopolis/orchestrator_abi.h)
+          erl=$(sed -n 's/.*CHRYSO_ABI_LAYOUT_DIGEST, 16#\([0-9a-f]*\)).*/\1/p' $out/erlang/include/orchestrator_abi.hrl)
+          if [ -z "$c" ] || [ "$c" != "$erl" ]; then
+            echo "layout digest differs: C '$c', Erlang '$erl'" >&2
+            exit 1
+          fi
+        '';
         check-restart-topology = pkgs.writeShellApplication {
           name = "check-restart-topology";
           runtimeInputs = [
@@ -212,6 +231,43 @@
         # checks cannot drive into their invalid or boundary cases. Seconds to
         # run and platform-independent, like test-modules above.
         runtime-host-tests = config.packages.runtime-host-tests;
+
+        # EUnit and PropEr over the generated Erlang codec. PropEr comes from
+        # rebar-deps.nix; the Hex-only plugin and test-profile deps are dropped
+        # from the sandbox copy of rebar.config so rebar3 never reaches the
+        # network. Every erl_opts flag is kept. Dialyzer stays a local command.
+        abi-erlang = pkgs.stdenvNoCC.mkDerivation {
+          name = "chrysopolis-abi-erlang";
+          src = pkgs.lib.fileset.toSource {
+            root = ../apps/chryso_abi;
+            fileset = pkgs.lib.fileset.unions [
+              ../apps/chryso_abi/rebar.config
+              ../apps/chryso_abi/rebar.config.script
+              ../apps/chryso_abi/src
+              ../apps/chryso_abi/test
+            ];
+          };
+          nativeBuildInputs = [
+            pkgs.beamPackages.erlang
+            pkgs.beamPackages.rebar3
+          ];
+          dontConfigure = true;
+          dontInstall = true;
+          buildPhase = ''
+            runHook preBuild
+            export HOME=$TMPDIR
+            export CHRYSO_ABI_GENERATED=${config.packages.orchestrator-abi}/erlang
+            export ERL_LIBS=${chrysoAbiDeps.proper}/lib/erlang/lib
+            erl -noshell -eval '
+              {ok, Terms} = file:consult("rebar.config"),
+              Kept = [T || T <- Terms, not lists:member(element(1, T), [plugins, profiles])],
+              ok = file:write_file("rebar.config", [io_lib:format("~tp.~n", [T]) || T <- Kept]),
+              halt().'
+            rebar3 eunit
+            touch $out
+            runHook postBuild
+          '';
+        };
 
         # The Zig parser rejects malformed, overlapping and out-of-range ABI
         # values while producing both SDF variants. This check then verifies

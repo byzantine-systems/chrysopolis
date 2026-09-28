@@ -18,6 +18,8 @@
         "fixtures",
         "gen_orchestrator_abi.zig",
         "generate_c.zig",
+        "generate_erlang.zig",
+        "naming.zig",
         "headers.zig",
         "main.zig",
         "model.zig",

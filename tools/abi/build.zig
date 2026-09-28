@@ -29,8 +29,11 @@ pub fn build(b: *std.Build) void {
     checks.addImport("orchestrator_abi", orchestrator_abi);
     checks.addImport("model", model);
     const validation = module(b, "validate.zig", target, optimize);
+    const naming = module(b, "naming.zig", target, optimize);
     const generate_c = module(b, "generate_c.zig", target, optimize);
-    for ([_]*std.Build.Module{ validation, generate_c }) |consumer| {
+    const generate_erlang = module(b, "generate_erlang.zig", target, optimize);
+    for ([_]*std.Build.Module{ validation, generate_c, generate_erlang }) |consumer| {
+        consumer.addImport("naming", naming);
         consumer.addImport("system_abi", system_abi);
         consumer.addImport("orchestrator_abi", orchestrator_abi);
         consumer.addImport("model", model);
@@ -49,6 +52,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "model", .module = model },
                 .{ .name = "validation", .module = validation },
                 .{ .name = "generate_c", .module = generate_c },
+                .{ .name = "generate_erlang", .module = generate_erlang },
             },
         }),
     });
@@ -58,6 +62,9 @@ pub fn build(b: *std.Build) void {
     const generate = b.addRunArtifact(generator);
     generate.addArg("c");
     b.addNamedLazyPath("orchestrator-abi", generate.addOutputDirectoryArg("orchestrator-abi"));
+    const generate_erl = b.addRunArtifact(generator);
+    generate_erl.addArg("erlang");
+    b.addNamedLazyPath("orchestrator-abi-erlang", generate_erl.addOutputDirectoryArg("orchestrator-abi-erlang"));
 
     // The JSON projection needs serde. Ask for it only as the root build: a lazyDependency
     // call from a dependent's configure still fetches, and the Nix sandbox is offline.
@@ -82,7 +89,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Test both typed ABI contracts and their projection");
-    for ([_]*std.Build.Module{ system_abi, orchestrator_abi, model, checks, validation, generate_c }) |test_module| {
+    for ([_]*std.Build.Module{ system_abi, orchestrator_abi, model, checks, validation, naming, generate_c, generate_erlang }) |test_module| {
         const unit_tests = b.addTest(.{ .root_module = test_module });
         test_step.dependOn(&b.addRunArtifact(unit_tests).step);
     }
