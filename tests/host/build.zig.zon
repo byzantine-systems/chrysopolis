@@ -3,7 +3,10 @@
     .version = "0.0.0",
     .fingerprint = 0xacd7a8bdbf2af59a,
     .minimum_zig_version = "0.15.2",
-    .dependencies = .{},
+    .dependencies = .{
+        // The generated orchestration headers and the Zig reference checks.
+        .abi = .{ .path = "../../tools/abi" },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

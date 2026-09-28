@@ -105,7 +105,14 @@
         # beam_server glue) is built by the root build.zig (packages.beam-zig).
         lions-stack = pkgs.stdenvNoCC.mkDerivation {
           name = "lions-stack";
-          src = ../nix;
+          # refstack.mk reads only the external trees passed below; keeping
+          # other nix/ files out stops unrelated edits from rebuilding libc.
+          # The name stays "nix": libc embeds its /build/<name> source paths.
+          src = builtins.path {
+            name = "nix";
+            path = ../nix;
+            filter = path: _type: baseNameOf path == "refstack.mk";
+          };
           nativeBuildInputs = chryso.lionsToolchain;
           hardeningDisable = [ "all" ];
           dontStrip = true;

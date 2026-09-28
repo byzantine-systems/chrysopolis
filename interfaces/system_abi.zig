@@ -331,7 +331,40 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Contract {
     const bytes = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
     const contract = try std.json.parseFromSliceLeaky(Contract, allocator, bytes, .{});
     try validate(contract);
+    if (!contractEqual(contract, values)) return error.StaleSystemAbiProjection;
     return contract;
+}
+
+// std.meta.eql compares slices by identity. The JSON loader owns different
+// string and array storage from the typed authority, so compare their contents.
+fn contentEqual(comptime T: type, left: T, right: T) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => |pointer| blk: {
+            if (pointer.size != .slice) @compileError("unsupported ABI pointer");
+            if (left.len != right.len) break :blk false;
+            for (left, right) |a, b| {
+                if (!contentEqual(pointer.child, a, b)) break :blk false;
+            }
+            break :blk true;
+        },
+        .array => |array| blk: {
+            for (0..array.len) |i| {
+                if (!contentEqual(array.child, left[i], right[i])) break :blk false;
+            }
+            break :blk true;
+        },
+        .@"struct" => |record| blk: {
+            inline for (record.fields) |field| {
+                if (!contentEqual(field.type, @field(left, field.name), @field(right, field.name))) break :blk false;
+            }
+            break :blk true;
+        },
+        else => left == right,
+    };
+}
+
+pub fn contractEqual(left: Contract, right: Contract) bool {
+    return contentEqual(Contract, left, right);
 }
 
 pub fn validate(contract: Contract) !void {
@@ -412,6 +445,8 @@ pub fn validate(contract: Contract) !void {
             }
         }
     }
+    var diagnostic: Diagnostic = .{};
+    try validateSemantics(contract, &diagnostic);
 }
 
 fn validateControlRegion(region: anytype) !void {
@@ -428,7 +463,7 @@ fn validateWorkerRegion(region: WorkerRegion) !void {
     if (!region.worker_cached or !region.beam_cached) return error.UncachedWorkerRegion;
 }
 
-fn validateIds(ids: []const u8, id_count: u8) !void {
+pub fn validateIds(ids: []const u8, id_count: u8) !void {
     for (ids, 0..) |id, i| {
         if (id >= id_count) return error.IdOutOfRange;
         for (ids[0..i]) |previous| {
@@ -437,10 +472,221 @@ fn validateIds(ids: []const u8, id_count: u8) !void {
     }
 }
 
-fn rangesOverlap(a_start: u64, a_size: u64, b_start: u64, b_size: u64) bool {
+pub fn rangesOverlap(a_start: u64, a_size: u64, b_start: u64, b_size: u64) bool {
     const a_end = std.math.add(u64, a_start, a_size) catch return true;
     const b_end = std.math.add(u64, b_start, b_size) catch return true;
     return a_start < b_end and b_start < a_end;
+}
+
+pub const Diagnostic = struct {
+    path: []const u8 = "",
+    invariant: []const u8 = "",
+};
+
+const Mapping = struct {
+    path: []const u8,
+    start: u64,
+    size: u64,
+};
+
+fn reject(diagnostic: *Diagnostic, path: []const u8, invariant: []const u8) error{InvalidSemanticAbi} {
+    diagnostic.* = .{ .path = path, .invariant = invariant };
+    return error.InvalidSemanticAbi;
+}
+
+fn checkMapping(mapping: Mapping, diagnostic: *Diagnostic) !void {
+    if (mapping.size == 0 or mapping.size % page_size != 0 or mapping.start % page_size != 0)
+        return reject(diagnostic, mapping.path, "nonzero page-aligned range");
+    _ = std.math.add(u64, mapping.start, mapping.size) catch
+        return reject(diagnostic, mapping.path, "address plus size does not overflow");
+}
+
+fn checkVSpace(mappings: []const Mapping, diagnostic: *Diagnostic) !void {
+    for (mappings, 0..) |mapping, i| {
+        try checkMapping(mapping, diagnostic);
+        for (mappings[0..i]) |earlier| {
+            if (rangesOverlap(mapping.start, mapping.size, earlier.start, earlier.size))
+                return reject(diagnostic, mapping.path, "no overlap within one VSpace");
+        }
+    }
+}
+
+// These declarations describe VSpaces, not SDF mappings. B3/B6 must also
+// inspect the generated SDF and Microkit report before using the new regions.
+pub fn validateSemantics(contract: Contract, diagnostic: *Diagnostic) !void {
+    diagnostic.* = .{};
+    const pool = contract.pool;
+    const control = contract.control;
+    if (contract.microkit.id_count != 62)
+        return reject(diagnostic, "microkit.id_count", "Microkit channel and child ID count is 62");
+    if (@as(u16, non_crasher_pd_count) + pool.slots + 1 > 63)
+        return reject(diagnostic, "pool.slots", "base PDs plus workers plus crasher fit the PD limit");
+    const last_child = std.math.add(u16, pool.child_base, pool.slots) catch unreachable;
+    if (last_child > contract.microkit.id_count)
+        return reject(diagnostic, "pool.child_base", "last worker child is below the ID count");
+
+    var child_ids: [62]u8 = undefined;
+    var child_len: usize = 0;
+    child_ids[child_len] = contract.children.crasher;
+    child_len += 1;
+    child_ids[child_len] = contract.children.beam;
+    child_len += 1;
+    for (contract.drivers) |driver| {
+        child_ids[child_len] = driver.child;
+        child_len += 1;
+    }
+    for (0..pool.slots) |slot| {
+        child_ids[child_len] = @intCast(@as(u16, pool.child_base) + @as(u16, @intCast(slot)));
+        child_len += 1;
+    }
+    validateIds(child_ids[0..child_len], contract.microkit.id_count) catch
+        return reject(diagnostic, "pool.child_base", "worker and existing child IDs are unique and in range");
+
+    var root_channels: [driver_count * 2 + 2]u8 = undefined;
+    var beam_channels: [driver_count * 2 + 1 + 62]u8 = undefined;
+    var root_len: usize = 0;
+    var beam_len: usize = 0;
+    for (contract.drivers) |driver| {
+        root_channels[root_len] = driver.root_debug_channel;
+        root_len += 1;
+        root_channels[root_len] = driver.root_fault_channel;
+        root_len += 1;
+        beam_channels[beam_len] = driver.beam_debug_channel;
+        beam_len += 1;
+        beam_channels[beam_len] = driver.beam_fault_channel;
+        beam_len += 1;
+    }
+    root_channels[root_len] = contract.giveup.root_blk_channel;
+    root_len += 1;
+    root_channels[root_len] = control.pp_channel.root;
+    root_len += 1;
+    beam_channels[beam_len] = control.pp_channel.beam;
+    beam_len += 1;
+    for (0..pool.slots) |slot| {
+        const id = @as(u16, pool.transport.beam_channel_base) + @as(u16, @intCast(slot));
+        if (id >= contract.microkit.id_count)
+            return reject(diagnostic, "pool.transport.beam_channel_base", "worker channel IDs are in range");
+        beam_channels[beam_len] = @intCast(id);
+        beam_len += 1;
+    }
+    validateIds(root_channels[0..root_len], contract.microkit.id_count) catch
+        return reject(diagnostic, "control.pp_channel.root", "Root channel IDs are unique and in range");
+    validateIds(beam_channels[0..beam_len], contract.microkit.id_count) catch
+        return reject(diagnostic, "pool.transport.beam_channel_base", "BEAM channel IDs are unique and in range");
+    for (beam_channels[0..beam_len]) |id| {
+        if (id < control.beam_dynamic_channel_floor)
+            return reject(diagnostic, "control.beam_dynamic_channel_floor", "fixed BEAM channels are above the dynamic floor");
+    }
+    if (pool.transport.worker_channel >= contract.microkit.id_count)
+        return reject(diagnostic, "pool.transport.worker_channel", "worker channel ID is in range");
+
+    if (control.status.size != 16384)
+        return reject(diagnostic, "control.status.size", "status page matches wire layout and capacity");
+    if (control.event_ring_entries != 128)
+        return reject(diagnostic, "control.event_ring_entries", "event capacity matches wire layout");
+    if (control.spec.size != 4096)
+        return reject(diagnostic, "control.spec.size", "spec page matches wire layout");
+    if (control.spec.header_size != 64)
+        return reject(diagnostic, "control.spec.header_size", "spec header matches wire layout");
+    if (control.spec.bank_size != 2016)
+        return reject(diagnostic, "control.spec.bank_size", "spec bank matches wire layout");
+    if (control.spec.banks != 2)
+        return reject(diagnostic, "control.spec.banks", "spec has two banks");
+    if (pool.identity.size != 4096)
+        return reject(diagnostic, "pool.identity.size", "worker page matches wire envelope");
+    if (pool.status.size != 4096)
+        return reject(diagnostic, "pool.status.size", "worker page matches wire envelope");
+    if (pool.transport.request.size != 4096)
+        return reject(diagnostic, "pool.transport.request.size", "journal page matches wire envelope");
+    if (pool.transport.completion.size != 4096)
+        return reject(diagnostic, "pool.transport.completion.size", "journal page matches wire envelope");
+    if (pool.transport.journal_header_size != 256)
+        return reject(diagnostic, "pool.transport.journal_header_size", "journal header matches wire layout");
+    if (pool.transport.journal_entry_size != 256)
+        return reject(diagnostic, "pool.transport.journal_entry_size", "journal entry matches wire layout");
+    if (pool.transport.journal_entries != 15)
+        return reject(diagnostic, "pool.transport.journal_entries", "journal capacity matches wire layout");
+    if (pool.transport.journal_payload_size != 192)
+        return reject(diagnostic, "pool.transport.journal_payload_size", "journal payload matches wire layout");
+
+    if (!control.status.root_cached)
+        return reject(diagnostic, "control.status.root_cached", "mapping is cacheable");
+    if (!control.status.beam_cached)
+        return reject(diagnostic, "control.status.beam_cached", "mapping is cacheable");
+    if (!control.spec.root_cached)
+        return reject(diagnostic, "control.spec.root_cached", "mapping is cacheable");
+    if (!control.spec.beam_cached)
+        return reject(diagnostic, "control.spec.beam_cached", "mapping is cacheable");
+    const worker_regions = [_]WorkerRegion{ pool.identity, pool.status, pool.transport.request, pool.transport.completion };
+    const worker_paths = [_][]const u8{ "pool.identity", "pool.status", "pool.transport.request", "pool.transport.completion" };
+    const worker_cached_paths = [_][]const u8{ "pool.identity.worker_cached", "pool.status.worker_cached", "pool.transport.request.worker_cached", "pool.transport.completion.worker_cached" };
+    const beam_cached_paths = [_][]const u8{ "pool.identity.beam_cached", "pool.status.beam_cached", "pool.transport.request.beam_cached", "pool.transport.completion.beam_cached" };
+    for (worker_regions, worker_cached_paths, beam_cached_paths) |region, worker_path, beam_path| {
+        if (!region.worker_cached)
+            return reject(diagnostic, worker_path, "mapping is cacheable");
+        if (!region.beam_cached)
+            return reject(diagnostic, beam_path, "mapping is cacheable");
+    }
+
+    if (control.hard_budget_max < contract.restart.driver_budget or control.hard_budget_max < contract.restart.beam_budget)
+        return reject(diagnostic, "control.hard_budget_max", "hard limit covers driver and BEAM budgets");
+    if (control.command_rate.tokens == 0)
+        return reject(diagnostic, "control.command_rate.tokens", "rate is nonzero");
+    if (control.command_rate.refill_ms == 0)
+        return reject(diagnostic, "control.command_rate.refill_ms", "refill period is nonzero");
+    var class_total: u16 = 0;
+    for (pool.classes, 0..) |class, i| {
+        class_total += class.count;
+        if (class.budget == 0 or class.period == 0 or class.budget > class.period)
+            return reject(diagnostic, if (i == 0) "pool.classes[0].budget" else "pool.classes[1].budget", "budget is positive and at most period");
+        if (class.heap_size == 0 or class.heap_size % page_size != 0)
+            return reject(diagnostic, if (i == 0) "pool.classes[0].heap_size" else "pool.classes[1].heap_size", "heap size is a nonzero page multiple");
+        if (class.stack_size == 0 or class.stack_size % page_size != 0)
+            return reject(diagnostic, if (i == 0) "pool.classes[0].stack_size" else "pool.classes[1].stack_size", "stack size is a nonzero page multiple");
+        if (pool.runtime_profile.module_staging_size > class.heap_size)
+            return reject(diagnostic, "pool.runtime_profile.module_staging_size", "module staging fits worker heap");
+    }
+    if (class_total != pool.slots)
+        return reject(diagnostic, "pool.classes", "sum of class counts equals slots");
+    if (pool.runtime_profile.wamr_slots == 0 or pool.runtime_profile.wamr_slots > pool.slots)
+        return reject(diagnostic, "pool.runtime_profile.wamr_slots", "WAMR slots fit worker pool");
+
+    const root_maps = [_]Mapping{
+        .{ .path = "control.status.root_vaddr", .start = control.status.root_vaddr, .size = control.status.size },
+        .{ .path = "control.spec.root_vaddr", .start = control.spec.root_vaddr, .size = control.spec.size },
+    };
+    try checkVSpace(&root_maps, diagnostic);
+
+    var beam_maps: [5 + 4 * 62]Mapping = undefined;
+    beam_maps[0] = .{ .path = "memory.heap.vaddr", .start = contract.memory.heap.vaddr, .size = contract.memory.heap.size };
+    beam_maps[1] = .{ .path = "memory.snapshot.vaddr", .start = contract.memory.snapshot.vaddr, .size = contract.memory.snapshot.size };
+    beam_maps[2] = .{ .path = "restart.exit_fault_base", .start = contract.restart.exit_fault_base, .size = contract.restart.exit_fault_size };
+    beam_maps[3] = .{ .path = "control.status.beam_vaddr", .start = control.status.beam_vaddr, .size = control.status.size };
+    var beam_map_len: usize = 4;
+    beam_maps[beam_map_len] = .{ .path = "control.spec.beam_vaddr", .start = control.spec.beam_vaddr, .size = control.spec.size };
+    beam_map_len += 1;
+    for (0..pool.slots) |slot| {
+        const offset = std.math.mul(u64, @intCast(slot), pool.beam_window_stride) catch
+            return reject(diagnostic, "pool.beam_window_stride", "worker window address does not overflow");
+        for (worker_regions, worker_paths) |region, path| {
+            const start = std.math.add(u64, region.beam_base_vaddr, offset) catch
+                return reject(diagnostic, path, "worker window address does not overflow");
+            beam_maps[beam_map_len] = .{ .path = path, .start = start, .size = region.size };
+            beam_map_len += 1;
+        }
+    }
+    try checkVSpace(beam_maps[0..beam_map_len], diagnostic);
+
+    for (pool.classes) |class| {
+        const worker_maps = [_]Mapping{
+            .{ .path = "pool.identity.worker_vaddr", .start = pool.identity.worker_vaddr, .size = pool.identity.size },
+            .{ .path = "pool.status.worker_vaddr", .start = pool.status.worker_vaddr, .size = pool.status.size },
+            .{ .path = "pool.transport.request.worker_vaddr", .start = pool.transport.request.worker_vaddr, .size = pool.transport.request.size },
+            .{ .path = "pool.transport.completion.worker_vaddr", .start = pool.transport.completion.worker_vaddr, .size = pool.transport.completion.size },
+            .{ .path = "pool.heap.worker_vaddr", .start = pool.heap.worker_vaddr, .size = class.heap_size },
+        };
+        try checkVSpace(&worker_maps, diagnostic);
+    }
 }
 
 test "typed ABI is valid and rejects conflicting values" {

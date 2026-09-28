@@ -18,6 +18,8 @@
             .url = "https://www.bearssl.org/bearssl-0.6.tar.gz",
             .hash = "N-V-__8AAP0mNAAkyiY2ykjGvFxPCz3MG1hET12zva5TtOmP",
         },
+        // In-tree ABI generator; the -Ddiagnostic probes compile its headers.
+        .abi = .{ .path = "tools/abi" },
     },
 
     .paths = .{

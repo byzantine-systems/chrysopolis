@@ -6,6 +6,30 @@
       "every declared configuration blob is emitted"
     ]
   },
+  "abi-erlang": {
+    "kind": "host-test",
+    "protects": [
+      "the generated Erlang codec compiles with warnings, specs and docs as errors",
+      "Erlang checkers reject each class in the same precedence as the C checkers",
+      "PropEr round-trip, totality and reserved-byte properties hold",
+      "every shared golden vector gets its stated verdict, decoder agreement and canonical round-trip",
+      "runs against a generated tree produced twice byte-identically from a fresh system JSON"
+    ]
+  },
+  "abi-negative": {
+    "kind": "generated-artifact",
+    "protects": [
+      "a changed value in the committed system JSON fails the staleness comparison",
+      "one changed byte in the generated ABI tree fails the reproducibility comparison"
+    ]
+  },
+  "abi-tool": {
+    "kind": "host-test",
+    "protects": [
+      "typed system and orchestration contracts pass their semantic and negative fixtures",
+      "every golden vector's stated verdict equals the Zig reference verdict"
+    ]
+  },
   "beam-restart-smoke": {
     "forbidden_markers": [
       "BEAM_MARK_AFTER|present"
@@ -202,7 +226,8 @@
     "kind": "host-test",
     "protects": [
       "pure runtime policies pass in Debug with UBSan trap mode",
-      "pure runtime policies pass in ReleaseFast"
+      "pure runtime policies pass in ReleaseFast",
+      "generated C checkers reach every shared golden vector's verdict at even and odd addresses"
     ]
   },
   "serial-recovery": {

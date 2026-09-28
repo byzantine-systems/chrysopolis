@@ -3,6 +3,7 @@ const abi_schema = @import("interfaces/system_abi.zig");
 const cflags = @import("build/cflags.zig");
 const components = @import("build/components.zig");
 const diagnostics = @import("build/diagnostics.zig");
+const abi_probes = @import("build/abi.zig");
 const microkit = @import("build/microkit.zig");
 const options = @import("build/options.zig");
 const pds = @import("build/pds.zig");
@@ -535,6 +536,7 @@ pub fn build(b: *std.Build) void {
         });
     }
     root_pd.root_module.addConfigHeader(generated_abi);
+    abi_probes.addGenerated(b, root_pd.root_module);
     // Same reason the beam exe and fat.elf disable it: modules/images.nix patches
     // the per-board child entry point into .restart_config with
     // objcopy --update-section, which fails outright if the linker garbage
@@ -554,6 +556,7 @@ pub fn build(b: *std.Build) void {
         test_root.root_module.addCSourceFile(.{ .file = root_test_source, .flags = test_root_flags });
         test_root.root_module.addIncludePath(b.path("src/pd/root/policy"));
         test_root.root_module.addConfigHeader(generated_abi);
+        abi_probes.addGenerated(b, test_root.root_module);
         test_root.link_gc_sections = false;
         b.installArtifact(test_root);
     }
@@ -634,6 +637,11 @@ pub fn build(b: *std.Build) void {
     }
 
     if (diagnostic) {
+        // Generated orchestration headers: standalone compiles and the linked atomic probe.
+        abi_probes.addProbes(b, target, runtime_flags, generated_abi);
+    }
+
+    if (diagnostic) {
         // Compile each internal contract header alone and include it twice.
         // This rejects hidden include-order dependencies and missing guards.
         diagnostics.addContractProbes(
@@ -647,6 +655,7 @@ pub fn build(b: *std.Build) void {
     glue.root_module.addIncludePath(b.path("src/pd/beam")); // owner-qualified diagnostic probes
     for (beam_include_dirs) |dir| glue.root_module.addIncludePath(b.path(dir));
     glue.root_module.addConfigHeader(generated_abi);
+    abi_probes.addGenerated(b, glue.root_module);
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
     // libmicrokitco.h + libhostedqueue/ (the cothread runtime), straight

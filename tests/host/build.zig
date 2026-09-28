@@ -34,6 +34,13 @@ const Suite = struct {
     source: []const u8,
     unit_dir: []const u8,
     extra_include_dir: ?[]const u8 = null,
+    // Adds the generated <chrysopolis/...> orchestration headers.
+    generated_abi: bool = false,
+    extra_flags: []const []const u8 = &.{},
+    // Harness sources beside the suite, built with the suite's flags.
+    sources: []const []const u8 = &.{},
+    // Passes the golden vector directory from tools/abi as argv[1].
+    vectors: bool = false,
     // Pure unit sources from the owning directory. Header-only units need no entry.
     units: []const []const u8,
 };
@@ -53,7 +60,12 @@ const suites = [_]Suite{
     .{ .name = "rng_select", .source = "beam/security/suite_rng_select.c", .unit_dir = "../../src/pd/beam/security", .units = &.{"rng_select.c"} },
     .{ .name = "tcp_logic", .source = "beam/io/network/suite_tcp_logic.c", .unit_dir = "../../src/pd/beam/io/network", .units = &.{} },
     .{ .name = "tcp_state", .source = "beam/io/network/suite_tcp_state.c", .unit_dir = "../../src/pd/beam/io/network", .units = &.{} },
+    .{ .name = "abi_layout", .source = "lib/abi/suite_abi_layout.c", .unit_dir = "lib/abi", .generated_abi = true, .extra_flags = &abi_flags, .units = &.{} },
+    .{ .name = "abi_vectors", .source = "lib/abi/suite_abi_vectors.c", .unit_dir = "lib/abi", .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{"lib/abi/abi_shim.c"}, .vectors = true, .units = &.{} },
 };
+
+// Generated code must also be clean under the conversion warnings.
+const abi_flags = [_][]const u8{ "-Wconversion", "-Wsign-conversion", "-Wshadow" };
 
 const Variant = struct {
     suffix: []const u8,
@@ -75,6 +87,10 @@ pub fn build(b: *std.Build) void {
         .default_target = if (linux) .{ .abi = .musl } else .{},
     });
     const test_step = b.step("test", "Run every runtime host suite in every variant");
+    // tools/abi as a path dependency: generated headers plus the Zig reference checks.
+    const abi = b.dependency("abi", .{ .target = target });
+    const generated_abi = abi.namedLazyPath("orchestrator-abi");
+    const golden_vectors = abi.namedLazyPath("orchestrator-abi-vectors");
     for (variants) |variant| {
         for (suites) |suite| {
             const owner_dir = b.path(suite.unit_dir);
@@ -88,10 +104,14 @@ pub fn build(b: *std.Build) void {
                     .sanitize_c = variant.sanitize_c,
                 }),
             });
+            const suite_flags = std.mem.concat(b.allocator, []const u8, &.{ &cflags, suite.extra_flags }) catch @panic("OOM");
             exe.root_module.addCSourceFile(.{
                 .file = b.path(suite.source),
-                .flags = &cflags,
+                .flags = suite_flags,
             });
+            for (suite.sources) |source| {
+                exe.root_module.addCSourceFile(.{ .file = b.path(source), .flags = suite_flags });
+            }
             for (suite.units) |unit| {
                 exe.root_module.addCSourceFile(.{
                     .file = owner_dir.path(b, unit),
@@ -101,10 +121,33 @@ pub fn build(b: *std.Build) void {
             exe.root_module.addIncludePath(b.path(".")); // check.h for suites under owner subdirectories
             exe.root_module.addIncludePath(owner_dir);
             if (suite.extra_include_dir) |dir| exe.root_module.addIncludePath(b.path(dir));
+            if (suite.generated_abi) exe.root_module.addIncludePath(generated_abi);
 
             const run = b.addRunArtifact(exe);
+            if (suite.vectors) run.addDirectoryArg(golden_vectors);
             run.expectExitCode(0);
             test_step.dependOn(&run.step);
         }
+
+        // Generated C checkers against the Zig reference verdicts.
+        const differential = b.addTest(.{
+            .name = b.fmt("abi_differential_{s}", .{variant.suffix}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("lib/abi/abi_differential.zig"),
+                .target = target,
+                .optimize = variant.optimize,
+                .link_libc = true,
+                .sanitize_c = variant.sanitize_c,
+                .imports = &.{
+                    .{ .name = "orchestrator_abi", .module = abi.module("orchestrator_abi") },
+                    .{ .name = "checks", .module = abi.module("checks") },
+                },
+            }),
+        });
+        if (linux) differential.linkage = .static;
+        const shim_flags = std.mem.concat(b.allocator, []const u8, &.{ &cflags, &abi_flags }) catch @panic("OOM");
+        differential.root_module.addCSourceFile(.{ .file = b.path("lib/abi/abi_shim.c"), .flags = shim_flags });
+        differential.root_module.addIncludePath(generated_abi);
+        test_step.dependOn(&b.addRunArtifact(differential).step);
     }
 }

@@ -1,3 +1,4 @@
+# C + Zig
 # Prerequisites
 *.d
 
@@ -55,7 +56,7 @@ dkms.conf
 *.dwo
 
 # ---
-# Zig
+# Zig Only
 # ---
 .zig-cache/
 zig-out/
@@ -78,6 +79,8 @@ zig-pkg/
 # rebar3's output tree for tests/ (see rebar.config). /ebin is where
 # `rebar3 bare compile` lands, which is the form the Nix build uses.
 /_build/
+# rebar3 output of apps/*, including the copied generated codec.
+/apps/*/_build/
 /ebin/
 
 # ---
@@ -86,6 +89,11 @@ zig-pkg/
 /result*
 .devenv*
 .direnv/
+
+# From python testing suites
+__pycache__/
+*.py[codz]
+*$py.class
 
 # -----
 # Misc.

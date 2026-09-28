@@ -7,6 +7,11 @@ pub const Field = struct {
     offset: usize,
     size: usize,
     type: []const u8,
+    // Structured form of `type` for generators: a scalar name (u8, u16, u32,
+    // u64) or a record's short name, repeated `count` times.
+    element: []const u8,
+    count: usize,
+    is_record: bool,
 };
 
 pub const Record = struct {
@@ -74,16 +79,43 @@ fn shortName(comptime T: type) []const u8 {
     return full[dot + 1 ..];
 }
 
+const ElementType = struct {
+    element: []const u8,
+    count: usize,
+    is_record: bool,
+};
+
+fn elementType(comptime T: type) ElementType {
+    return switch (@typeInfo(T)) {
+        .int => |int| blk: {
+            if (int.signedness != .unsigned or (int.bits != 8 and int.bits != 16 and int.bits != 32 and int.bits != 64))
+                @compileError("wire scalars are u8, u16, u32 or u64: " ++ @typeName(T));
+            break :blk .{ .element = @typeName(T), .count = 1, .is_record = false };
+        },
+        .@"struct" => .{ .element = shortName(T), .count = 1, .is_record = true },
+        .array => |array| blk: {
+            const inner = elementType(array.child);
+            if (inner.count != 1) @compileError("nested wire arrays are not supported: " ++ @typeName(T));
+            break :blk .{ .element = inner.element, .count = array.len, .is_record = inner.is_record };
+        },
+        else => @compileError("unsupported wire field type " ++ @typeName(T)),
+    };
+}
+
 fn describeRecord(comptime T: type) Record {
     const info = @typeInfo(T).@"struct";
     const fields = comptime blk: {
         var result: [info.fields.len]Field = undefined;
         for (info.fields, 0..) |field, i| {
+            const element = elementType(field.type);
             result[i] = .{
                 .name = field.name,
                 .offset = @offsetOf(T, field.name),
                 .size = @sizeOf(field.type),
                 .type = @typeName(field.type),
+                .element = element.element,
+                .count = element.count,
+                .is_record = element.is_record,
             };
         }
         break :blk result;
@@ -174,6 +206,70 @@ pub const description: Description = .{
     .atomic_fields = &abi.atomic_fields,
 };
 
+const Digest = struct {
+    hasher: std.hash.Crc32 = .init(),
+
+    fn text(self: *Digest, bytes: []const u8) void {
+        self.hasher.update(bytes);
+        self.hasher.update(&.{0}); // terminator keeps adjacent names distinct
+    }
+
+    fn number(self: *Digest, value: u64) void {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, value, .little);
+        self.hasher.update(&bytes);
+    }
+};
+
+/// CRC-32 over a canonical rendering of the wire contract. Every generated codec carries it,
+/// so peers built from different models can refuse each other at HELLO.
+pub fn layoutDigest(value: Description) u32 {
+    var digest: Digest = .{};
+    digest.number(value.abi_version);
+    digest.number(value.magics.len);
+    for (value.magics) |magic| {
+        digest.text(magic.name);
+        digest.number(magic.value);
+    }
+    digest.number(value.records.len);
+    for (value.records) |record| {
+        digest.text(record.name);
+        digest.number(record.size);
+        digest.number(record.alignment);
+        digest.number(record.fields.len);
+        for (record.fields) |field| {
+            digest.text(field.name);
+            digest.number(field.offset);
+            digest.number(field.size);
+            digest.text(field.element);
+            digest.number(field.count);
+        }
+    }
+    digest.number(value.enums.len);
+    for (value.enums) |enumeration| {
+        digest.text(enumeration.name);
+        digest.number(enumeration.width);
+        digest.number(enumeration.values.len);
+        for (enumeration.values) |item| {
+            digest.text(item.name);
+            digest.number(item.value);
+        }
+    }
+    digest.number(value.transitions.len);
+    for (value.transitions) |transition| {
+        digest.text(transition.from);
+        digest.text(transition.to);
+        digest.text(transition.event);
+    }
+    digest.number(value.atomic_fields.len);
+    for (value.atomic_fields) |atomic| {
+        digest.text(atomic.record);
+        digest.text(atomic.field);
+        digest.number(atomic.width);
+    }
+    return digest.hasher.final();
+}
+
 pub fn validateRecord(record: Record, diagnostic: *abi.Diagnostic) !void {
     diagnostic.* = .{};
     var next_offset: usize = 0;
@@ -182,7 +278,10 @@ pub fn validateRecord(record: Record, diagnostic: *abi.Diagnostic) !void {
             diagnostic.* = .{ .path = record.name, .invariant = "no implicit field padding" };
             return error.InvalidRecordOffset;
         }
-        next_offset = try std.math.add(usize, next_offset, field.size);
+        next_offset = std.math.add(usize, next_offset, field.size) catch {
+            diagnostic.* = .{ .path = record.name, .invariant = "field extent does not overflow" };
+            return error.InvalidRecordSize;
+        };
     }
     if (next_offset != record.size) {
         diagnostic.* = .{ .path = record.name, .invariant = "exact record size" };
@@ -220,7 +319,7 @@ pub fn validateAtomicFields(fields: []const abi.AtomicField, record_list: []cons
                 if (!std.mem.eql(u8, atomic.field, field.name)) continue;
                 found = true;
                 if ((atomic.width != 4 and atomic.width != 8) or field.size != atomic.width or
-                    field.offset % atomic.width != 0)
+                    field.offset % atomic.width != 0 or record.alignment % atomic.width != 0)
                 {
                     diagnostic.* = .{ .path = atomic.record, .invariant = "atomic width and alignment" };
                     return error.InvalidAtomicField;
@@ -240,27 +339,60 @@ pub fn validateAtomicFields(fields: []const abi.AtomicField, record_list: []cons
     }
 }
 
-pub fn validate(diagnostic: *abi.Diagnostic) !void {
+pub fn validateDescription(value: Description, diagnostic: *abi.Diagnostic) !void {
     diagnostic.* = .{};
-    for (description.records) |record| try validateRecord(record, diagnostic);
-    for (description.enums) |enumeration| try validateEnum(enumeration, diagnostic);
-    if (description.atomic_fields.len != 7) {
+    if (value.abi_version != abi.abi_version or value.constants.child_count != abi.child_count or
+        value.constants.event_count != abi.event_count or
+        value.constants.journal_capacity != abi.journal_capacity or
+        value.constants.journal_payload_size != abi.journal_payload_size)
+    {
+        diagnostic.* = .{ .path = "constants", .invariant = "typed ABI version and capacities" };
+        return error.InvalidModelConstants;
+    }
+    if (value.records.len != 16 or value.enums.len != 12 or
+        value.magics.len != 8 or value.transitions.len != abi.slot_transitions.len)
+    {
+        diagnostic.* = .{ .path = "description", .invariant = "complete wire metadata" };
+        return error.IncompleteModel;
+    }
+    for (value.records) |record| try validateRecord(record, diagnostic);
+    for (value.enums) |enumeration| try validateEnum(enumeration, diagnostic);
+    if (value.atomic_fields.len != 7) {
         diagnostic.* = .{ .path = "atomic_fields", .invariant = "all publication fields listed" };
         return error.MissingAtomicField;
     }
-    try validateAtomicFields(description.atomic_fields, description.records, diagnostic);
-    for (description.magics, 0..) |magic, i| {
+    try validateAtomicFields(value.atomic_fields, value.records, diagnostic);
+    for (abi.atomic_fields) |required| {
+        var found = false;
+        for (value.atomic_fields) |field| {
+            if (std.mem.eql(u8, field.record, required.record) and
+                std.mem.eql(u8, field.field, required.field) and field.width == required.width)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            diagnostic.* = .{ .path = required.record, .invariant = "required publication field and width" };
+            return error.MissingAtomicField;
+        }
+    }
+    for (value.magics, 0..) |magic, i| {
         if (magic.bytes.len != 8) {
             diagnostic.* = .{ .path = magic.name, .invariant = "eight magic bytes" };
             return error.InvalidMagic;
         }
-        for (description.magics[0..i]) |prior| {
+        for (value.magics[0..i]) |prior| {
             if (magic.value == prior.value) {
                 diagnostic.* = .{ .path = magic.name, .invariant = "distinct magics" };
                 return error.DuplicateMagic;
             }
         }
     }
+}
+
+pub fn validate(diagnostic: *abi.Diagnostic) !void {
+    try validateDescription(description, diagnostic);
 }
 
 test "reflection describes pinned bank and journal geometry" {
@@ -271,6 +403,16 @@ test "reflection describes pinned bank and journal geometry" {
     try std.testing.expectEqual(@as(usize, 4096), description.records[15].size);
     try std.testing.expectEqual(@as(usize, 17), description.transitions.len);
     try std.testing.expect(!description.enums[11].wire);
+    const children = description.records[3].fields[1];
+    try std.testing.expectEqualStrings("children", children.name);
+    try std.testing.expectEqualStrings("RootChildStatus", children.element);
+    try std.testing.expectEqual(@as(usize, 62), children.count);
+    try std.testing.expect(children.is_record);
+    const budget = description.records[5].fields[5];
+    try std.testing.expectEqualStrings("budget", budget.name);
+    try std.testing.expectEqualStrings("u32", budget.element);
+    try std.testing.expectEqual(@as(usize, 62), budget.count);
+    try std.testing.expect(!budget.is_record);
     var diagnostic: abi.Diagnostic = .{};
     try validate(&diagnostic);
 }
@@ -298,7 +440,7 @@ test "model rejects enum collisions and malformed layout metadata" {
     }, &diagnostic));
     try std.testing.expectEqualStrings("value fits declared width", diagnostic.invariant);
 
-    const bad_fields = [_]Field{.{ .name = "field", .offset = 1, .size = 4, .type = "u32" }};
+    const bad_fields = [_]Field{.{ .name = "field", .offset = 1, .size = 4, .type = "u32", .element = "u32", .count = 1, .is_record = false }};
     try std.testing.expectError(error.InvalidRecordOffset, validateRecord(.{
         .name = "fixture_record",
         .size = 4,
@@ -307,7 +449,7 @@ test "model rejects enum collisions and malformed layout metadata" {
     }, &diagnostic));
     try std.testing.expectEqualStrings("no implicit field padding", diagnostic.invariant);
 
-    const sized_fields = [_]Field{.{ .name = "field", .offset = 0, .size = 4, .type = "u32" }};
+    const sized_fields = [_]Field{.{ .name = "field", .offset = 0, .size = 4, .type = "u32", .element = "u32", .count = 1, .is_record = false }};
     try std.testing.expectError(error.InvalidRecordSize, validateRecord(.{
         .name = "fixture_page",
         .size = 4096,
@@ -319,4 +461,23 @@ test "model rejects enum collisions and malformed layout metadata" {
     const bad_atomic = [_]abi.AtomicField{.{ .record = "SpecBank", .field = "bank_seq", .width = 8 }};
     try std.testing.expectError(error.InvalidAtomicField, validateAtomicFields(&bad_atomic, description.records, &diagnostic));
     try std.testing.expectEqualStrings("atomic width and alignment", diagnostic.invariant);
+}
+
+test "layout digest is stable and tracks every layout fact" {
+    const digest = layoutDigest(description);
+    try std.testing.expectEqual(digest, layoutDigest(description));
+
+    var moved_records: [description.records.len]Record = undefined;
+    @memcpy(&moved_records, description.records);
+    var moved_fields: [description.records[5].fields.len]Field = undefined;
+    @memcpy(&moved_fields, description.records[5].fields);
+    moved_fields[4].offset += 4;
+    moved_records[5].fields = &moved_fields;
+    var moved = description;
+    moved.records = &moved_records;
+    try std.testing.expect(layoutDigest(moved) != digest);
+
+    var renamed = description;
+    renamed.abi_version += 1;
+    try std.testing.expect(layoutDigest(renamed) != digest);
 }

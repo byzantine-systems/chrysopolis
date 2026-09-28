@@ -4,6 +4,7 @@ const serde = @import("serde");
 const system = @import("system_abi");
 const orchestration = @import("orchestrator_abi");
 const model = @import("model");
+const validation = @import("validation");
 
 fn writeJson(allocator: std.mem.Allocator, path: []const u8, value: anytype) !void {
     const bytes = try serde.json.toSlice(allocator, value);
@@ -19,10 +20,11 @@ pub fn main() !void {
     const allocator = arena.allocator();
     const args = try std.process.argsAlloc(allocator);
     if (args.len != 3) return error.ExpectedTwoOutputPaths;
-    try system.validate(system.values);
     var diagnostic: orchestration.Diagnostic = .{};
-    try orchestration.validate(&diagnostic);
-    try model.validate(&diagnostic);
+    validation.validateAll(system.values, model.description, &diagnostic) catch |err| {
+        std.debug.print("invalid ABI {s}: {s}: {s}\n", .{ @errorName(err), diagnostic.path, diagnostic.invariant });
+        return err;
+    };
     try writeJson(allocator, args[1], system.values);
     try writeJson(allocator, args[2], model.description);
 }

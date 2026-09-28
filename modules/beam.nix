@@ -25,10 +25,20 @@
         inherit (chryso.zigEnv) zig;
         name = "chrysopolis-dependencies";
       };
+      # The ABI tools package (tools/abi) and its typed inputs. The root build
+      # uses it for the -Ddiagnostic probes and tests/host for the ABI suites.
+      abiGeneratorFiles = pkgs.lib.fileset.unions [
+        ../interfaces/system_abi.zig
+        ../interfaces/orchestrator_abi.zig
+        # A path dependency of both builds; serde inside it is lazy and never fetched.
+        ../tools/abi
+      ];
       mkBeamZig =
         diagnostic:
         pkgs.stdenvNoCC.mkDerivation {
           name = if diagnostic then "beam-zig-diagnostic" else "beam-zig";
+          # Built only after the committed system JSON matches its generator.
+          abiFresh = config.checks.abi-stale;
           src = pkgs.lib.fileset.toSource {
             root = ../.;
             fileset = pkgs.lib.fileset.unions [
@@ -39,8 +49,11 @@
               ../src/pd/beam
               ../src/pd/root
               ../src/pd/test_support
+              ../src/lib
               ../interfaces/system_abi.zig
+              ../interfaces/orchestrator_abi.zig
               ../interfaces/generated/system-abi.json
+              abiGeneratorFiles
             ];
           };
 
@@ -105,6 +118,15 @@
               -Dwith-crasher=true \
               -Derts-archive-dir="$PWD"
 
+            ${pkgs.lib.optionalString diagnostic ''
+              # The atomic probe must reference no atomic or outline-atomics
+              # helper. Capture first so an llvm-nm failure fails the build.
+              undefined=$(llvm-nm -u "$out/bin/abi_atomic_probe.elf")
+              if grep -E '__atomic_|__aarch64_' <<<"$undefined"; then
+                echo "abi_atomic_probe.elf needs an atomic helper" >&2
+                exit 1
+              fi
+            ''}
             # Headers a downstream consumer of libmicrokitco.a would need, the
             # beam link above already includes them straight from the source.
             mkdir -p $out/include
@@ -169,12 +191,14 @@
         # variant (see tests/host/build.zig).
         runtime-host-tests = pkgs.stdenvNoCC.mkDerivation {
           name = "chrysopolis-runtime-host-tests";
+          abiFresh = config.checks.abi-stale;
           src = pkgs.lib.fileset.toSource {
             root = ../.;
             fileset = pkgs.lib.fileset.unions [
               ../tests/host
               ../src/pd/beam
               ../src/pd/root/policy
+              abiGeneratorFiles
             ];
           };
           nativeBuildInputs = [ inputs'.zig2nix.packages."zig-0_15_2" ];
