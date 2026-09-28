@@ -1,6 +1,6 @@
-%% Adds the generated codec to the build. CHRYSO_ABI_GENERATED names the Erlang projection
-%% (the directory holding src/ and include/), for example
-%%   CHRYSO_ABI_GENERATED=$(nix build --no-link --print-out-paths .#orchestrator-abi)/erlang
+%% Adds the generated codec to the build. CHRYSO_ABI_GENERATED names the orchestrator-abi
+%% package: erlang/{src,include} hold the codec and vectors/ the golden vectors, for example
+%%   CHRYSO_ABI_GENERATED=$(nix build --no-link --print-out-paths .#orchestrator-abi)
 %% rebar3 cannot take an absolute src_dir, so the files are copied under _build, which Git
 %% ignores and the project-structure gate skips.
 case os:getenv("CHRYSO_ABI_GENERATED") of
@@ -19,8 +19,9 @@ case os:getenv("CHRYSO_ABI_GENERATED") of
             {error, enoent} -> ok
         end,
         Copy = fun(Sub) ->
-            Files = filelib:wildcard(filename:join([Generated, Sub, "*"])),
-            Files =/= [] orelse error({missing_generated, filename:join(Generated, Sub)}),
+            Files = filelib:wildcard(filename:join([Generated, "erlang", Sub, "*"])),
+            Files =/= [] orelse
+                error({missing_generated, filename:join([Generated, "erlang", Sub])}),
             ok = filelib:ensure_path(filename:join(Dest, Sub)),
             [
                 {ok, _} = file:copy(F, filename:join([Dest, Sub, filename:basename(F)]))

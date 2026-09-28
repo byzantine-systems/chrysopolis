@@ -7,13 +7,16 @@ processes. B4's reconciler depends on it (Nix `beamDeps`, or `ERL_LIBS` locally)
 It lives under `apps/` rather than beside the Gleam sources in `src/`, which belong to the
 Gleam payload and the C runtime adapter.
 
-The codec is never committed. Generate it, then point rebar3 at it:
+The codec is never committed. Generate it, then point rebar3 at the package:
 
 ```bash
-export CHRYSO_ABI_GENERATED=$(nix build --no-link --print-out-paths .#orchestrator-abi)/erlang
-rebar3 eunit          # EUnit cases plus PropEr properties
+export CHRYSO_ABI_GENERATED=$(nix build --no-link --print-out-paths .#orchestrator-abi)
+rebar3 eunit          # golden vectors, codec cases and PropEr properties
 rebar3 dialyzer
 ```
+
+`rebar.config.script` copies the codec from `erlang/`; `chryso_abi_vectors_tests` reads the
+golden vectors from `vectors/`, the same images `tests/host` runs through the C checkers.
 
 Every checker returns `ok` or `{error, Class}`, with the same classes and precedence as the C
 checkers in `<chrysopolis/*.h>`. Decoders take a snapshot the C side already copied under its

@@ -1,6 +1,7 @@
 //! Typed ABI tools. Standalone it tests the contracts and builds both generators; as a path
-//! dependency it gives other builds the generated C headers (`orchestrator-abi`) and the
-//! `orchestrator_abi` and `checks` modules. serde is lazy, so dependents never fetch it.
+//! dependency it gives other builds the generated C headers (`orchestrator-abi`), the golden
+//! vectors (`orchestrator-abi-vectors`) and the `orchestrator_abi` and `checks` modules.
+//! serde is lazy, so dependents never fetch it.
 const std = @import("std");
 
 pub const headers = @import("headers.zig").names;
@@ -32,7 +33,12 @@ pub fn build(b: *std.Build) void {
     const naming = module(b, "naming.zig", target, optimize);
     const generate_c = module(b, "generate_c.zig", target, optimize);
     const generate_erlang = module(b, "generate_erlang.zig", target, optimize);
-    for ([_]*std.Build.Module{ validation, generate_c, generate_erlang }) |consumer| {
+    const publication = module(b, "publication.zig", target, optimize);
+    publication.addImport("orchestrator_abi", orchestrator_abi);
+    publication.addImport("checks", checks);
+    const generate_vectors = module(b, "generate_vectors.zig", target, optimize);
+    generate_vectors.addImport("publication", publication);
+    for ([_]*std.Build.Module{ validation, generate_c, generate_erlang, generate_vectors }) |consumer| {
         consumer.addImport("naming", naming);
         consumer.addImport("system_abi", system_abi);
         consumer.addImport("orchestrator_abi", orchestrator_abi);
@@ -53,6 +59,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "validation", .module = validation },
                 .{ .name = "generate_c", .module = generate_c },
                 .{ .name = "generate_erlang", .module = generate_erlang },
+                .{ .name = "generate_vectors", .module = generate_vectors },
             },
         }),
     });
@@ -65,6 +72,9 @@ pub fn build(b: *std.Build) void {
     const generate_erl = b.addRunArtifact(generator);
     generate_erl.addArg("erlang");
     b.addNamedLazyPath("orchestrator-abi-erlang", generate_erl.addOutputDirectoryArg("orchestrator-abi-erlang"));
+    const generate_vec = b.addRunArtifact(generator);
+    generate_vec.addArg("vectors");
+    b.addNamedLazyPath("orchestrator-abi-vectors", generate_vec.addOutputDirectoryArg("orchestrator-abi-vectors"));
 
     // The JSON projection needs serde. Ask for it only as the root build: a lazyDependency
     // call from a dependent's configure still fetches, and the Nix sandbox is offline.
@@ -89,7 +99,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Test both typed ABI contracts and their projection");
-    for ([_]*std.Build.Module{ system_abi, orchestrator_abi, model, checks, validation, naming, generate_c, generate_erlang }) |test_module| {
+    for ([_]*std.Build.Module{ system_abi, orchestrator_abi, model, checks, validation, naming, publication, generate_c, generate_erlang, generate_vectors }) |test_module| {
         const unit_tests = b.addTest(.{ .root_module = test_module });
         test_step.dependOn(&b.addRunArtifact(unit_tests).step);
     }

@@ -37,6 +37,10 @@ const Suite = struct {
     // Adds the generated <chrysopolis/...> orchestration headers.
     generated_abi: bool = false,
     extra_flags: []const []const u8 = &.{},
+    // Harness sources beside the suite, built with the suite's flags.
+    sources: []const []const u8 = &.{},
+    // Passes the golden vector directory from tools/abi as argv[1].
+    vectors: bool = false,
     // Pure unit sources from the owning directory. Header-only units need no entry.
     units: []const []const u8,
 };
@@ -57,6 +61,7 @@ const suites = [_]Suite{
     .{ .name = "tcp_logic", .source = "beam/io/network/suite_tcp_logic.c", .unit_dir = "../../src/pd/beam/io/network", .units = &.{} },
     .{ .name = "tcp_state", .source = "beam/io/network/suite_tcp_state.c", .unit_dir = "../../src/pd/beam/io/network", .units = &.{} },
     .{ .name = "abi_layout", .source = "lib/abi/suite_abi_layout.c", .unit_dir = "lib/abi", .generated_abi = true, .extra_flags = &abi_flags, .units = &.{} },
+    .{ .name = "abi_vectors", .source = "lib/abi/suite_abi_vectors.c", .unit_dir = "lib/abi", .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{"lib/abi/abi_shim.c"}, .vectors = true, .units = &.{} },
 };
 
 // Generated code must also be clean under the conversion warnings.
@@ -85,6 +90,7 @@ pub fn build(b: *std.Build) void {
     // tools/abi as a path dependency: generated headers plus the Zig reference checks.
     const abi = b.dependency("abi", .{ .target = target });
     const generated_abi = abi.namedLazyPath("orchestrator-abi");
+    const golden_vectors = abi.namedLazyPath("orchestrator-abi-vectors");
     for (variants) |variant| {
         for (suites) |suite| {
             const owner_dir = b.path(suite.unit_dir);
@@ -103,6 +109,9 @@ pub fn build(b: *std.Build) void {
                 .file = b.path(suite.source),
                 .flags = suite_flags,
             });
+            for (suite.sources) |source| {
+                exe.root_module.addCSourceFile(.{ .file = b.path(source), .flags = suite_flags });
+            }
             for (suite.units) |unit| {
                 exe.root_module.addCSourceFile(.{
                     .file = owner_dir.path(b, unit),
@@ -115,6 +124,7 @@ pub fn build(b: *std.Build) void {
             if (suite.generated_abi) exe.root_module.addIncludePath(generated_abi);
 
             const run = b.addRunArtifact(exe);
+            if (suite.vectors) run.addDirectoryArg(golden_vectors);
             run.expectExitCode(0);
             test_step.dependOn(&run.step);
         }

@@ -1,0 +1,186 @@
+// Golden vector descriptions. Each entry starts from a valid sample (or a pinned wire image),
+// applies its edits and names the verdict the generated C and Erlang checkers must both reach.
+// Field paths index arrays as `children[3].reserved`. Sweeps over every reserved span, every
+// undeclared enum value and every record size are added by generate_vectors.zig.
+.{
+    // Root status page. The sample has seq 2 and event_head 130, so every event slot is live.
+    .{ .name = "status_ok", .checker = "root_status_page", .expect = .ok },
+    .{ .name = "status_magic", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.magic", .value = 0 } }}, .expect = .magic },
+    .{ .name = "status_version", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.abi_version", .value = 2 } }}, .expect = .version },
+    .{ .name = "status_seq_odd", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.seq", .value = 3 } }}, .expect = .torn },
+    .{ .name = "status_seq_zero", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.seq", .value = 0 } }}, .expect = .torn },
+    .{ .name = "status_seq_max_even", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.seq", .value = 0xffff_ffff_ffff_fffe } }}, .expect = .ok },
+    .{ .name = "status_seq_max", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.seq", .value = 0xffff_ffff_ffff_ffff } }}, .expect = .torn },
+    .{
+        .name = "status_magic_outranks_torn",
+        .checker = "root_status_page",
+        .edits = .{ .{ .set = .{ .field = "header.seq", .value = 3 } }, .{ .byte = .{ .field = "header.magic", .index = 7, .value = 0 } } },
+        .expect = .magic,
+    },
+    .{ .name = "status_child_reserved", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "children[3].reserved", .value = 1 } }}, .expect = .reserved },
+    .{ .name = "status_tail_last_byte", .checker = "root_status_page", .edits = .{.{ .byte = .{ .field = "reserved_tail", .index = 7239, .value = 1 } }}, .expect = .reserved },
+    .{ .name = "status_child_state_unknown", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "children[0].state", .value = 9 } }}, .expect = .unknown_kind },
+    .{ .name = "status_live_event_unset", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "events[0].kind", .value = 0 } }}, .expect = .unknown_kind },
+    // Only events 0..2 are published; slots outside the window are not interpreted.
+    .{
+        .name = "status_unset_event_outside_window",
+        .checker = "root_status_page",
+        .edits = .{ .{ .set = .{ .field = "header.event_head", .value = 3 } }, .{ .set = .{ .field = "events[10].kind", .value = 0 } } },
+        .expect = .ok,
+    },
+    .{
+        .name = "status_pad_outside_window",
+        .checker = "root_status_page",
+        .edits = .{ .{ .set = .{ .field = "header.event_head", .value = 3 } }, .{ .set = .{ .field = "events[10].pad", .value = 1 } } },
+        .expect = .ok,
+    },
+    .{ .name = "status_no_events", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.event_head", .value = 0 } }}, .expect = .ok },
+    .{ .name = "status_event_head_max", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.event_head", .value = 0xffff_ffff_ffff_ffff } }}, .expect = .ok },
+    .{ .name = "status_applied_bank", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.applied_bank", .value = 2 } }}, .expect = .range },
+    .{ .name = "status_child_count_short", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.child_count", .value = 61 } }}, .expect = .range },
+    .{ .name = "status_child_count_over", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.child_count", .value = 63 } }}, .expect = .range },
+    .{ .name = "status_event_child_max", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "events[0].child", .value = 61 } }}, .expect = .ok },
+    .{ .name = "status_event_child_over", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "events[0].child", .value = 62 } }}, .expect = .range },
+    .{ .name = "status_generation_zero", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.applied_spec_generation", .value = 0 } }}, .expect = .ok },
+
+    // Spec page. The sample publishes bank 0 (generation 1, bank_seq 2); bank 1 is unpublished.
+    .{ .name = "spec_header_ok", .checker = "spec_header", .expect = .ok },
+    .{ .name = "spec_header_magic", .checker = "spec_header", .edits = .{.{ .byte = .{ .field = "header.magic", .index = 3, .value = 0 } }}, .expect = .magic },
+    .{ .name = "spec_header_version", .checker = "spec_header", .edits = .{.{ .set = .{ .field = "header.abi_version", .value = 0 } }}, .expect = .version },
+    .{ .name = "spec_active_bank_two", .checker = "spec_header", .edits = .{.{ .set = .{ .field = "header.active_bank", .value = 2 } }}, .expect = .range },
+    .{ .name = "spec_active_bank_max", .checker = "spec_header", .edits = .{.{ .set = .{ .field = "header.active_bank", .value = 0xffff_ffff } }}, .expect = .range },
+    .{ .name = "bank_ok", .checker = "spec_bank", .expect = .ok },
+    .{ .name = "bank_selector_out_of_range", .checker = "spec_bank", .bank = 2, .expect = .range },
+    .{ .name = "bank_short_before_selector", .checker = "spec_bank", .bank = 9, .edits = .{.{ .resize = -1 }}, .expect = .size },
+    .{ .name = "bank_inactive_unpublished", .checker = "spec_bank", .bank = 1, .expect = .torn },
+    .{ .name = "bank_crc_zero", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].crc32", .value = 0 } }}, .expect = .checksum },
+    .{ .name = "bank_crc_off_by_one", .checker = "spec_bank", .edits = .{.{ .add = .{ .field = "banks[0].crc32", .value = 1 } }}, .expect = .checksum },
+    .{ .name = "bank_checksum_outranks_reserved", .checker = "spec_bank", .edits = .{.{ .byte = .{ .field = "banks[0].reserved_tail", .value = 1 } }}, .expect = .checksum },
+    .{ .name = "bank_sealed_reserved", .checker = "spec_bank", .edits = .{.{ .byte = .{ .field = "banks[0].reserved_tail", .value = 1 } }}, .reseal = true, .expect = .reserved },
+    .{ .name = "bank_seq_outside_crc", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].bank_seq", .value = 4 } }}, .expect = .ok },
+    .{ .name = "bank_seq_max_even", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].bank_seq", .value = 0xffff_fffe } }}, .expect = .ok },
+    .{ .name = "bank_seq_odd", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].bank_seq", .value = 3 } }}, .expect = .torn },
+    .{ .name = "bank_seq_zero", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].bank_seq", .value = 0 } }}, .expect = .torn },
+    // Budgets and desired states are clamped by Root, not rejected by the structural checker.
+    .{
+        .name = "bank_clamped_values_pass",
+        .checker = "spec_bank",
+        .edits = .{ .{ .set = .{ .field = "banks[0].budget[3]", .value = 0xffff_ffff } }, .{ .set = .{ .field = "banks[0].desired[0]", .value = 9 } } },
+        .reseal = true,
+        .expect = .ok,
+    },
+    .{ .name = "bank_length_zero", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].length", .value = 0 } }}, .reseal = true, .expect = .range },
+    .{ .name = "bank_record_count", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].record_count", .value = 61 } }}, .reseal = true, .expect = .range },
+    .{ .name = "bank_generation_zero", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].generation", .value = 0 } }}, .reseal = true, .expect = .ok },
+
+    // Both banks published; the header selects bank 1. Each image is checked at both indices.
+    .{ .name = "banks_both_valid_0", .checker = "spec_bank", .base = .spec_two_banks, .bank = 0, .expect = .ok },
+    .{ .name = "banks_both_valid_1", .checker = "spec_bank", .base = .spec_two_banks, .bank = 1, .expect = .ok },
+    .{ .name = "banks_inactive_odd_0", .checker = "spec_bank", .base = .spec_two_banks, .bank = 0, .edits = .{.{ .set = .{ .field = "banks[0].bank_seq", .value = 5 } }}, .expect = .torn },
+    .{ .name = "banks_inactive_odd_1", .checker = "spec_bank", .base = .spec_two_banks, .bank = 1, .edits = .{.{ .set = .{ .field = "banks[0].bank_seq", .value = 5 } }}, .expect = .ok },
+    .{ .name = "banks_inactive_corrupt_0", .checker = "spec_bank", .base = .spec_two_banks, .bank = 0, .edits = .{.{ .add = .{ .field = "banks[0].budget[0]", .value = 1 } }}, .expect = .checksum },
+    .{ .name = "banks_inactive_corrupt_1", .checker = "spec_bank", .base = .spec_two_banks, .bank = 1, .edits = .{.{ .add = .{ .field = "banks[0].budget[0]", .value = 1 } }}, .expect = .ok },
+    .{ .name = "banks_active_corrupt_0", .checker = "spec_bank", .base = .spec_two_banks, .bank = 0, .edits = .{.{ .byte = .{ .field = "banks[1].reserved_tail", .value = 1 } }}, .expect = .ok },
+    .{ .name = "banks_active_corrupt_1", .checker = "spec_bank", .base = .spec_two_banks, .bank = 1, .edits = .{.{ .byte = .{ .field = "banks[1].reserved_tail", .value = 1 } }}, .expect = .checksum },
+    .{
+        .name = "banks_both_invalid_0",
+        .checker = "spec_bank",
+        .base = .spec_two_banks,
+        .bank = 0,
+        .edits = .{ .{ .set = .{ .field = "banks[0].bank_seq", .value = 3 } }, .{ .set = .{ .field = "banks[1].length", .value = 0 } } },
+        .reseal = true,
+        .expect = .torn,
+    },
+    .{
+        .name = "banks_both_invalid_1",
+        .checker = "spec_bank",
+        .base = .spec_two_banks,
+        .bank = 1,
+        .edits = .{ .{ .set = .{ .field = "banks[0].bank_seq", .value = 3 } }, .{ .set = .{ .field = "banks[1].length", .value = 0 } } },
+        .reseal = true,
+        .expect = .range,
+    },
+
+    // Control records.
+    .{ .name = "ctl_command_ok", .checker = "ctl_command", .expect = .ok },
+    .{ .name = "ctl_command_magic", .checker = "ctl_command", .edits = .{.{ .byte = .{ .field = "magic", .value = 0 } }}, .expect = .magic },
+    .{ .name = "ctl_command_version", .checker = "ctl_command", .edits = .{.{ .set = .{ .field = "version", .value = 2 } }}, .expect = .version },
+    .{ .name = "ctl_reply_ok", .checker = "ctl_reply", .expect = .ok },
+    .{ .name = "ctl_reply_magic", .checker = "ctl_reply", .base = .zeroes, .expect = .magic },
+    .{ .name = "ctl_reply_version_zero", .checker = "ctl_reply", .edits = .{.{ .set = .{ .field = "version", .value = 0 } }}, .expect = .version },
+
+    // Worker identity and status.
+    .{ .name = "identity_ok", .checker = "worker_identity", .expect = .ok },
+    .{ .name = "identity_magic_spells_chrywid1", .checker = "worker_identity", .edits = .{.{ .set = .{ .field = "header.magic", .value = 0x3144495759524843 } }}, .expect = .ok },
+    .{ .name = "identity_status_magic", .checker = "worker_identity", .edits = .{.{ .set = .{ .field = "header.magic", .value = 0x3154535759524843 } }}, .expect = .magic },
+    .{ .name = "identity_version", .checker = "worker_identity", .edits = .{.{ .set = .{ .field = "header.abi_version", .value = 2 } }}, .expect = .version },
+    .{ .name = "identity_generation_zero", .checker = "worker_identity", .edits = .{.{ .set = .{ .field = "header.generation", .value = 0 } }}, .expect = .torn },
+    .{ .name = "identity_generation_max", .checker = "worker_identity", .edits = .{.{ .set = .{ .field = "header.generation", .value = 0xffff_ffff_ffff_ffff } }}, .expect = .ok },
+    .{ .name = "worker_status_ok", .checker = "worker_status", .expect = .ok },
+    .{ .name = "worker_status_magic", .checker = "worker_status", .base = .zeroes, .expect = .magic },
+    .{ .name = "worker_status_version", .checker = "worker_status", .edits = .{.{ .set = .{ .field = "header.abi_version", .value = 0xffff_ffff } }}, .expect = .version },
+    .{ .name = "worker_status_seq_odd", .checker = "worker_status", .edits = .{.{ .set = .{ .field = "header.status_seq", .value = 7 } }}, .expect = .torn },
+    .{ .name = "worker_status_seq_zero", .checker = "worker_status", .edits = .{.{ .set = .{ .field = "header.status_seq", .value = 0 } }}, .expect = .torn },
+    .{ .name = "worker_status_seq_max_even", .checker = "worker_status", .edits = .{.{ .set = .{ .field = "header.status_seq", .value = 0xffff_ffff_ffff_fffe } }}, .expect = .ok },
+    .{ .name = "worker_status_generation_zero", .checker = "worker_status", .edits = .{.{ .set = .{ .field = "header.generation", .value = 0 } }}, .expect = .ok },
+
+    // Journals. Sequences 6..20 are live and the ring has wrapped: entries[0] holds sequence 16
+    // with a 16-byte payload, entries[4] holds sequence 20 with the full 192 bytes.
+    .{ .name = "request_ok", .checker = "request_journal", .expect = .ok },
+    .{ .name = "completion_ok_with_status_ok", .checker = "completion_journal", .expect = .ok },
+    .{ .name = "request_magic", .checker = "request_journal", .edits = .{.{ .byte = .{ .field = "header.magic", .index = 4, .value = 'C' } }}, .expect = .magic },
+    .{ .name = "journal_version", .checker = "completion_journal", .edits = .{.{ .set = .{ .field = "header.abi_version", .value = 2 } }}, .expect = .version },
+    .{ .name = "request_version", .checker = "request_journal", .edits = .{.{ .set = .{ .field = "header.abi_version", .value = 0 } }}, .expect = .version },
+    .{ .name = "journal_generation_zero", .checker = "request_journal", .edits = .{.{ .set = .{ .field = "header.generation", .value = 0 } }}, .expect = .torn },
+    .{ .name = "journal_stale_sequence", .checker = "request_journal", .edits = .{.{ .set = .{ .field = "entries[0].sequence", .value = 1 } }}, .expect = .torn },
+    .{ .name = "journal_sequence_ahead", .checker = "request_journal", .edits = .{.{ .add = .{ .field = "entries[0].sequence", .value = 15 } }}, .expect = .torn },
+    .{ .name = "journal_entry_generation", .checker = "completion_journal", .edits = .{.{ .set = .{ .field = "entries[0].generation", .value = 6 } }}, .expect = .torn },
+    .{ .name = "journal_empty", .checker = "request_journal", .edits = .{.{ .set = .{ .field = "header.published_seq", .value = 0 } }}, .expect = .ok },
+    .{ .name = "journal_head_behind_slots", .checker = "request_journal", .edits = .{.{ .set = .{ .field = "header.published_seq", .value = 1 } }}, .expect = .torn },
+    .{ .name = "journal_at_max_sequence", .checker = "request_journal", .base = .journal_max, .expect = .ok },
+    .{ .name = "journal_at_max_stale_oldest", .checker = "request_journal", .base = .journal_max, .edits = .{.{ .add = .{ .field = "entries[1].sequence", .value = 1 } }}, .expect = .torn },
+    .{ .name = "journal_byte_after_payload", .checker = "request_journal", .edits = .{.{ .byte = .{ .field = "entries[0].payload", .index = 150, .value = 1 } }}, .expect = .reserved },
+    .{ .name = "journal_byte_right_after_payload", .checker = "completion_journal", .edits = .{.{ .byte = .{ .field = "entries[0].payload", .index = 16, .value = 1 } }}, .expect = .reserved },
+    .{ .name = "journal_shortened_payload", .checker = "request_journal", .edits = .{.{ .set = .{ .field = "entries[4].payload_length", .value = 191 } }}, .expect = .reserved },
+    .{ .name = "journal_payload_zero_length", .checker = "request_journal", .edits = .{.{ .set = .{ .field = "entries[0].payload_length", .value = 0 } }}, .expect = .reserved },
+    .{ .name = "journal_overlong_payload", .checker = "request_journal", .edits = .{.{ .set = .{ .field = "entries[4].payload_length", .value = 193 } }}, .expect = .range },
+    .{ .name = "journal_payload_length_max", .checker = "completion_journal", .edits = .{.{ .set = .{ .field = "entries[4].payload_length", .value = 0xffff } }}, .expect = .range },
+    .{ .name = "journal_capacity", .checker = "completion_journal", .edits = .{.{ .set = .{ .field = "header.capacity", .value = 16 } }}, .expect = .range },
+    .{ .name = "journal_entry_size", .checker = "request_journal", .edits = .{.{ .set = .{ .field = "header.entry_size", .value = 255 } }}, .expect = .range },
+    .{ .name = "journal_wrong_magic_kind", .checker = "completion_journal", .base = .journal_max, .expect = .magic },
+
+    // Wire images pinned by hand from the layout in interfaces/orchestrator_abi.zig, not built
+    // from the model. The rest of each record is zero. Bank 0's CRC, 0x19b0a44c, was computed
+    // with Python's zlib.crc32 over the bank with crc32 and bank_seq zeroed.
+    .{
+        .name = "pinned_ctl_command_hello",
+        .checker = "ctl_command",
+        .base = .hex,
+        .hex =
+        \\43485259434d4431010001000000000001000000000000000200000000000000
+        \\0300000000000000040000000000000000000000000000000000000000000000
+        ,
+        .expect = .ok,
+    },
+    .{
+        .name = "pinned_spec_bank",
+        .checker = "spec_bank",
+        .base = .hex,
+        .hex =
+        \\4348525953504531010000000000000000000000000000000000000000000000
+        \\0000000000000000000000000000000000000000000000000000000000000000
+        \\0100000000000000e00700004ca4b0193e000000020000000300000003000000
+        \\0300000003000000030000000300000003000000030000000300000003000000
+        \\0300000003000000030000000300000003000000030000000300000003000000
+        \\0300000003000000030000000300000003000000030000000300000003000000
+        \\0300000003000000030000000300000003000000030000000300000003000000
+        \\0300000003000000030000000300000003000000030000000300000003000000
+        \\0300000003000000030000000300000003000000030000000300000003000000
+        \\0300000003000000030000000300000003000000030000000300000003000000
+        \\0300000003000000030000000300000001010101010101010101010101010101
+        \\0101010101010101010101010101010101010101010101010101010101010101
+        \\0101010101010101010101010101
+        ,
+        .expect = .ok,
+    },
+}

@@ -30,6 +30,17 @@ pub fn spec() abi.SpecPage {
     return page;
 }
 
+/// Both banks published and sealed; the header selects bank 1, the newer spec.
+pub fn specTwoBanks() abi.SpecPage {
+    var page = spec();
+    page.header.active_bank = 1;
+    page.banks[1] = page.banks[0];
+    page.banks[1].generation = 2;
+    page.banks[1].bank_seq = 4;
+    sealBank(&page.banks[1]);
+    return page;
+}
+
 pub fn ctlCommand() abi.CtlCommand {
     return .{ .magic = abi.magic.command, .version = abi.abi_version, .opcode = @intFromEnum(abi.PpOpcode.hello), .args = .{ 1, 2, 3, 4 } };
 }
@@ -63,6 +74,21 @@ pub fn journal(comptime completion: bool) abi.JournalPage {
         const length: u16 = if (s == 20) abi.journal_payload_size else @intCast(s * 13 % abi.journal_payload_size);
         entry.payload_length = length;
         @memset(entry.payload[0..length], @intCast(s));
+    }
+    return page;
+}
+
+/// A full request journal whose newest sequence is the u64 maximum.
+pub fn journalAtMax() abi.JournalPage {
+    var page = std.mem.zeroes(abi.JournalPage);
+    page.header = .{ .magic = abi.magic.request, .abi_version = abi.abi_version, .slot = 0, .generation = 1, .published_seq = std.math.maxInt(u64), .capacity = abi.journal_capacity, .entry_size = @sizeOf(abi.JournalEntry) };
+    var s: u64 = std.math.maxInt(u64) - abi.journal_capacity + 1;
+    while (true) : (s += 1) {
+        const entry = &page.entries[@intCast((s - 1) % abi.journal_capacity)];
+        entry.generation = 1;
+        entry.sequence = s;
+        entry.kind = @intFromEnum(abi.RequestKind.drain);
+        if (s == std.math.maxInt(u64)) break;
     }
     return page;
 }

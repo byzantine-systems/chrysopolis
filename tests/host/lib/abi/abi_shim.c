@@ -1,15 +1,13 @@
-/* Exposes every generated checker by name to abi_differential.zig. */
+/* Exposes every generated checker by name to abi_differential.zig and
+ * suite_abi_vectors.c. */
+#include "abi_shim.h"
+
 #include <chrysopolis/root_control.h>
 #include <chrysopolis/worker_identity.h>
 #include <chrysopolis/worker_protocol.h>
 #include <chrysopolis/worker_status.h>
 
 #include <string.h>
-
-/* Returns the verdict, or UINT8_MAX for an unknown checker name. The name is
- * (pointer, length), not NUL-terminated. */
-uint8_t abi_shim_check(const char *name, size_t name_len, const uint8_t *bytes,
-                       size_t len, size_t bank);
 
 static bool name_is(const char *name, size_t name_len, const char *expected) {
   return name_len == strlen(expected) && memcmp(name, expected, name_len) == 0;

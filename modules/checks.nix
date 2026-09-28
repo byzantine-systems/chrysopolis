@@ -136,15 +136,18 @@
             '';
             dontInstall = true;
           };
-        # Both projections of the orchestration ABI: C headers under c/ and the
-        # Erlang codec under erlang/. The two must carry the same layout digest.
+        # Both projections of the orchestration ABI, C headers under c/ and the
+        # Erlang codec under erlang/, plus the golden vectors both must agree
+        # on under vectors/. All three carry the same layout digest.
         orchestrator-abi = pkgs.runCommand "chrysopolis-orchestrator-abi" { } ''
           ${config.packages.abi-tool}/bin/gen-orchestrator-abi c $out/c
           ${config.packages.abi-tool}/bin/gen-orchestrator-abi erlang $out/erlang
+          ${config.packages.abi-tool}/bin/gen-orchestrator-abi vectors $out/vectors
           c=$(sed -n 's/.*chryso_abi_layout_digest = 0x\([0-9a-f]*\)u;.*/\1/p' $out/c/chrysopolis/orchestrator_abi.h)
           erl=$(sed -n 's/.*CHRYSO_ABI_LAYOUT_DIGEST, 16#\([0-9a-f]*\)).*/\1/p' $out/erlang/include/orchestrator_abi.hrl)
-          if [ -z "$c" ] || [ "$c" != "$erl" ]; then
-            echo "layout digest differs: C '$c', Erlang '$erl'" >&2
+          vec=$(sed -n '1s/^chryso-abi-vectors [0-9]* [0-9]* \([0-9a-f]*\)$/\1/p' $out/vectors/manifest.txt)
+          if [ -z "$c" ] || [ "$c" != "$erl" ] || [ "$c" != "$vec" ]; then
+            echo "layout digest differs: C '$c', Erlang '$erl', vectors '$vec'" >&2
             exit 1
           fi
         '';
@@ -232,10 +235,11 @@
         # run and platform-independent, like test-modules above.
         runtime-host-tests = config.packages.runtime-host-tests;
 
-        # EUnit and PropEr over the generated Erlang codec. PropEr comes from
-        # rebar-deps.nix; the Hex-only plugin and test-profile deps are dropped
-        # from the sandbox copy of rebar.config so rebar3 never reaches the
-        # network. Every erl_opts flag is kept. Dialyzer stays a local command.
+        # EUnit, PropEr and the shared golden vectors over the generated Erlang
+        # codec. PropEr comes from rebar-deps.nix; the Hex-only plugin and
+        # test-profile deps are dropped from the sandbox copy of rebar.config
+        # so rebar3 never reaches the network. Every erl_opts flag is kept.
+        # Dialyzer stays a local command.
         abi-erlang = pkgs.stdenvNoCC.mkDerivation {
           name = "chrysopolis-abi-erlang";
           src = pkgs.lib.fileset.toSource {
@@ -256,7 +260,7 @@
           buildPhase = ''
             runHook preBuild
             export HOME=$TMPDIR
-            export CHRYSO_ABI_GENERATED=${config.packages.orchestrator-abi}/erlang
+            export CHRYSO_ABI_GENERATED=${config.packages.orchestrator-abi}
             export ERL_LIBS=${chrysoAbiDeps.proper}/lib/erlang/lib
             erl -noshell -eval '
               {ok, Terms} = file:consult("rebar.config"),
