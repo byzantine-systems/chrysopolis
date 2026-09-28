@@ -50,6 +50,23 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - run: nix build .#checks.x86_64-linux.runtime-host-tests --print-build-logs
 
+  # The generated orchestration ABI: contract tests and negative fixtures,
+  # staleness of the committed system JSON, byte-identical double generation
+  # (inside orchestrator-abi), proof that those gates can fail, and the Erlang
+  # codec against the shared golden vectors. Host-only and seconds to minutes.
+  abi:
+    name: "[Nix] Generated ABI"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-nix
+      - run: >-
+          nix build --print-build-logs
+          .#checks.x86_64-linux.abi-tool
+          .#checks.x86_64-linux.abi-stale
+          .#checks.x86_64-linux.abi-negative
+          .#checks.x86_64-linux.abi-erlang
+
   image:
     name: "[Nix] Build images + disk"
     runs-on: ubuntu-latest

@@ -35,12 +35,19 @@
       # build.zig.zon + committed build.zig.zon2json-lock and fetches the
       # sdfgen/dtb/sddf Zig packages through Nix, so `zig build` runs
       # offline. A host tool (we run it at build time to emit the SDF).
-      sdfToolSource = pkgs.runCommand "chrysopolis-sdf-tool-source" { } ''
-        mkdir -p $out
-        cp -r ${../tools/sdf}/. $out/
-        cp ${../interfaces/system_abi.zig} $out/system_abi.zig
-        cp ${../interfaces/generated/system-abi.json} $out/system-abi.json
-      '';
+      # abiFresh orders it after abi-stale, so the SDF never builds from a stale
+      # system JSON.
+      sdfToolSource =
+        pkgs.runCommand "chrysopolis-sdf-tool-source"
+          {
+            abiFresh = config.checks.abi-stale;
+          }
+          ''
+            mkdir -p $out
+            cp -r ${../tools/sdf}/. $out/
+            cp ${../interfaces/system_abi.zig} $out/system_abi.zig
+            cp ${../interfaces/generated/system-abi.json} $out/system-abi.json
+          '';
       zigSdfTool = chryso.zigEnv.package { src = sdfToolSource; };
 
       # Which gen-sdf config blob lands in which ELF section, as data rather

@@ -1,4 +1,6 @@
-//! Generated orchestration headers and their cross-target diagnostic probes.
+//! Generated orchestration headers: the include path every PD compile gets, and their
+//! cross-target diagnostic probes. Every build runs the generator, so a generator
+//! regression fails the images, not only -Ddiagnostic.
 const std = @import("std");
 
 // Generated code must stay clean under the conversion warnings too.
@@ -10,6 +12,11 @@ fn generatedHeaders(b: *std.Build) std.Build.LazyPath {
     const linux = @import("builtin").os.tag == .linux;
     const host = if (linux) b.resolveTargetQuery(.{ .abi = .musl }) else b.graph.host;
     return b.dependency("abi", .{ .target = host }).namedLazyPath("orchestrator-abi");
+}
+
+/// Makes `<chrysopolis/...>` resolvable from `module`.
+pub fn addGenerated(b: *std.Build, module: *std.Build.Module) void {
+    module.addIncludePath(generatedHeaders(b));
 }
 
 /// Compiles each header alone for the cross target, and links the atomic probe.

@@ -92,6 +92,16 @@
             -netdev user,id=net0,hostfwd=tcp::8080-:8080
         '';
 
+        # The one local prep path for apps/chryso_abi: rebuilds the generated
+        # codec and vectors (a cache hit when nothing changed), so rebar3 never
+        # runs against an old store path. Arguments go to rebar3.
+        scripts.chryso-abi-rebar3.exec = ''
+          set -e
+          generated=$(nix build --no-link --print-out-paths "$DEVENV_ROOT#orchestrator-abi")
+          cd "$DEVENV_ROOT/apps/chryso_abi"
+          CHRYSO_ABI_GENERATED="$generated" exec rebar3 "$@"
+        '';
+
         enterShell = ''
           echo "========================================================="
           echo " Chrysopolis: BEAM on seL4 Microkit ${chryso.microkitVersion}"

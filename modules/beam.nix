@@ -37,6 +37,8 @@
         diagnostic:
         pkgs.stdenvNoCC.mkDerivation {
           name = if diagnostic then "beam-zig-diagnostic" else "beam-zig";
+          # Built only after the committed system JSON matches its generator.
+          abiFresh = config.checks.abi-stale;
           src = pkgs.lib.fileset.toSource {
             root = ../.;
             fileset = pkgs.lib.fileset.unions [
@@ -189,6 +191,7 @@
         # variant (see tests/host/build.zig).
         runtime-host-tests = pkgs.stdenvNoCC.mkDerivation {
           name = "chrysopolis-runtime-host-tests";
+          abiFresh = config.checks.abi-stale;
           src = pkgs.lib.fileset.toSource {
             root = ../.;
             fileset = pkgs.lib.fileset.unions [

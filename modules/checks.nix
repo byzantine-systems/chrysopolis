@@ -23,6 +23,16 @@
         name = "chrysopolis-abi-dependencies";
       };
       hex = value: "0x${pkgs.lib.toHexString value}";
+
+      # The comparisons behind abi-stale and orchestrator-abi, shared with
+      # abi-negative so it plants failures in the code the gates run.
+      sameBytes = a: b: "cmp ${a} ${b}";
+      sameTree = a: b: "diff -r --no-dereference ${a} ${b}";
+      generateOrchestratorAbi = dir: ''
+        ${config.packages.abi-tool}/bin/gen-orchestrator-abi c ${dir}/c
+        ${config.packages.abi-tool}/bin/gen-orchestrator-abi erlang ${dir}/erlang
+        ${config.packages.abi-tool}/bin/gen-orchestrator-abi vectors ${dir}/vectors
+      '';
       # apps/chryso_abi's rebar3 deps, exported by the rebar3_nix plugin
       # (`rebar3 as test nix lock -o rebar-deps.nix`), so nothing comes from Hex at build time.
       chrysoAbiDeps = import ../apps/chryso_abi/rebar-deps.nix {
@@ -138,19 +148,29 @@
           };
         # Both projections of the orchestration ABI, C headers under c/ and the
         # Erlang codec under erlang/, plus the golden vectors both must agree
-        # on under vectors/. All three carry the same layout digest.
-        orchestrator-abi = pkgs.runCommand "chrysopolis-orchestrator-abi" { } ''
-          ${config.packages.abi-tool}/bin/gen-orchestrator-abi c $out/c
-          ${config.packages.abi-tool}/bin/gen-orchestrator-abi erlang $out/erlang
-          ${config.packages.abi-tool}/bin/gen-orchestrator-abi vectors $out/vectors
-          c=$(sed -n 's/.*chryso_abi_layout_digest = 0x\([0-9a-f]*\)u;.*/\1/p' $out/c/chrysopolis/orchestrator_abi.h)
-          erl=$(sed -n 's/.*CHRYSO_ABI_LAYOUT_DIGEST, 16#\([0-9a-f]*\)).*/\1/p' $out/erlang/include/orchestrator_abi.hrl)
-          vec=$(sed -n '1s/^chryso-abi-vectors [0-9]* [0-9]* \([0-9a-f]*\)$/\1/p' $out/vectors/manifest.txt)
-          if [ -z "$c" ] || [ "$c" != "$erl" ] || [ "$c" != "$vec" ]; then
-            echo "layout digest differs: C '$c', Erlang '$erl', vectors '$vec'" >&2
-            exit 1
-          fi
-        '';
+        # on under vectors/. All three carry the same layout digest. A second
+        # run from another directory, into a relative path, with a different
+        # time zone, locale and umask must produce the same tree.
+        orchestrator-abi =
+          pkgs.runCommand "chrysopolis-orchestrator-abi" { abiFresh = config.checks.abi-stale; }
+            ''
+              ${generateOrchestratorAbi "$out"}
+              mkdir -p "$TMPDIR/again"
+              (
+                cd "$TMPDIR/again"
+                umask 077
+                export TZ=XYZ-14 LC_ALL=C.UTF-8
+                ${generateOrchestratorAbi "tree"}
+              )
+              ${sameTree "$out" "$TMPDIR/again/tree"}
+              c=$(sed -n 's/.*chryso_abi_layout_digest = 0x\([0-9a-f]*\)u;.*/\1/p' $out/c/chrysopolis/orchestrator_abi.h)
+              erl=$(sed -n 's/.*CHRYSO_ABI_LAYOUT_DIGEST, 16#\([0-9a-f]*\)).*/\1/p' $out/erlang/include/orchestrator_abi.hrl)
+              vec=$(sed -n '1s/^chryso-abi-vectors [0-9]* [0-9]* \([0-9a-f]*\)$/\1/p' $out/vectors/manifest.txt)
+              if [ -z "$c" ] || [ "$c" != "$erl" ] || [ "$c" != "$vec" ]; then
+                echo "layout digest differs: C '$c', Erlang '$erl', vectors '$vec'" >&2
+                exit 1
+              fi
+            '';
         check-restart-topology = pkgs.writeShellApplication {
           name = "check-restart-topology";
           runtimeInputs = [
@@ -217,11 +237,47 @@
         abi-stale = pkgs.runCommand "chrysopolis-abi-stale" { } ''
           ${config.packages.abi-tool}/bin/gen-abi first-system.json first-orchestrator.json
           ${config.packages.abi-tool}/bin/gen-abi second-system.json second-orchestrator.json
-          cmp first-system.json second-system.json
-          cmp first-orchestrator.json second-orchestrator.json
-          cmp first-system.json ${../interfaces/generated/system-abi.json}
+          ${sameBytes "first-system.json" "second-system.json"}
+          ${sameBytes "first-orchestrator.json" "second-orchestrator.json"}
+          ${sameBytes "first-system.json" "${../interfaces/generated/system-abi.json}"}
           touch $out
         '';
+        # The typed contracts, generators and every negative fixture under
+        # tools/abi: the package fails when `zig build test` does.
+        abi-tool = config.packages.abi-tool;
+
+        # Proves the ABI gates can fail. Each half runs a positive control, then
+        # plants one difference: a changed value in a copy of the committed
+        # system JSON (formatting kept, so only the value differs), and one
+        # flipped byte in a copy of the generated tree.
+        abi-negative = pkgs.runCommand "chrysopolis-abi-negative" { } ''
+          ${config.packages.abi-tool}/bin/gen-abi system.json orchestrator.json
+          cp ${../interfaces/generated/system-abi.json} committed.json
+          ${sameBytes "system.json" "committed.json"}
+          ${pkgs.python3}/bin/python - <<'EOF'
+          import pathlib, re
+          text = pathlib.Path("committed.json").read_text()
+          stale, count = re.subn(r'("driver_budget":)([0-9]+)', lambda m: m[1] + str(int(m[2]) + 1), text)
+          assert count == 1, count
+          pathlib.Path("stale.json").write_text(stale)
+          EOF
+          if ${sameBytes "system.json" "stale.json"}; then
+            echo "abi-negative: a stale system projection passed" >&2
+            exit 1
+          fi
+
+          cp -r ${config.packages.orchestrator-abi} tree
+          chmod -R u+w tree
+          ${sameTree "${config.packages.orchestrator-abi}" "tree"}
+          bin=$(find tree/vectors -name '*.bin' | sort | head -n 1)
+          ${pkgs.python3}/bin/python -c 'import sys; p = sys.argv[1]; b = bytearray(open(p, "rb").read()); b[0] ^= 1; open(p, "wb").write(b)' "$bin"
+          if ${sameTree "${config.packages.orchestrator-abi}" "tree"} >/dev/null; then
+            echo "abi-negative: a changed generated tree passed" >&2
+            exit 1
+          fi
+          touch $out
+        '';
+
         # Compile gate for the console-driving probes in tests/. Exposed as a
         # named check, not left as a transitive dependency of .#disk, so that a
         # typo in an .erl file fails in seconds instead of behind a multi-minute
