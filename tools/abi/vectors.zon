@@ -106,6 +106,8 @@
     .{ .name = "ctl_command_magic", .checker = "ctl_command", .edits = .{.{ .byte = .{ .field = "magic", .value = 0 } }}, .expect = .magic },
     .{ .name = "ctl_command_version", .checker = "ctl_command", .edits = .{.{ .set = .{ .field = "version", .value = 2 } }}, .expect = .version },
     .{ .name = "ctl_reply_ok", .checker = "ctl_reply", .expect = .ok },
+    .{ .name = "ctl_reply_already_done", .checker = "ctl_reply", .edits = .{.{ .set = .{ .field = "result", .value = 8 } }}, .expect = .ok },
+    .{ .name = "ctl_reply_stale", .checker = "ctl_reply", .edits = .{.{ .set = .{ .field = "result", .value = 9 } }}, .expect = .ok },
     .{ .name = "ctl_reply_magic", .checker = "ctl_reply", .base = .zeroes, .expect = .magic },
     .{ .name = "ctl_reply_version_zero", .checker = "ctl_reply", .edits = .{.{ .set = .{ .field = "version", .value = 0 } }}, .expect = .version },
 

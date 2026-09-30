@@ -197,6 +197,7 @@
     "kind": "generated-artifact",
     "protects": [
       "restart debug channels do not enter production",
+      "the single BEAM to Root PPC is present without a notification edge",
       "the crasher PD does not enter production",
       "beam_server remains a Root child",
       "the Root to blk_virt give-up channel remains present"
@@ -206,7 +207,18 @@
     "kind": "generated-artifact",
     "protects": [
       "Root child TCB capabilities occupy the expected slots",
-      "fault endpoints, priorities, entries, badges, and notification caps match the SDF and ABI"
+      "fault endpoints, priorities, entries, badges, and notification caps match the SDF and ABI",
+      "the BEAM PPC endpoint badge and slot match the ABI without adding a Root-held capability",
+      "control regions have only the two mapped aliases with one writer each",
+      "each assembled production or restart image independently passes the topology report gate"
+    ]
+  },
+  "restart-topology-negative": {
+    "kind": "generated-artifact",
+    "protects": [
+      "a passing production control report and SDF are followed by independently rejected badge and missing-cap mutations",
+      "a signaling or PPC cap in Root's CNode and a second PPC caller are rejected",
+      "map-right, cache-attribute, and control-window address mutations are rejected"
     ]
   },
   "rng-smoke": {

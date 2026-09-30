@@ -81,6 +81,8 @@ pub const CtlResult = enum(u16) {
     bad_arg = 5,
     bad_version = 6,
     internal_error = 7,
+    already_done = 8,
+    stale = 9,
 };
 
 // This is a decoder result, never a byte in a wire record.
@@ -324,6 +326,15 @@ pub const SpecPage = extern struct {
     banks: [2]SpecBank,
 };
 
+// The four words suffice for a conditional command
+// when allocated as {child/slot, expected Root generation, observed Root
+// transition sequence, operation-specific count or slot generation}. HELLO
+// and SYNC are read-only. Root must advance the sequence on every completed
+// state-changing command and reject a stale observation before invoking any
+// capability. State and fault count alone cannot fence a delayed STOP retry
+// after STOP/RESUME returns a slot to the same state. The command dispatcher
+// must define how commands fail closed if that sequence cannot be observed
+// or published and pin each opcode's argument and reply semantics.
 pub const CtlCommand = extern struct {
     magic: u64,
     version: u16,

@@ -24,6 +24,15 @@ serial_queue_handle_t serial_rx_queue_handle;
 
 uintptr_t beam_heap_start;
 
+/*
+ * Root control-plane views, patched by the Microkit tool (setvar_vaddr in
+ * tools/sdf/system.zig) before _start, like beam_heap_start above. Zero means
+ * the region is not mapped in this image; the devices that consume them treat
+ * that as absent rather than following address 0.
+ */
+uintptr_t root_status_view;
+uintptr_t orchestrator_spec_start;
+
 static bool bytes_are_zero(const void *object, size_t size) {
   const unsigned char *bytes = object;
   for (size_t i = 0; i < size; i++) {

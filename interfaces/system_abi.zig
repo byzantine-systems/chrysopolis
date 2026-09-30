@@ -511,8 +511,8 @@ fn checkVSpace(mappings: []const Mapping, diagnostic: *Diagnostic) !void {
     }
 }
 
-// These declarations describe VSpaces, not SDF mappings. B3/B6 must also
-// inspect the generated SDF and Microkit report before using the new regions.
+// These declarations describe VSpaces, not SDF mappings. Inspect the generated
+// SDF and Microkit report before using the regions.
 pub fn validateSemantics(contract: Contract, diagnostic: *Diagnostic) !void {
     diagnostic.* = .{};
     const pool = contract.pool;

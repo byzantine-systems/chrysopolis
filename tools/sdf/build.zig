@@ -68,6 +68,18 @@ pub fn build(b: *std.Build) void {
         abi.control.status.size,
         abi.control.spec.size,
     });
+    abi_options.addOption(u8, "pp_root_channel", abi.control.pp_channel.root);
+    abi_options.addOption(u8, "pp_beam_channel", abi.control.pp_channel.beam);
+    abi_options.addOption(u64, "status_size", abi.control.status.size);
+    abi_options.addOption(u64, "status_root_vaddr", abi.control.status.root_vaddr);
+    abi_options.addOption(u64, "status_beam_vaddr", abi.control.status.beam_vaddr);
+    abi_options.addOption([]const u8, "status_root_setvar", abi.control.status.root_setvar);
+    abi_options.addOption([]const u8, "status_beam_setvar", abi.control.status.beam_setvar);
+    abi_options.addOption(u64, "spec_size", abi.control.spec.size);
+    abi_options.addOption(u64, "spec_root_vaddr", abi.control.spec.root_vaddr);
+    abi_options.addOption(u64, "spec_beam_vaddr", abi.control.spec.beam_vaddr);
+    abi_options.addOption([]const u8, "spec_root_setvar", abi.control.spec.root_setvar);
+    abi_options.addOption([]const u8, "spec_beam_setvar", abi.control.spec.beam_setvar);
     abi_options.addOption(u8, "pool_slots", abi.pool.slots);
     abi_options.addOption(u64, "pool_beam_window_stride", abi.pool.beam_window_stride);
     abi_options.addOption([4]u64, "pool_beam_base_vaddrs", .{
