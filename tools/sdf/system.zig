@@ -140,6 +140,31 @@ pub fn main() !void {
     sdf.addMemoryRegion(beam_snapshot);
     beam_server.addMap(Map.create(beam_snapshot, abi.snapshot_vaddr, .rw, .{ .setvar_vaddr = abi.snapshot_setvar }));
 
+    // Root control-plane regions: root_status is written only by Root and
+    // read by BEAM; orchestrator_spec is written only by BEAM and read by
+    // Root. Map rights enforce the one-writer rule the architecture states:
+    // the status region is rw in Root and r in beam_server, the spec region is
+    // rw in beam_server and r in Root. Both maps carry the setvar_vaddr symbol
+    // the Microkit tool patches into each ELF, so src/pd/root/main.c and
+    // src/pd/beam/config/runtime_config.c hold the two patched globals; a
+    // missing symbol is a hard image-build error, not a silent zero.
+    //
+    // Addresses come from system_abi.zig (not sdfgen's auto-allocator) because
+    // both PDs must agree on a fixed window and the ABI validator checks the
+    // windows against the heap, snapshot and exit-fault ranges. Neither map
+    // sets cached: the Microkit default is cacheable on both aliases, and the
+    // ABI rejects an uncached control region, so an alias-attribute mismatch
+    // cannot be expressed here without failing validation elsewhere.
+    const root_status = Mr.create(allocator, "root_status", abi.status_size, .{});
+    sdf.addMemoryRegion(root_status);
+    root.addMap(Map.create(root_status, abi.status_root_vaddr, .rw, .{ .setvar_vaddr = abi.status_root_setvar }));
+    beam_server.addMap(Map.create(root_status, abi.status_beam_vaddr, .r, .{ .setvar_vaddr = abi.status_beam_setvar }));
+
+    const orchestrator_spec = Mr.create(allocator, "orchestrator_spec", abi.spec_size, .{});
+    sdf.addMemoryRegion(orchestrator_spec);
+    beam_server.addMap(Map.create(orchestrator_spec, abi.spec_beam_vaddr, .rw, .{ .setvar_vaddr = abi.spec_beam_setvar }));
+    root.addMap(Map.create(orchestrator_spec, abi.spec_root_vaddr, .r, .{ .setvar_vaddr = abi.spec_root_setvar }));
+
     _ = try root.addChild(&beam_server, .{ .id = abi.child_beam });
 
     // Serial subsystem: PL011 driver + TX/RX virtualisers. beam_server is the
@@ -335,7 +360,9 @@ pub fn main() !void {
     }));
 
     // All channels involving beam_server so far were allocated by the sDDF
-    // helpers. Fixed orchestration ids begin at this floor in a later phase.
+    // helpers, and every one of those ids must stay below the dynamic floor:
+    // the ids at and above it are the fixed orchestration block reserved in
+    // system_abi.zig. The first fixed occupant arrives right after this loop.
     for (sdf.channels.items) |channel| {
         const beam_id: ?u8 = if (channel.pd_a == &beam_server)
             channel.pd_a_id
@@ -350,6 +377,41 @@ pub fn main() !void {
             }
         }
     }
+
+    // The control channel: beam_server -> root, a protected procedure call.
+    // pp=true on the beam end mints an ENDPOINT cap (not a notification cap)
+    // into cnode_beam_server at BASE_ENDPOINT_CAP + the beam channel id, badged
+    // with the PPC bit plus root's channel id. Both ends carry notify=false:
+    // the root end denies the reverse signal, so Root's notified() stays
+    // unreachable and cnode_root gains nothing, and the beam end suppresses
+    // the notification object the tool would otherwise mint there (an
+    // ntfn_root cap in cnode_beam_server). The sDDF timer client PPC is the
+    // precedent: notify=false plus pp=true on the calling end.
+    //
+    // Declared after the dynamic-floor loop above because both ids are pinned
+    // in system_abi.zig rather than allocated: the loop guards the
+    // helper-allocated ids, and this channel is the intended exception that
+    // ends the reserved block's emptiness. Production and restart images both
+    // carry it: Root's control plane is not a test affordance.
+    //
+    // PPC requires the callee to outrank the caller (root 254 > beam_server 1);
+    // the Microkit tool enforces that at image build. Microkit validates the
+    // caller's PPC id against its patched microkit_pps bitmask at runtime, and
+    // an undeclared id is a silent no-op in release builds, so
+    // nix/check-restart-topology.sh proves the cap, slot and badge from
+    // report.txt rather than trusting the SDF alone.
+    sdf.addChannel(try Channel.create(&beam_server, &root, .{
+        .pd_a_id = abi.pp_beam_channel,
+        .pd_b_id = abi.pp_root_channel,
+        .pp = .a,
+        .pd_a_notify = false,
+        .pd_b_notify = false,
+    }));
+
+    // The control windows are now occupied by the maps above, so the reserved
+    // window guard below must skip exactly those two maps. Any other map
+    // landing on the window is still an error: it would shadow or be shadowed
+    // by a control region in beam_server's VSpace.
 
     // Test-only restart and fault-injection channels (see the
     // --with-restart-debug comment at the top). Two channels per restartable
@@ -425,6 +487,13 @@ pub fn main() !void {
         return error.UnexpectedProtectionDomainCount;
     }
 
+    const is_control_map = struct {
+        fn is(name: []const u8) bool {
+            return std.mem.eql(u8, name, "root_status") or
+                std.mem.eql(u8, name, "orchestrator_spec");
+        }
+    }.is;
+
     for (beam_server.maps.items) |map| {
         const lo = map.vaddr;
         const hi = map.vaddr + map.mr.size;
@@ -436,6 +505,20 @@ pub fn main() !void {
                 .{ map.mr.name, lo, hi, abi.exit_fault_base },
             );
             std.process.exit(1);
+        }
+        // The two control maps are the intended occupants of the reserved
+        // windows: assert they sit at exactly the ABI address rather than
+        // letting any map named like a control region through.
+        if (is_control_map(map.mr.name)) {
+            const expected: u64 = if (std.mem.eql(u8, map.mr.name, "root_status"))
+                abi.status_beam_vaddr
+            else
+                abi.spec_beam_vaddr;
+            if (lo != expected) {
+                std.debug.print("control map '{s}' sits at 0x{x}, expected 0x{x}\n", .{ map.mr.name, lo, expected });
+                return error.ControlWindowMismatch;
+            }
+            continue;
         }
         for (abi.control_beam_vaddrs, abi.control_sizes) |base, size| {
             if (try rangesOverlap(lo, map.mr.size, base, size)) {
@@ -451,6 +534,20 @@ pub fn main() !void {
                     std.debug.print("beam_server map '{s}' overlaps reserved slot {d} window 0x{x}\n", .{ map.mr.name, slot, window });
                     return error.ReservedBeamWindowMapped;
                 }
+            }
+        }
+    }
+
+    // Root's side of the control window is small but equally reserved: the
+    // ABI validator checks the two root vaddrs against each other, and this
+    // keeps any future sdfgen-allocated Root map off them. Root holds no
+    // other maps today.
+    for (root.maps.items) |map| {
+        if (is_control_map(map.mr.name)) continue;
+        for ([_]u64{ abi.status_root_vaddr, abi.spec_root_vaddr }, abi.control_sizes) |base, size| {
+            if (try rangesOverlap(map.vaddr, map.mr.size, base, size)) {
+                std.debug.print("root map '{s}' overlaps reserved control window 0x{x}\n", .{ map.mr.name, base });
+                return error.ReservedRootWindowMapped;
             }
         }
     }

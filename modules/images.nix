@@ -324,11 +324,17 @@
                   fi
                   ;;
               esac
-              # The heap and snapshot are SDF maps, and the exit-fault range
-              # must stay unmapped: none of them may land on the ELF image.
+              # The heap, snapshot and control windows are SDF maps, and the
+              # exit-fault range must stay unmapped: none of them may land on
+              # the ELF image. The control windows (root_status,
+              # orchestrator_spec) are mapped into beam_server by the
+              # generated topology, so an ELF segment over them would alias
+              # code or data with a shared page.
               for range in \
                 "heap ${toString runtimeAbi.memory.heap.vaddr} ${toString runtimeAbi.memory.heap.size}" \
                 "snapshot ${toString runtimeAbi.memory.snapshot.vaddr} ${toString runtimeAbi.memory.snapshot.size}" \
+                "control-status ${toString runtimeAbi.control.status.beam_vaddr} ${toString runtimeAbi.control.status.size}" \
+                "control-spec ${toString runtimeAbi.control.spec.beam_vaddr} ${toString runtimeAbi.control.spec.size}" \
                 "exit-fault ${toString runtimeAbi.restart.exit_fault_base} ${toString runtimeAbi.restart.exit_fault_size}"; do
                 read -r range_name range_start range_size <<< "$range"
                 if [ $(( range_start < load_end && load_start < range_start + range_size )) -eq 1 ]; then
@@ -350,6 +356,28 @@
             fi
             echo "restart-layout: _reset=$beam_reset executable," \
                  "writable segment $seg_start..$bss_end"
+
+            # Root's control windows (root_status rw, orchestrator_spec r)
+            # are SDF maps at fixed ABI addresses; no root.elf segment may
+            # cover them, or Root's image would alias its shared pages.
+            root_loads=$(load_segments root.elf)
+            if [ -z "$root_loads" ]; then
+              echo "root-layout: root.elf has no PT_LOAD segments" >&2
+              exit 1
+            fi
+            while read -r load_start load_size load_flags; do
+              load_end=$(( load_start + load_size ))
+              for range in \
+                "control-status ${toString runtimeAbi.control.status.root_vaddr} ${toString runtimeAbi.control.status.size}" \
+                "control-spec ${toString runtimeAbi.control.spec.root_vaddr} ${toString runtimeAbi.control.spec.size}"; do
+                read -r range_name range_start range_size <<< "$range"
+                if [ $(( range_start < load_end && load_start < range_start + range_size )) -eq 1 ]; then
+                  echo "root-layout: root.elf PT_LOAD $load_start+$load_size" \
+                       "overlaps the $range_name range at $range_start" >&2
+                  exit 1
+                fi
+              done
+            done <<< "$root_loads"
 
             : > restart_entry.bin
             emit_u64 restart_entry.bin "$se"          # shared child _start

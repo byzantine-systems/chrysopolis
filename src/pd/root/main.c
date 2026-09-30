@@ -112,6 +112,18 @@ __attribute__((__section__(ROOT_RESTART_CONFIG_SECTION),
 #define beam_reset_entry (restart_config.beam_reset_entry)
 
 /*
+ * Root control-plane regions, patched by the Microkit tool (setvar_vaddr in
+ * tools/sdf/system.zig) before _start. root_status is Root's single-writer
+ * status page; orchestrator_spec is BEAM's committed policy page, read-only
+ * here. Unlike the section above there is no objcopy step: the tool patches
+ * these symbols directly, so a missing symbol fails the image build loudly.
+ * Zero means the region is not mapped in this image. A bare `zig build` plus
+ * `microkit` run also leaves it zero, and no code may follow it.
+ */
+uintptr_t root_status_start;
+uintptr_t orchestrator_spec_view;
+
+/*
  * The children system_abi.zig declares, one bit per child id. fault() only
  * turns a raw id into a root_child when its bit is set, so the budget table is
  * never indexed and BASE_TCB_CAP + id is never invoked for anything else.

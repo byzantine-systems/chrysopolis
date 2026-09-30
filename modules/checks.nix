@@ -365,6 +365,16 @@
             require_line "$sdf" '<map mr="beam_heap" vaddr="${hex runtimeAbi.memory.heap.vaddr}" perms="rw" setvar_vaddr="${runtimeAbi.memory.heap.setvar}" />'
             require_line "$sdf" '<map mr="beam_snapshot" vaddr="${hex runtimeAbi.memory.snapshot.vaddr}" perms="rw" setvar_vaddr="${runtimeAbi.memory.snapshot.setvar}" />'
             require_line "$sdf" '<protection_domain name="beam_server" id="${toString runtimeAbi.children.beam}"'
+            # Root control plane: both regions in every image, with the exact
+            # one-writer rights and setvar symbols from the ABI.
+            require_line "$sdf" '<memory_region name="root_status" size="${hex runtimeAbi.control.status.size}"'
+            require_line "$sdf" '<memory_region name="orchestrator_spec" size="${hex runtimeAbi.control.spec.size}"'
+            require_line "$sdf" '<map mr="root_status" vaddr="${hex runtimeAbi.control.status.root_vaddr}" perms="rw" setvar_vaddr="${runtimeAbi.control.status.root_setvar}" />'
+            require_line "$sdf" '<map mr="root_status" vaddr="${hex runtimeAbi.control.status.beam_vaddr}" perms="r" setvar_vaddr="${runtimeAbi.control.status.beam_setvar}" />'
+            require_line "$sdf" '<map mr="orchestrator_spec" vaddr="${hex runtimeAbi.control.spec.beam_vaddr}" perms="rw" setvar_vaddr="${runtimeAbi.control.spec.beam_setvar}" />'
+            require_line "$sdf" '<map mr="orchestrator_spec" vaddr="${hex runtimeAbi.control.spec.root_vaddr}" perms="r" setvar_vaddr="${runtimeAbi.control.spec.root_setvar}" />'
+            require_channel "$sdf" 'pd="beam_server" id="${toString runtimeAbi.control.pp_channel.beam}" notify="false" pp="true"' \
+                                   'pd="root" id="${toString runtimeAbi.control.pp_channel.root}" notify="false"'
             ${pkgs.lib.concatMapStringsSep "\n            " (driver: ''
               require_line "$sdf" '<protection_domain name="${driver.name}_driver" id="${toString driver.child}"'
             '') drivers}
@@ -408,11 +418,6 @@
         production-sdf-gate = pkgs.runCommand "chrysopolis-production-sdf-gate" { } ''
           sdf=${config.packages.sdf}/system.sdf
 
-          # The debug-restart channels are root <-> beam_server. Root legitimately
-          # has ONE production channel (root -> blk_virt, the give-up
-          # notification), so the gate can no longer be "root has no channels";
-          # it has to name the pairing that must not exist.
-          #
           # Matched per <channel> element rather than per line: the two ends are
           # on separate lines, so a file-wide grep for each PD name would also
           # match root's give-up channel and beam_server's unrelated ones and
@@ -429,8 +434,33 @@
             ' "$3"
           }
 
-          if channel_pair root beam_server "$sdf" >&2; then
-            echo "production SDF has a root <-> beam_server channel (restart/fault injection leak)" >&2
+          # root <-> beam_server channels: exactly one is allowed, the
+          # protected procedure call, and it must carry the ABI's pinned ids
+          # with pp on the beam end. Anything else between the two PDs is a
+          # notification edge: beam_server could poke root's notified(), which
+          # production must keep unreachable (the restart/fault-injection
+          # channels are the restart image's test affordance, and a stray
+          # notification would be exactly that leak).
+          ppc_seen=0
+          while IFS= read -r block; do
+            if grep -q 'pp="true"' <<<"$block"; then
+              ppc_seen=$((ppc_seen + 1))
+              grep -q "pd=\"beam_server\" id=\"${toString runtimeAbi.control.pp_channel.beam}\"" <<<"$block" || {
+                  echo "production PPC channel does not use ABI beam id ${toString runtimeAbi.control.pp_channel.beam}" >&2
+                  exit 1
+                }
+              grep -q "pd=\"root\" id=\"${toString runtimeAbi.control.pp_channel.root}\"" <<<"$block" || {
+                  echo "production PPC channel does not use ABI root id ${toString runtimeAbi.control.pp_channel.root}" >&2
+                  exit 1
+                }
+            else
+              echo "production SDF has a root <-> beam_server channel without pp (notification leak):" >&2
+              printf '%s\n' "$block" >&2
+              exit 1
+            fi
+          done < <(channel_pair root beam_server "$sdf")
+          if [ "$ppc_seen" -ne 1 ]; then
+            echo "production SDF has $ppc_seen root <-> beam_server pp channels, expected exactly 1" >&2
             exit 1
           fi
 
@@ -501,12 +531,67 @@
           # which PDs fault to Root, their entry and priority, Root's TCB caps
           # and the notification caps between Root and its peers, read from
           # report.txt and cross-checked against the generated SDF and
-          # system-abi.json. Check production and both restart images because
-          # the latter add the crasher and debug channels.
+          # system-abi.json. Check every assembled image: production SDF users
+          # include the bring-up, ERTS, cothread-probe and config-failure
+          # images; both restart images add the crasher and debug channels.
           restart-topology = pkgs.runCommand "chrysopolis-restart-topology" { } ''
             ${checkTopology "production" config.packages.default config.packages.sdf}
+            ${checkTopology "production" config.packages.test-image config.packages.sdf}
+            ${checkTopology "production" config.packages.cothread-probe-image config.packages.sdf}
+            ${checkTopology "production" config.packages.lifecycle-failure-image config.packages.sdf}
             ${checkTopology "restart" config.packages.restart-image config.packages.sdf-restart}
             ${checkTopology "restart" config.packages.budget-decay-image config.packages.sdf-restart}
+            touch $out
+          '';
+
+          # Proves the control-plane half of restart-topology can fail. Takes
+          # the production report and SDF, passes them through the checker
+          # untouched (the control), then plants one difference per case: a
+          # wrong or deleted PPC badge, a signaling or PPC cap in Root's CNode,
+          # a drifted fault badge, a one-writer rights flip, a cache-attribute
+          # alias mismatch and a moved control window. Each planted case must
+          # be rejected; a vacuous mutation aborts the fixture generator.
+          restart-topology-negative = pkgs.runCommand "chrysopolis-restart-topology-negative" { } ''
+            base_endpoint=$(awk '$1 == "#define" && $2 == "BASE_ENDPOINT_CAP" { print $3; exit }' \
+              ${chryso.boardDir}/include/microkit.h)
+            pp_beam=${toString runtimeAbi.control.pp_channel.beam}
+            pp_root=${toString runtimeAbi.control.pp_channel.root}
+            ppc_badge=$(printf '0x%x' $((0x8000000000000000 | pp_root)))
+            fault_badge=$(printf '0x%x' $((0x4000000000000000 | ${toString runtimeAbi.children.beam})))
+            ${pkgs.python3}/bin/python ${../nix/mutate-topology-fixtures.py} \
+              ${config.packages.default}/report.txt ${config.packages.sdf}/system.sdf \
+              $TMPDIR/fixtures \
+              --ppc-slot $((base_endpoint + pp_beam)) \
+              --ppc-badge "$ppc_badge" \
+              --fault-badge "$fault_badge"
+            ${checkTopology "production" "$TMPDIR/fixtures/control" "$TMPDIR/fixtures/control"}
+            for case_dir in $TMPDIR/fixtures/fail-*; do
+              if ${pkgs.lib.getExe config.packages.check-restart-topology} \
+                   "$case_dir/report.txt" "$case_dir/system.sdf" \
+                   ${chryso.boardDir}/include/microkit.h \
+                   ${../interfaces/generated/system-abi.json} production \
+                   >/dev/null 2>"$TMPDIR/err"; then
+                echo "restart-topology-negative: $(basename "$case_dir") passed a planted failure" >&2
+                exit 1
+              fi
+              case $(basename "$case_dir") in
+                fail-ppc-badge) expected='PPC badge' ;;
+                fail-ppc-cap-removed) expected='does not hold exactly 2 ep_root cap' ;;
+                fail-root-signal) expected='signaling cap to beam_server' ;;
+                fail-ppc-in-root) expected='carries the PPC badge' ;;
+                fail-second-ppc-caller) expected='unauthorized PPC cap to Root' ;;
+                fail-fault-badge) expected='no fault-badged ep_root cap' ;;
+                fail-status-write | fail-spec-write) expected='maps .* with perms' ;;
+                fail-alias-attribute) expected='sets a cache attribute' ;;
+                fail-vaddr) expected='maps root_status at' ;;
+                *) echo "restart-topology-negative: unexpected fixture $case_dir" >&2; exit 1 ;;
+              esac
+              if ! grep -Eq "$expected" "$TMPDIR/err"; then
+                echo "restart-topology-negative: $(basename "$case_dir") failed for the wrong reason:" >&2
+                cat "$TMPDIR/err" >&2
+                exit 1
+              fi
+            done
             touch $out
           '';
 

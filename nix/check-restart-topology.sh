@@ -6,7 +6,10 @@
 # The generated SDF says what we asked for; the Microkit tool's report.txt says
 # what it built. This checks the second against system-abi.json and the first:
 # which PDs fault to Root, at what entry and priority, which TCB caps Root
-# holds, and which notification caps connect Root to its peers.
+# holds, which notification caps connect Root to its peers, and the control
+# plane: the one BEAM -> Root PPC cap (slot, object and badge in beam_server's
+# CNode), the absence of any signaling or PPC cap in Root's CNode, and the
+# one-writer rights of the root_status and orchestrator_spec maps in the SDF.
 #
 # The Microkit manual calls report.txt human-readable only, with no stable
 # format. This parser is written against the Microkit 2.3.0 layout and fails
@@ -55,6 +58,17 @@ define_of() {
 }
 base_tcb=$(define_of BASE_TCB_CAP)
 base_notify=$(define_of BASE_OUTPUT_NOTIFICATION_CAP)
+base_endpoint=$(define_of BASE_ENDPOINT_CAP)
+
+# Badge classes the Microkit 2.3.0 tool mints. microkit.h does not name them:
+# bit 62 marks a child fault delivered on the parent's ep_root, bit 63 marks a
+# protected procedure call, and the low bits carry the child id (fault)
+# or the callee's channel (PPC). The timer client PPC already in this image
+# (badge 0x8000000000000001) pins the layout these constants parse. Bash hex
+# literals at bit 63 wrap negative; every comparison below is bitwise, so the
+# wrap is harmless.
+fault_badge_bit=0x4000000000000000
+ppc_badge_bit=0x8000000000000000
 
 # The lines of one report block: "TCB tcb_x" or "CNode cnode_x". A block ends
 # at the next block or section heading.
@@ -118,6 +132,53 @@ sdf_attr() {
   ' "$sdf"
 }
 
+# The size="0x..." of one <memory_region> in the SDF.
+mr_size() {
+  awk -v name="name=\"$1\" " '
+    index($0, "<memory_region ") && index($0, name) && !found {
+      found = 1
+      if (match($0, /size="0x[0-9a-f]+"/)) {
+        print substr($0, RSTART + 6, RLENGTH - 7)
+        matched = 1
+      }
+    }
+    END { exit(matched ? 0 : 1) }
+  ' "$sdf"
+}
+
+# The <map> lines belonging DIRECTLY to one protection_domain element. PD
+# elements nest (beam_server sits inside root), so this counts real depth and
+# keeps a child's maps out of its parent's block; production-sdf-gate uses the
+# same technique for the nesting check.
+pd_maps() {
+  awk -v name="$1" '
+    /<protection_domain / {
+      depth++
+      if (!inside && index($0, "name=\"" name "\"")) { inside = depth; next }
+    }
+    inside && depth == inside && /<map / { print }
+    /<\/protection_domain>/ {
+      if (inside && depth == inside) exit
+      depth--
+    }
+  ' "$sdf"
+}
+
+# One attribute of the <map mr="..."> line of one PD. Fails when the PD maps
+# the region without the attribute at all.
+map_attr() {
+  pd_maps "$1" | awk -v mr="mr=\"$2\" " -v attr="$3" '
+    index($0, "<map ") && index($0, mr) && !found {
+      found = 1
+      if (match($0, " " attr "=\"[^\"]*\"")) {
+        print substr($0, RSTART + length(attr) + 3, RLENGTH - length(attr) - 4)
+        matched = 1
+      }
+    }
+    END { exit(matched ? 0 : 1) }
+  '
+}
+
 # Root's children, by PD name, from system-abi.json. The crasher exists only
 # in the restart image.
 declare -A children=()
@@ -166,12 +227,22 @@ for name in "${!children[@]}"; do
     fail "cnode_root slot $((base_tcb + id)) holds '${object:-nothing}', not $tcb"
 
   # The child's fault endpoint cap carries its id in the badge's low byte.
+  # beam_server holds exactly one more ep_root cap: the control PPC cap, verified
+  # in the control-plane section below. Every other child holds exactly one.
   fault_caps=$(cnode_table "cnode_$name" | awk '$2 == "ep_root"')
-  [ "$(wc -l <<<"$fault_caps")" -eq 1 ] && [ -n "$fault_caps" ] ||
-    fail "cnode_$name does not hold exactly one ep_root cap"
-  read -r _ _ badge <<<"$fault_caps"
-  [[ $badge =~ ^0x[0-9a-fA-F]+$ ]] || layout_changed "cnode_$name ep_root badge is '$badge'"
-  (((badge & 0xff) == id)) || fail "cnode_$name ep_root badge $badge does not carry id $id"
+  expected_eps=1
+  [ "$name" = beam_server ] && expected_eps=2
+  [ "$(wc -l <<<"$fault_caps")" -eq "$expected_eps" ] && [ -n "$fault_caps" ] ||
+    fail "cnode_$name does not hold exactly $expected_eps ep_root cap(s)"
+  fault_badge_found=0
+  while read -r slot _ badge; do
+    [[ $badge =~ ^0x[0-9a-fA-F]+$ ]] || layout_changed "cnode_$name ep_root badge is '$badge'"
+    if ((slot == 2 && badge == (fault_badge_bit | id))); then
+      fault_badge_found=1
+    fi
+  done <<<"$fault_caps"
+  [ "$fault_badge_found" -eq 1 ] ||
+    fail "cnode_$name holds no fault-badged ep_root cap at slot 2 carrying id $id"
 done
 
 # No other PD faults to Root.
@@ -193,6 +264,157 @@ gone_channel=$(jq -r '.giveup.root_blk_channel' "$abi")
 read -r object _ <<<"$(cnode_slot cnode_root $((base_notify + gone_channel)))"
 [ "${object:-}" = ntfn_blk_virt ] ||
   fail "cnode_root slot $((base_notify + gone_channel)) holds '${object:-nothing}', not ntfn_blk_virt"
+
+# --- Root control plane -----------------------------------------------------
+# The transport is asymmetric by design: one PPC channel (beam_server calls,
+# Root serves on the ep_root it already owns) and two one-writer memory
+# regions. The PPC endpoint cap lives only in the CALLER's CNode, so every
+# control-plane capability Root gains here must be zero; report.txt proves
+# that, and the SDF proves the map rights report.txt does not carry.
+pp_root=$(jq -r '.control.pp_channel.root' "$abi")
+pp_beam=$(jq -r '.control.pp_channel.beam' "$abi")
+status_size=$(jq -r '.control.status.size' "$abi")
+spec_size=$(jq -r '.control.spec.size' "$abi")
+
+# beam_server holds the PPC cap at the endpoint slot for its channel id,
+# badged with the PPC bit plus Root's channel id.
+ppc_slot=$((base_endpoint + pp_beam))
+read -r object badge <<<"$(cnode_slot cnode_beam_server "$ppc_slot")"
+[ "${object:-}" = ep_root ] ||
+  fail "cnode_beam_server slot $ppc_slot holds '${object:-nothing}', not the PPC endpoint cap"
+[[ ${badge:-} =~ ^0x[0-9a-fA-F]+$ ]] || layout_changed "cnode_beam_server PPC badge is '${badge:-}'"
+((badge == (ppc_badge_bit | pp_root))) ||
+  fail "cnode_beam_server PPC badge $badge is not PPC|$pp_root"
+
+# No other PD may call Root through a PPC endpoint. Fault caps also name
+# ep_root, but use the distinct fault badge bit; the only PPC-badged ep_root
+# across every CNode must be the BEAM cap checked above.
+ppc_caps=0
+while read -r cnode; do
+  while read -r slot cap cap_badge; do
+    [ "$cap" = ep_root ] || continue
+    [[ $cap_badge =~ ^0x[0-9a-fA-F]+$ ]] || layout_changed "$cnode slot $slot ep_root badge is '$cap_badge'"
+    if ((cap_badge & ppc_badge_bit)); then
+      if [ "$cnode" != cnode_beam_server ] ||
+         ((slot != ppc_slot || cap_badge != (ppc_badge_bit | pp_root))); then
+        fail "$cnode slot $slot holds an unauthorized PPC cap to Root"
+      fi
+      ppc_caps=$((ppc_caps + 1))
+    fi
+  done < <(cnode_table "$cnode")
+done < <(awk -F"'" '/^\t- CNode: / { print $2 }' "$report")
+[ "$ppc_caps" -eq 1 ] || fail "found $ppc_caps PPC caps to Root, expected exactly one"
+
+# Root gains no capability for the control plane: no signaling cap to
+# beam_server of any kind, and no PPC-badged cap anywhere in its CNode.
+root_leaks=$(cnode_table cnode_root | awk '$2 == "ntfn_beam_server" || $2 == "ep_beam_server"')
+[ -z "$root_leaks" ] ||
+  fail "cnode_root holds a signaling cap to beam_server: $root_leaks"
+while read -r slot _ rbadge; do
+  [ "$rbadge" = "-" ] && continue
+  [[ $rbadge =~ ^0x[0-9a-fA-F]+$ ]] || layout_changed "cnode_root slot $slot badge is '$rbadge'"
+  (((rbadge & ppc_badge_bit) == 0)) ||
+    fail "cnode_root slot $slot carries the PPC badge $rbadge; the cap belongs in the caller's CNode"
+done < <(cnode_table cnode_root)
+
+# In this pinned topology, the only Root-held slots besides its own entry,
+# VSpace and reply caps are the give-up notification and one TCB per declared
+# child. Check the complete set so an unexpected cap cannot escape the
+# narrower "no cap to beam_server" predicate above.
+while read -r slot object _; do
+  case $slot in
+    1) expected_object=ep_root ;;
+    2) expected_object=ep_fault_monitor ;;
+    3) expected_object=pud_root ;;
+    4) expected_object=reply_root ;;
+    "$((base_notify + gone_channel))") expected_object=ntfn_blk_virt ;;
+    *)
+      expected_object=
+      for name in "${!children[@]}"; do
+        if ((slot == base_tcb + children[$name])); then
+          expected_object=tcb_$name
+          break
+        fi
+      done
+      ;;
+  esac
+  [ -n "$expected_object" ] && [ "$object" = "$expected_object" ] ||
+    fail "cnode_root slot $slot holds unexpected cap $object"
+done < <(cnode_table cnode_root)
+
+# One-writer map rights, read from the SDF the tool consumed (report.txt has
+# no mapping section). Each map must sit at the ABI vaddr with the ABI setvar
+# symbol, and neither may set a cache attribute: the ABI requires both aliases
+# cacheable, and one side pinning cached="false" while the other keeps the
+# default would alias one region under two memory attributes.
+check_control_map() {
+  local pd=$1 mr=$2 perms=$3 vaddr=$4 setvar=$5
+  local mapped
+  mapped=$(pd_maps "$pd" | awk -v name="mr=\"$mr\" " 'index($0, "<map ") && index($0, name) { n++ } END { print n+0 }')
+  [ "$mapped" -eq 1 ] || fail "$pd has $mapped maps of $mr, expected exactly one"
+  [ "$(map_attr "$pd" "$mr" perms)" = "$perms" ] ||
+    fail "$pd maps $mr with perms '$(map_attr "$pd" "$mr" perms)', expected $perms"
+  [ "$(map_attr "$pd" "$mr" vaddr)" = "$vaddr" ] ||
+    fail "$pd maps $mr at '$(map_attr "$pd" "$mr" vaddr)', expected $vaddr"
+  [ "$(map_attr "$pd" "$mr" setvar_vaddr)" = "$setvar" ] ||
+    fail "$pd maps $mr with setvar '$(map_attr "$pd" "$mr" setvar_vaddr)', expected $setvar"
+  if map_attr "$pd" "$mr" cached >/dev/null; then
+    fail "$pd's $mr map sets a cache attribute; both aliases must keep the default"
+  fi
+}
+
+status_root_vaddr=$(printf '0x%x' "$(jq -r '.control.status.root_vaddr' "$abi")")
+status_beam_vaddr=$(printf '0x%x' "$(jq -r '.control.status.beam_vaddr' "$abi")")
+spec_root_vaddr=$(printf '0x%x' "$(jq -r '.control.spec.root_vaddr' "$abi")")
+spec_beam_vaddr=$(printf '0x%x' "$(jq -r '.control.spec.beam_vaddr' "$abi")")
+check_control_map root root_status rw "$status_root_vaddr" "$(jq -r '.control.status.root_setvar' "$abi")"
+check_control_map beam_server root_status r "$status_beam_vaddr" "$(jq -r '.control.status.beam_setvar' "$abi")"
+check_control_map beam_server orchestrator_spec rw "$spec_beam_vaddr" "$(jq -r '.control.spec.beam_setvar' "$abi")"
+check_control_map root orchestrator_spec r "$spec_root_vaddr" "$(jq -r '.control.spec.root_setvar' "$abi")"
+for mr in root_status orchestrator_spec; do
+  [ "$(grep -Fc "<memory_region name=\"$mr\" " "$sdf")" -eq 1 ] ||
+    fail "the SDF must declare exactly one $mr memory region"
+  [ "$(grep -Fc "<map mr=\"$mr\" " "$sdf")" -eq 2 ] ||
+    fail "$mr must have exactly the Root and BEAM mappings"
+done
+
+status_size_hex=$(printf '0x%x' "$status_size")
+spec_size_hex=$(printf '0x%x' "$spec_size")
+[ "$(mr_size root_status)" = "$status_size_hex" ] ||
+  fail "root_status is $(mr_size root_status) bytes in the SDF, expected $status_size_hex"
+[ "$(mr_size orchestrator_spec)" = "$spec_size_hex" ] ||
+  fail "orchestrator_spec is $(mr_size orchestrator_spec) bytes in the SDF, expected $spec_size_hex"
+
+# The PPC channel itself: both ends pinned from the ABI, pp on the beam end
+# only, and notify off on both ends.
+ppc_channel=$(awk '
+  /<channel>/   { inside = 1; block = "" }
+  inside        { block = block $0 "\n" }
+  /<\/channel>/ {
+    inside = 0
+    if (index(block, "pd=\"beam_server\"") && index(block, "pd=\"root\"") && index(block, "pp=\"true\""))
+      { printf "%s", block; found = 1 }
+  }
+  END           { exit(found ? 0 : 1) }
+' "$sdf") || fail "the SDF has no beam_server -> root pp channel"
+# Attribute order on a channel end line is the renderer's choice, so match
+# each end as a line that carries all three of its required attributes.
+awk -v id="$pp_beam" '
+  /pd="beam_server"/ {
+    ok = index($0, "id=\"" id "\"") && index($0, "pp=\"true\"") && index($0, "notify=\"false\"")
+    seen = 1
+    exit
+  }
+  END { exit(seen && ok ? 0 : 1) }
+' <<<"$ppc_channel" || fail "the PPC channel's beam end is not id $pp_beam with pp and no notify"
+awk -v id="$pp_root" '
+  /pd="root"/ {
+    ok = index($0, "id=\"" id "\"") && index($0, "notify=\"false\"")
+    seen = 1
+    exit
+  }
+  END { exit(seen && ok ? 0 : 1) }
+' <<<"$ppc_channel" || fail "the PPC channel's root end is not id $pp_root with notify=false"
 
 # beam_server -> root restart channels: every one in the restart image, none
 # in production.

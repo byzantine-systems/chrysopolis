@@ -133,6 +133,22 @@ test "per-PD VSpace checks allow reuse only across distinct workers" {
     try expectInvalid(bad, "control.spec.root_vaddr", "no overlap within one VSpace");
 
     bad = system.values;
+    bad.control.spec.beam_vaddr = bad.control.status.beam_vaddr;
+    try expectInvalid(bad, "control.spec.beam_vaddr", "no overlap within one VSpace");
+
+    bad = system.values;
+    bad.control.status.beam_vaddr = bad.memory.snapshot.vaddr;
+    try expectInvalid(bad, "control.status.beam_vaddr", "no overlap within one VSpace");
+
+    bad = system.values;
+    bad.control.spec.beam_vaddr = bad.memory.heap.vaddr;
+    try expectInvalid(bad, "control.spec.beam_vaddr", "no overlap within one VSpace");
+
+    bad = system.values;
+    bad.control.status.beam_vaddr = bad.restart.exit_fault_base;
+    try expectInvalid(bad, "control.status.beam_vaddr", "no overlap within one VSpace");
+
+    bad = system.values;
     bad.pool.status.worker_vaddr = bad.pool.identity.worker_vaddr;
     try expectInvalid(bad, "pool.status.worker_vaddr", "no overlap within one VSpace");
 

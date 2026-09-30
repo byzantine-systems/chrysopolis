@@ -59,6 +59,16 @@ _Static_assert(
 extern uintptr_t beam_heap_start;
 
 /*
+ * Root control-plane views mapped into beam_server by the generated topology:
+ * root_status is read-only here (Root is the single writer), the spec region is
+ * read-write here (BEAM is the single writer). The image tool patches both
+ * addresses before _start; zero means the region is absent in this image, and
+ * consumers must treat that as absent rather than dereference it.
+ */
+extern uintptr_t root_status_view;
+extern uintptr_t orchestrator_spec_start;
+
+/*
  * Validate every patched blob before following an embedded address. Network
  * and lwIP are optional as a pair: both all-zero means absent. On success,
  * network_enabled receives that decision.
