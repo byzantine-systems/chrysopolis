@@ -83,7 +83,11 @@ fn writeHeader(w: *Writer) RenderError!void {
     try w.print("-define(CHRYSO_CHILD_COUNT, {d}).\n", .{d.constants.child_count});
     try w.print("-define(CHRYSO_EVENT_COUNT, {d}).\n", .{d.constants.event_count});
     try w.print("-define(CHRYSO_JOURNAL_CAPACITY, {d}).\n", .{d.constants.journal_capacity});
-    try w.print("-define(CHRYSO_JOURNAL_PAYLOAD_SIZE, {d}).\n\n", .{d.constants.journal_payload_size});
+    try w.print("-define(CHRYSO_JOURNAL_PAYLOAD_SIZE, {d}).\n", .{d.constants.journal_payload_size});
+    try w.print("-define(CHRYSO_ROOT_EVENT_NO_CHILD, {d}).\n", .{d.constants.root_event_no_child});
+    try w.print("-define(CHRYSO_FAULT_MR0_VALID, {d}).\n", .{d.constants.fault_mr0_valid});
+    try w.print("-define(CHRYSO_FAULT_MR1_VALID, {d}).\n", .{d.constants.fault_mr1_valid});
+    try w.print("-define(CHRYSO_DOWN_INTERVAL_OPEN, {d}).\n\n", .{d.constants.down_interval_open});
     for (d.magics) |magic| {
         try w.print("-define(CHRYSO_MAGIC_{f}, <<\"{s}\">>).\n", .{ upper(magic.name), magic.bytes });
     }
@@ -205,6 +209,55 @@ fn writeCondition(w: *Writer, check: checks.Check, base: ?[]const u8) RenderErro
         .at_most => |value| {
             try writeLoad(w, base, value.int);
             try w.print(" =< {d}", .{value.value});
+        },
+        .ring_dropped => |value| {
+            try writeLoad(w, base, value.dropped);
+            try w.writeAll(" =:= erlang:max(0, ");
+            try writeLoad(w, base, value.head);
+            try w.print(" - {d})", .{value.capacity});
+        },
+        .event_child => |value| {
+            try w.writeAll("(case ");
+            try writeLoad(w, base, value.kind);
+            try w.writeAll(" of ");
+            for (value.global) |kind| {
+                try w.print("{d} -> ", .{kind});
+                try writeLoad(w, base, value.child);
+                try w.print(" =:= {d}; ", .{value.sentinel});
+            }
+            try w.writeAll("_ -> (");
+            try writeLoad(w, base, value.child);
+            try w.print(" < {d} andalso u(Bin, {d} + ", .{ value.targets.count, value.targets.base });
+            try writeLoad(w, base, value.child);
+            try w.print(" * {d} + {d}, 8) =/= 0) end)", .{ value.targets.stride, value.target_state.offset });
+        },
+        .only_for_kind => |value| {
+            try w.writeByte('(');
+            try writeLoad(w, base, value.int);
+            try w.writeAll(" =:= 0 orelse ");
+            try writeLoad(w, base, value.kind);
+            try w.print(" =:= {d})", .{value.value});
+        },
+        .implies => |value| {
+            try w.writeByte('(');
+            try writeLoad(w, base, value.int);
+            try w.print(" band {d} =:= 0 orelse ", .{value.when});
+            try writeLoad(w, base, value.int);
+            try w.print(" band {d} =:= {d})", .{ value.requires, value.requires });
+        },
+        .zero_when_unset => |value| {
+            try w.writeByte('(');
+            try writeLoad(w, base, value.int);
+            try w.writeAll(" =/= 0 orelse ");
+            try writeZero(w, base, value.span.offset, value.span.len);
+            try w.writeByte(')');
+        },
+        .kind_member => |value| {
+            try w.writeByte('(');
+            try writeLoad(w, base, value.kind);
+            try w.print(" =/= {d} orelse ", .{value.value});
+            try writeCondition(w, .{ .member = value.member }, base);
+            try w.writeByte(')');
         },
         .seqlock => |value| {
             try w.writeAll("published(");

@@ -16,6 +16,27 @@ fn cVerdict(name: []const u8, bytes: []const u8, bank: usize) error{UnknownCheck
 fn ruleSpan(check: checks.Check, random: std.Random) checks.Span {
     return switch (check) {
         .magic, .version, .equal, .at_most => |value| .{ .offset = value.int.offset, .len = value.int.width },
+        .ring_dropped => |value| if (random.boolean())
+            .{ .offset = value.head.offset, .len = value.head.width }
+        else
+            .{ .offset = value.dropped.offset, .len = value.dropped.width },
+        .event_child => |value| if (random.boolean())
+            .{ .offset = value.kind.offset, .len = value.kind.width }
+        else
+            .{ .offset = value.child.offset, .len = value.child.width },
+        .implies => |value| .{ .offset = value.int.offset, .len = value.int.width },
+        .only_for_kind => |value| if (random.boolean())
+            .{ .offset = value.int.offset, .len = value.int.width }
+        else
+            .{ .offset = value.kind.offset, .len = value.kind.width },
+        .zero_when_unset => |value| if (random.boolean())
+            .{ .offset = value.int.offset, .len = value.int.width }
+        else
+            value.span,
+        .kind_member => |value| if (random.boolean())
+            .{ .offset = value.kind.offset, .len = value.kind.width }
+        else
+            .{ .offset = value.member.int.offset, .len = value.member.int.width },
         .member => |value| .{ .offset = value.int.offset, .len = value.int.width },
         .seqlock, .nonzero => |value| .{ .offset = value.offset, .len = value.width },
         .zero => |value| value,
@@ -39,6 +60,11 @@ fn targetOffset(checker: checks.Checker, random: std.Random) usize {
         .rows, .selected => |rows| rows.base + random.uintLessThan(usize, rows.count) * rows.stride,
         .window => |window| window.base + random.uintLessThan(usize, window.capacity) * window.stride,
     };
+    // An event's child rule also reads the row it names, outside its own scope.
+    if (rule.check == .event_child and random.boolean()) {
+        const child = rule.check.event_child;
+        return child.targets.base + random.uintLessThan(usize, child.targets.count) * child.targets.stride + child.target_state.offset;
+    }
     const span = ruleSpan(rule.check, random);
     // Window heads decide which rows are live; hit them too.
     if (rule.scope == .window and random.boolean()) return rule.scope.window.head_offset + random.uintLessThan(usize, 8);

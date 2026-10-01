@@ -96,6 +96,9 @@
           # meaningful alongside an sdf generated with --with-restart-debug, and
           # left false everywhere else so production images cannot notify root.
           restartDebug ? false,
+          # Exact child set in the selected SDF. The crasher exists only in the
+          # restart topology, regardless of which Root ELF is selected.
+          withCrasher ? false,
           # Test-only config corruption applied after normal section injection.
           # Used to prove ReleaseFast rejects malformed blobs explicitly.
           corruptConfig ? null,
@@ -126,6 +129,19 @@
             chmod -R u+w build
 
             cfg=${sdf}
+            if [ ${if withCrasher then "1" else "0"} -eq 1 ]; then
+              grep -q '<protection_domain name="crasher"' "$cfg/system.sdf" || {
+                echo "root children: crasher is staged but absent from SDF" >&2
+                exit 1
+              }
+              test -f build/crasher.elf || {
+                echo "root children: crasher is in SDF but ELF is absent" >&2
+                exit 1
+              }
+            elif grep -q '<protection_domain name="crasher"' "$cfg/system.sdf"; then
+              echo "root children: crasher is in SDF but mask excludes it" >&2
+              exit 1
+            fi
 
             # Read a property relative to a named ELF section from readelf's
             # wide table. Relative columns avoid the variable-width [ N]
@@ -382,6 +398,11 @@
             : > restart_entry.bin
             emit_u64 restart_entry.bin "$se"          # shared child _start
             emit_u64 restart_entry.bin "$beam_reset"  # beam_server _reset
+            emit_u64 restart_entry.bin "$((
+              ${pkgs.lib.concatMapStrings (d: "(1 << ${toString d.child}) | ") drivers}
+              (1 << ${toString runtimeAbi.children.beam}) |
+              (${if withCrasher then "1" else "0"} << ${toString runtimeAbi.children.crasher})
+            ))" # actual Root children in this image
             check_section_layout build/root.elf ${runtimeAbi.restart.config_section} \
               $((${toString runtimeAbi.restart.config_words} * ${toString runtimeAbi.restart.word_bytes})) \
               ${toString runtimeAbi.restart.word_bytes}
@@ -605,6 +626,7 @@
             })
             [
               "boot-shell-tcp"
+              "orch-status-smoke"
               "rng-smoke"
               "beam-restart-smoke"
             ];
@@ -639,6 +661,7 @@
               beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
               sdf = config.packages.sdf-restart;
               extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
+              withCrasher = true;
               restartDebug = true;
             })
             [
@@ -657,6 +680,7 @@
           rootElf = "${config.packages.beam-zig}/bin/root_budget_test.elf";
           sdf = config.packages.sdf-restart;
           extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
+          withCrasher = true;
           restartDebug = true;
         }) [ "budget-decay-smoke" ];
       };

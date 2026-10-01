@@ -147,7 +147,11 @@ fn writeCommon(w: *Writer) Writer.Error!void {
     try w.print("static constexpr size_t chryso_child_count = {d}u;\n", .{d.constants.child_count});
     try w.print("static constexpr size_t chryso_event_count = {d}u;\n", .{d.constants.event_count});
     try w.print("static constexpr size_t chryso_journal_capacity = {d}u;\n", .{d.constants.journal_capacity});
-    try w.print("static constexpr size_t chryso_journal_payload_size = {d}u;\n\n", .{d.constants.journal_payload_size});
+    try w.print("static constexpr size_t chryso_journal_payload_size = {d}u;\n", .{d.constants.journal_payload_size});
+    try w.print("static constexpr uint8_t chryso_root_event_no_child = {d}u;\n", .{d.constants.root_event_no_child});
+    try w.print("static constexpr uint16_t chryso_fault_mr0_valid = {d}u;\n", .{d.constants.fault_mr0_valid});
+    try w.print("static constexpr uint16_t chryso_fault_mr1_valid = {d}u;\n", .{d.constants.fault_mr1_valid});
+    try w.print("static constexpr uint16_t chryso_down_interval_open = {d}u;\n\n", .{d.constants.down_interval_open});
 
     try w.writeAll("/* Wire magics: little-endian u64 values whose memory bytes spell the ASCII. */\n");
     for (d.magics) |magic| {
@@ -323,6 +327,42 @@ fn writeCheck(w: *Writer, check: checks.Check, at: []const u8, class: checks.Cla
             try writeLiteral(w, value.value, 8);
             try w.print(") {{\n{s}  return {s};\n{s}}}\n", .{ indent, ret, indent });
         },
+        .ring_dropped => |value| try w.print(
+            "{s}{{\n{s}  const uint64_t head = chryso_abi_load_u64le({s} + {d}u);\n{s}  const uint64_t dropped = chryso_abi_load_u64le({s} + {d}u);\n{s}  if (dropped != (head > {d}u ? head - {d}u : 0u)) {{\n{s}    return {s};\n{s}  }}\n{s}}}\n",
+            .{ indent, indent, at, value.head.offset, indent, at, value.dropped.offset, indent, value.capacity, value.capacity, indent, ret, indent, indent },
+        ),
+        .event_child => |value| {
+            try w.print("{s}{{\n{s}  const uint8_t kind = chryso_abi_load_u8({s} + {d}u);\n{s}  const uint8_t child = chryso_abi_load_u8({s} + {d}u);\n{s}  if (", .{
+                indent, indent, at, value.kind.offset, indent, at, value.child.offset, indent,
+            });
+            try writeKindSet(w, value.global);
+            try w.print(" ? child != {d}u : (child >= {d}u || chryso_abi_load_u8(bytes + {d}u + (size_t)child * {d}u + {d}u) == 0u)) {{\n{s}    return {s};\n{s}  }}\n{s}}}\n", .{
+                value.sentinel, value.targets.count, value.targets.base, value.targets.stride, value.target_state.offset,
+                indent,         ret,                 indent,             indent,
+            });
+        },
+        .only_for_kind => |value| try w.print(
+            "{s}if ((uint64_t){s}({s} + {d}u) != 0u && (uint64_t){s}({s} + {d}u) != {d}u) {{\n{s}  return {s};\n{s}}}\n",
+            .{ indent, loader(value.int.width), at, value.int.offset, loader(value.kind.width), at, value.kind.offset, value.value, indent, ret, indent },
+        ),
+        .implies => |value| try w.print(
+            "{s}{{\n{s}  const uint64_t raw = (uint64_t){s}({s} + {d}u);\n{s}  if ((raw & {d}u) != 0u && (raw & {d}u) != {d}u) {{\n{s}    return {s};\n{s}  }}\n{s}}}\n",
+            .{ indent, indent, loader(value.int.width), at, value.int.offset, indent, value.when, value.requires, value.requires, indent, ret, indent, indent },
+        ),
+        .zero_when_unset => |value| try w.print(
+            "{s}if ((uint64_t){s}({s} + {d}u) == 0u && !chryso_abi_all_zero({s} + {d}u, {d}u)) {{\n{s}  return {s};\n{s}}}\n",
+            .{ indent, loader(value.int.width), at, value.int.offset, at, value.span.offset, value.span.len, indent, ret, indent },
+        ),
+        .kind_member => |value| {
+            const member = value.member;
+            try w.print("{s}if ((uint64_t){s}({s} + {d}u) == {d}u) {{\n{s}  const {s} value = {s}({s} + {d}u);\n{s}  if (", .{
+                indent, loader(value.kind.width),     at,                       value.kind.offset, value.value,
+                indent, scalarType(member.int.width), loader(member.int.width), at,                member.int.offset,
+                indent,
+            });
+            if (member.reject_zero) try w.writeAll("value == 0u || ");
+            try w.print("!chryso_{f}_is_member(value)) {{\n{s}    return {s};\n{s}  }}\n{s}}}\n", .{ snake(member.enumeration), indent, ret, indent, indent });
+        },
         .seqlock => |value| try w.print(
             \\{s}{{
             \\{s}  const uint64_t seq = (uint64_t){s}({s} + {d}u);
@@ -396,6 +436,17 @@ fn writeCheck(w: *Writer, check: checks.Check, at: []const u8, class: checks.Cla
             indent, at,     value.payload.offset,       value.payload.len, indent,              ret,    indent,            indent,
         }),
     }
+}
+
+/// `(kind == a || kind == b)`, or `false` for an empty set.
+fn writeKindSet(w: *Writer, kinds: []const u64) Writer.Error!void {
+    if (kinds.len == 0) return w.writeAll("false");
+    try w.writeByte('(');
+    for (kinds, 0..) |kind, i| {
+        if (i != 0) try w.writeAll(" || ");
+        try w.print("kind == {d}u", .{kind});
+    }
+    try w.writeByte(')');
 }
 
 fn magicName(value: u64) []const u8 {

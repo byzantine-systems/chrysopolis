@@ -348,6 +348,7 @@ fn traced(arena: std.mem.Allocator, list: *std.ArrayList(Image), diagnostic: *ab
             const step = writer.step() catch |err| switch (err) {
                 error.Finished => break,
                 error.StepNotInProtocol => return error.StepNotInProtocol,
+                error.Exhausted => return error.StepNotInProtocol,
             };
             label = @tagName(step);
         }
@@ -431,7 +432,7 @@ fn sweeps(arena: std.mem.Allocator, list: *std.ArrayList(Image), diagnostic: *ab
                 }
             },
             // Described vectors cover the remaining rule kinds with chosen values.
-            .magic, .version, .seqlock, .nonzero, .crc32, .equal, .at_most, .entry_identity, .payload_tail => {},
+            .magic, .version, .seqlock, .nonzero, .crc32, .equal, .at_most, .ring_dropped, .event_child, .implies, .only_for_kind, .zero_when_unset, .kind_member, .entry_identity, .payload_tail => {},
         };
         const short = try arena.dupe(u8, valid[0 .. valid.len - 1]);
         try list.append(arena, try finish(arena, checker, try std.fmt.allocPrint(arena, "sweep_{s}_size_short", .{checker.name}), 0, .size, short, diagnostic));

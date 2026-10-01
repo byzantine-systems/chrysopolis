@@ -126,6 +126,7 @@ jobs:
           - rng-smoke
           - budget-decay-smoke
           - beam-restart-smoke
+          - orch-status-smoke
           - serial-recovery
           - timer-recovery
           - blk-recovery

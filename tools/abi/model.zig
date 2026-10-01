@@ -50,6 +50,12 @@ pub const Constants = struct {
     event_count: usize,
     journal_capacity: usize,
     journal_payload_size: usize,
+    /// RootEvent.child of a global (not per-child) event.
+    root_event_no_child: u8,
+    /// Row and event flag bits.
+    fault_mr0_valid: u16,
+    fault_mr1_valid: u16,
+    down_interval_open: u16,
 };
 
 pub const Description = struct {
@@ -168,6 +174,8 @@ const enums = [_]Enum{
     describeEnum(abi.RootChildWireState, true),
     describeEnum(abi.RootDesired, true),
     describeEnum(abi.RootEventKind, true),
+    describeEnum(abi.RootGiveupReason, true),
+    describeEnum(abi.RootControlKind, true),
     describeEnum(abi.PpOpcode, true),
     describeEnum(abi.CtlResult, true),
     describeEnum(abi.WorkerHealth, true),
@@ -199,6 +207,10 @@ pub const description: Description = .{
         .event_count = abi.event_count,
         .journal_capacity = abi.journal_capacity,
         .journal_payload_size = abi.journal_payload_size,
+        .root_event_no_child = abi.root_event_no_child,
+        .fault_mr0_valid = abi.fault_mr0_valid,
+        .fault_mr1_valid = abi.fault_mr1_valid,
+        .down_interval_open = abi.down_interval_open,
     },
     .records = &records,
     .enums = &enums,
@@ -226,6 +238,7 @@ const Digest = struct {
 pub fn layoutDigest(value: Description) u32 {
     var digest: Digest = .{};
     digest.number(value.abi_version);
+    inline for (std.meta.fields(Constants)) |field| digest.number(@field(value.constants, field.name));
     digest.number(value.magics.len);
     for (value.magics) |magic| {
         digest.text(magic.name);
@@ -344,12 +357,16 @@ pub fn validateDescription(value: Description, diagnostic: *abi.Diagnostic) !voi
     if (value.abi_version != abi.abi_version or value.constants.child_count != abi.child_count or
         value.constants.event_count != abi.event_count or
         value.constants.journal_capacity != abi.journal_capacity or
-        value.constants.journal_payload_size != abi.journal_payload_size)
+        value.constants.journal_payload_size != abi.journal_payload_size or
+        value.constants.root_event_no_child != abi.root_event_no_child or
+        value.constants.fault_mr0_valid != abi.fault_mr0_valid or
+        value.constants.fault_mr1_valid != abi.fault_mr1_valid or
+        value.constants.down_interval_open != abi.down_interval_open)
     {
         diagnostic.* = .{ .path = "constants", .invariant = "typed ABI version and capacities" };
         return error.InvalidModelConstants;
     }
-    if (value.records.len != 16 or value.enums.len != 12 or
+    if (value.records.len != 16 or value.enums.len != 14 or
         value.magics.len != 8 or value.transitions.len != abi.slot_transitions.len)
     {
         diagnostic.* = .{ .path = "description", .invariant = "complete wire metadata" };
@@ -402,7 +419,7 @@ test "reflection describes pinned bank and journal geometry" {
     try std.testing.expectEqual(@as(usize, 20), description.records[5].fields[4].offset);
     try std.testing.expectEqual(@as(usize, 4096), description.records[15].size);
     try std.testing.expectEqual(@as(usize, 17), description.transitions.len);
-    try std.testing.expect(!description.enums[11].wire);
+    try std.testing.expect(!description.enums[13].wire);
     const children = description.records[3].fields[1];
     try std.testing.expectEqualStrings("children", children.name);
     try std.testing.expectEqualStrings("RootChildStatus", children.element);

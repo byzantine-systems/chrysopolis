@@ -7,6 +7,7 @@ import sys
 IMAGES = {
     "boot-shell-tcp": "test-image",
     "beam-restart-smoke": "test-image",
+    "orch-status-smoke": "test-image",
     "rng-smoke": "test-image",
     "socket-smoke": "default",
     "serial-recovery": "restart-image",

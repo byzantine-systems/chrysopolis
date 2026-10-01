@@ -405,6 +405,27 @@ in
     '';
   };
 
+  # The ERTS test ELF alone links a read-only shared-page probe. A BEAM
+  # restart observes Root's completed update without PPC or notification.
+  orch-status-smoke = mkSel4Test {
+    name = "orch-status-smoke";
+    image = sel4TestImage;
+    testScript = ''
+      try:
+          wait_console(chryso, r"Eshell", 300)
+          wait_console(chryso, r"ROOT_STATUS\|boot\|incarnation=1", 60)
+          load_test_modules(chryso)
+          chryso.send_console("chryso_beam:stop_vm().\r")
+          wait_console(chryso, r"ROOT\|restart\|child=${beamChild}\|count=1", 120)
+          wait_console(chryso, r"ROOT_STATUS\|restart\|incarnation=2\|count=1", 120)
+          wait_console_count(chryso, r"Eshell", 2, 300)
+          assert not re.search(r"ROOT_STATUS\|(invalid|torn|unexpected)", chryso.get_console_log())
+          assert_no_pd_fault(chryso)
+      finally:
+          power_off(chryso)
+    '';
+  };
+
   # Run native pthread ABI probes inside beam_server before the bring-up
   # payload. This covers lifecycle errors an Erlang shell cannot invoke.
   cothread-smoke = mkSel4Test {

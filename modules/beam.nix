@@ -70,6 +70,13 @@
 
           buildPhase = ''
             runHook preBuild
+            # Status payload copies rely on serialized callbacks on one CPU.
+            # A multicore image needs a separate atomic-payload contract.
+            if grep -Eq '^[[:space:]]*#define[[:space:]]+CONFIG_ENABLE_SMP_SUPPORT' \
+              ${chryso.boardDir}/include/kernel/gen_config.h; then
+              echo "root_status: SMP image requires a concurrent payload protocol" >&2
+              exit 1
+            fi
             # The ERTS archives reference each other and libgcc circularly.
             # The Makefile resolved that with `ld --start-group`, the Zig
             # build graph has no group API, so merge them (plus the cross
@@ -78,6 +85,16 @@
             # lld resolves against one another within the one archive.
             libgccDir=$(dirname "$(find ${chryso.targetPkgs.stdenv.cc.cc}/lib/gcc \
               -name libgcc.a | head -1)")
+            # The gcc driver links libatomic as needed, this Zig/lld link does
+            # not. ethread's 16-byte __atomic calls resolve to its atomic_16.o
+            # (plain LL/SC, no IFUNC); the beam_test.elf gates below keep
+            # its lock-based members out.
+            libatomic=$(${chryso.targetPkgs.stdenv.cc}/bin/${chryso.targetPkgs.stdenv.cc.targetPrefix}gcc \
+              -print-file-name=libatomic.a)
+            if [ ! -f "$libatomic" ]; then
+              echo "beam-zig: cross gcc did not resolve libatomic.a: $libatomic" >&2
+              exit 1
+            fi
             {
               echo "create liberts_all.a"
               for a in liberts liberts_internal liberts_internal_r libethread \
@@ -85,6 +102,7 @@
                 echo "addlib ${config.packages.liberts}/lib/$a.a"
               done
               echo "addlib $libgccDir/libgcc.a"
+              echo "addlib $libatomic"
               echo "save"
               echo "end"
             } | llvm-ar -M
@@ -117,6 +135,26 @@
               -Dwith-net=true \
               -Dwith-crasher=true \
               -Derts-archive-dir="$PWD"
+
+            # The ERTS link may take libatomic's fixed-width helpers only:
+            # nothing unresolved, no generic lock fallback, no IFUNC dispatch.
+            # Capture first so a tool failure fails the build.
+            beamTest="$out/bin/beam_test.elf"
+            undefined=$(llvm-nm -u "$beamTest")
+            if grep -E '(^|[[:space:]])__(atomic|aarch64)_' <<<"$undefined"; then
+              echo "beam_test.elf: unresolved atomic helper" >&2
+              exit 1
+            fi
+            symbols=$(llvm-nm "$beamTest")
+            if grep -E '(^|[[:space:]])libat_(lock|unlock)_' <<<"$symbols"; then
+              echo "beam_test.elf: selected libatomic's lock fallback" >&2
+              exit 1
+            fi
+            elfTables=$(llvm-readelf -s -r "$beamTest")
+            if grep -E 'IFUNC|R_AARCH64_IRELATIVE' <<<"$elfTables"; then
+              echo "beam_test.elf: runtime dispatch" >&2
+              exit 1
+            fi
 
             ${pkgs.lib.optionalString diagnostic ''
               # The atomic probe must reference no atomic or outline-atomics
@@ -198,6 +236,10 @@
               ../tests/host
               ../src/pd/beam
               ../src/pd/root/policy
+              ../src/pd/root/status.c
+              ../src/pd/root/status.h
+              ../src/lib/abi/root_status_reader.c
+              ../src/lib/abi/root_status_reader.h
               abiGeneratorFiles
             ];
           };

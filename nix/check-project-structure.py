@@ -8,6 +8,7 @@ An unfamiliar source declaration must be added deliberately, not silently missed
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import re
 import subprocess
 import sys
@@ -79,7 +80,7 @@ def framework(include: str) -> str | None:
 
 
 def permitted_framework(path: str, kind: str) -> bool:
-    if path in ("src/pd/root/main.c", "src/pd/test_support/crasher.c"):
+    if path in ("src/pd/root/main.c", "src/pd/test_support/crasher.c", "src/pd/test_support/status_probe.c"):
         return kind == "kernel"
     if path == "src/pd/smp/smp.c":
         return kind == "kernel"
@@ -149,7 +150,10 @@ def check_sources(root: Path) -> None:
     entries = [BEAM + name for name in ZIG_STRING_C.findall(groups[0])]
     entries += DIRECT_SOURCE.findall(source + helpers)
     entries += PROBE_SOURCE.findall(source + helpers)
-    if len(entries) != len(set(entries)):
+    # The production and timed-test Root ELFs intentionally compile the same
+    # pure publisher; all other target source memberships remain unique.
+    duplicates = {name: count for name, count in Counter(entries).items() if count > 1}
+    if duplicates and duplicates != {"src/pd/root/status.c": 2}:
         fail("explicit-source", "build.zig", "duplicate first-party C source")
     actual = {path.relative_to(root).as_posix() for path in (root / "src").rglob("*.c")}
     dormant = {"src/pd/smp/smp.c"}
