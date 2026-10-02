@@ -33,7 +33,7 @@ const Suite = struct {
     name: []const u8,
     source: []const u8,
     unit_dir: []const u8,
-    extra_include_dir: ?[]const u8 = null,
+    extra_include_dirs: []const []const u8 = &.{},
     // Adds the generated <chrysopolis/...> orchestration headers.
     generated_abi: bool = false,
     extra_flags: []const []const u8 = &.{},
@@ -51,10 +51,12 @@ const suites = [_]Suite{
     .{ .name = "timer_slot", .source = "beam/io/timer/suite_timer_slot.c", .unit_dir = "../../src/pd/beam/io/timer", .units = &.{} },
     .{ .name = "fd_pair", .source = "beam/compat/fd/suite_fd_pair.c", .unit_dir = "../../src/pd/beam/compat/fd", .units = &.{"runtime_fd_pair.c"} },
     .{ .name = "epoll", .source = "beam/compat/poll/suite_epoll.c", .unit_dir = "../../src/pd/beam/compat/poll", .units = &.{"runtime_epoll_table.c"} },
-    .{ .name = "status", .source = "beam/config/suite_status.c", .unit_dir = "../../src/pd/beam/config", .extra_include_dir = "../../src/pd/beam/compat/syscall", .units = &.{"runtime_status.c"} },
+    .{ .name = "status", .source = "beam/config/suite_status.c", .unit_dir = "../../src/pd/beam/config", .extra_include_dirs = &.{"../../src/pd/beam/compat/syscall"}, .units = &.{"runtime_status.c"} },
     .{ .name = "pd_restart", .source = "beam/restart/suite_pd_restart.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{"runtime_pd_restart_parse.c"} },
     .{ .name = "pthread", .source = "beam/compat/pthread/suite_pthread.c", .unit_dir = "../../src/pd/beam/compat/pthread", .units = &.{"runtime_tls_row.c"} },
     .{ .name = "root_policy", .source = "root/suite_root_policy.c", .unit_dir = "../../src/pd/root/policy", .units = &.{} },
+    // root_control builds the shared BEAM reader with the suite's stricter flags.
+    .{ .name = "root_control", .source = "root/suite_root_control.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{ "../../src/pd/root/policy", "../../src/lib/abi" }, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{"../../src/lib/abi/root_status_reader.c"}, .units = &.{"status.c"} },
     .{ .name = "snapshot", .source = "beam/restart/suite_snapshot.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{"beam_snapshot_codec.c"} },
     .{ .name = "restart_layout", .source = "beam/restart/suite_restart_layout.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{} },
     .{ .name = "rng_select", .source = "beam/security/suite_rng_select.c", .unit_dir = "../../src/pd/beam/security", .units = &.{"rng_select.c"} },
@@ -120,7 +122,7 @@ pub fn build(b: *std.Build) void {
             }
             exe.root_module.addIncludePath(b.path(".")); // check.h for suites under owner subdirectories
             exe.root_module.addIncludePath(owner_dir);
-            if (suite.extra_include_dir) |dir| exe.root_module.addIncludePath(b.path(dir));
+            for (suite.extra_include_dirs) |dir| exe.root_module.addIncludePath(b.path(dir));
             if (suite.generated_abi) exe.root_module.addIncludePath(generated_abi);
 
             const run = b.addRunArtifact(exe);

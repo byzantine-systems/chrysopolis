@@ -196,7 +196,7 @@ pub const values: Contract = .{
         .exit_fault_base = 3198156800,
         .exit_fault_size = 4096,
         .config_section = ".restart_config",
-        .config_words = 2,
+        .config_words = 3,
         .word_bytes = 8,
         .pd_config_section = ".pd_restart_config",
         .pd_modes = 2,
@@ -371,7 +371,7 @@ pub fn validate(contract: Contract) !void {
     if (contract.version != 1) return error.UnsupportedAbiVersion;
     if (contract.microkit.id_count != 62) return error.InvalidMicrokitIdCount;
     if (contract.microkit.absent_id < contract.microkit.id_count) return error.InvalidAbsentId;
-    if (contract.restart.config_words != 2 or contract.restart.word_bytes != 8) return error.InvalidRestartConfigLayout;
+    if (contract.restart.config_words != 3 or contract.restart.word_bytes != 8) return error.InvalidRestartConfigLayout;
     if (contract.restart.pd_modes != 2) return error.InvalidPdRestartModeCount;
     if (contract.restart.driver_budget == 0 or contract.restart.beam_budget == 0) return error.InvalidRestartBudget;
     if (contract.restart.clock_min_hz < 1000 or contract.restart.clock_min_hz > contract.restart.clock_max_hz or

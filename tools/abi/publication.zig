@@ -1,7 +1,9 @@
-//! Reference writers for the publication protocols, as explicit state machines. Each step is
-//! one store a writer makes, in protocol order; a reader may copy the page between any two.
-//! Golden vectors snapshot the page after every step, so torn states come from the protocols
-//! themselves. These are test models, not the Root or BEAM writers.
+//! Reference writers for the publication protocols, as explicit state machines. A reader may
+//! copy the page between any two steps. Root's status writer is modelled one store per step, in
+//! the order root_status_publish makes them; the other protocols' `write` groups payload stores
+//! the protocol leaves unordered. Golden vectors snapshot the page after every step, so torn
+//! states come from the protocols themselves. These are test models, not the Root or BEAM
+//! writers; tests/host's root_control suite fuzzes the real writer and reader at byte level.
 const std = @import("std");
 const abi = @import("orchestrator_abi");
 const checks = @import("checks");
@@ -29,6 +31,20 @@ pub const Step = enum {
     open,
     /// Payload fields change.
     write,
+    /// Status: the affected child row's state.
+    row_state,
+    /// Status: the affected child row's lifetime count.
+    row_count,
+    /// Status: the cause event at `event_head`.
+    cause,
+    /// Status: the outcome event at `event_head + 1`.
+    outcome,
+    /// Status: `event_head` moves past both events.
+    head,
+    /// Status: `event_dropped` follows the new head.
+    dropped,
+    /// Status: `now_ticks` stamps the publication.
+    stamp,
     /// The CRC covers the new contents.
     seal,
     /// The sequence becomes the next even value: the record is published.
@@ -41,7 +57,7 @@ pub const Step = enum {
     advance,
 };
 
-pub const Error = error{ StepNotInProtocol, Finished };
+pub const Error = error{ StepNotInProtocol, Finished, Exhausted };
 
 pub const Start = enum { sample, empty_journal };
 
@@ -58,11 +74,13 @@ pub const Trace = struct {
 };
 
 const seqlock: []const Step = &.{ .open, .write, .close };
+const status_publish: []const Step = &.{ .open, .row_state, .row_count, .cause, .outcome, .head, .dropped, .stamp, .close };
 const bank_rewrite: []const Step = &.{ .open, .write, .seal, .close, .flip };
 const append: []const Step = &.{ .append, .advance };
 
 pub const traces = [_]Trace{
-    .{ .name = "status", .protocol = .status, .checker = "root_status_page", .steps = seqlock, .expect = &.{ .ok, .torn, .torn, .ok } },
+    // Every store between the odd and even sequence is torn, whatever it changed.
+    .{ .name = "status", .protocol = .status, .checker = "root_status_page", .steps = status_publish, .expect = &.{ .ok, .torn, .torn, .torn, .torn, .torn, .torn, .torn, .torn, .ok } },
     .{ .name = "worker_status", .protocol = .worker_status, .checker = "worker_status", .steps = seqlock, .expect = &.{ .ok, .torn, .torn, .ok } },
     // Sealed but still odd is torn: the sequence outranks the checksum.
     .{ .name = "spec_rewritten_bank", .protocol = .spec_bank, .checker = "spec_bank", .bank = 1, .steps = bank_rewrite, .expect = &.{ .torn, .torn, .torn, .torn, .ok, .ok } },
@@ -97,18 +115,37 @@ pub fn apply(protocol: Protocol, page: []u8, step: Step) Error!void {
     switch (protocol) {
         .status => {
             const P = abi.RootStatusPage;
+            const row = at(P, "children") + @sizeOf(abi.RootChildStatus);
             switch (step) {
-                .open, .close => bump(u64, page, at(P, "header.seq")),
-                .write => {
-                    // One more event in the ring, and a later clock.
-                    const head = load(u64, page, at(P, "header.event_head"));
-                    const slot: usize = @intCast(head % abi.event_count);
-                    const event: abi.RootEvent = .{ .ticks = 10, .kind = @intFromEnum(abi.RootEventKind.restart), .child = 1, .detail = 0, .a = 0, .b = 0 };
-                    @memcpy(page[at(P, "events") + slot * @sizeOf(abi.RootEvent) ..][0..@sizeOf(abi.RootEvent)], std.mem.asBytes(&event));
-                    store(u64, page, at(P, "header.event_head"), head + 1);
-                    store(u64, page, at(P, "header.now_ticks"), 10);
+                .open, .close => {
+                    const seq = load(u64, page, at(P, "header.seq"));
+                    if (seq == std.math.maxInt(u64)) return error.Exhausted;
+                    store(u64, page, at(P, "header.seq"), seq + 1);
                 },
-                .seal, .flip, .append, .advance => return error.StepNotInProtocol,
+                // One callback: child 1 faults and is restarted. The row and
+                // both events land before the head moves, as in the C writer.
+                .row_state => store(u8, page, row + at(abi.RootChildStatus, "state"), @intFromEnum(abi.RootChildWireState.live)),
+                .row_count => store(u32, page, row + at(abi.RootChildStatus, "lifetime_count"), 1),
+                .cause, .outcome => {
+                    const head = load(u64, page, at(P, "header.event_head"));
+                    const event: abi.RootEvent = if (step == .cause)
+                        .{ .ticks = 9, .kind = @intFromEnum(abi.RootEventKind.fault), .child = 1, .detail = 6, .a = 0, .b = 0 }
+                    else
+                        .{ .ticks = 10, .kind = @intFromEnum(abi.RootEventKind.restart), .child = 1, .detail = 0, .a = 1, .b = 0 };
+                    const slot: usize = @intCast((head +% @intFromBool(step == .outcome)) % abi.event_count);
+                    @memcpy(page[at(P, "events") + slot * @sizeOf(abi.RootEvent) ..][0..@sizeOf(abi.RootEvent)], std.mem.asBytes(&event));
+                },
+                .head => {
+                    const head = load(u64, page, at(P, "header.event_head"));
+                    if (head > std.math.maxInt(u64) - 2) return error.Exhausted;
+                    store(u64, page, at(P, "header.event_head"), head + 2);
+                },
+                .dropped => {
+                    const head = load(u64, page, at(P, "header.event_head"));
+                    store(u64, page, at(P, "header.event_dropped"), if (head > abi.event_count) head - abi.event_count else 0);
+                },
+                .stamp => store(u64, page, at(P, "header.now_ticks"), 10),
+                .write, .seal, .flip, .append, .advance => return error.StepNotInProtocol,
             }
         },
         .worker_status => {
@@ -119,7 +156,7 @@ pub fn apply(protocol: Protocol, page: []u8, step: Step) Error!void {
                     bump(u64, page, at(P, "header.heartbeat_ticks"));
                     bump(u64, page, at(P, "header.completed_count"));
                 },
-                .seal, .flip, .append, .advance => return error.StepNotInProtocol,
+                .seal, .flip, .append, .advance, .row_state, .row_count, .cause, .outcome, .head, .dropped, .stamp => return error.StepNotInProtocol,
             }
         },
         .spec_bank => {
@@ -143,7 +180,7 @@ pub fn apply(protocol: Protocol, page: []u8, step: Step) Error!void {
                     @memcpy(page[bank..][0..@sizeOf(abi.SpecBank)], std.mem.asBytes(&value));
                 },
                 .flip => store(u32, page, at(P, "header.active_bank"), 1),
-                .append, .advance => return error.StepNotInProtocol,
+                .append, .advance, .row_state, .row_count, .cause, .outcome, .head, .dropped, .stamp => return error.StepNotInProtocol,
             }
         },
         .journal => {
@@ -164,7 +201,7 @@ pub fn apply(protocol: Protocol, page: []u8, step: Step) Error!void {
                     @memcpy(page[at(P, "entries") + slot * @sizeOf(E) ..][0..@sizeOf(E)], std.mem.asBytes(&entry));
                 },
                 .advance => store(u64, page, at(P, "header.published_seq"), head +% 1),
-                .open, .write, .seal, .close, .flip => return error.StepNotInProtocol,
+                .open, .write, .seal, .close, .flip, .row_state, .row_count, .cause, .outcome, .head, .dropped, .stamp => return error.StepNotInProtocol,
             }
         },
     }
@@ -234,6 +271,7 @@ test "every trace reaches its stated verdict at every snapshot" {
             _ = writer.step() catch |err| switch (err) {
                 error.Finished => break,
                 error.StepNotInProtocol => return err,
+                error.Exhausted => return err,
             };
         }
     }
@@ -250,7 +288,7 @@ test "the rewritten bank seals to the value a fresh seal gives" {
 }
 
 test "steps outside a protocol are refused and change nothing" {
-    const refused = [_]struct { Protocol, Step }{ .{ .status, .seal }, .{ .worker_status, .flip }, .{ .spec_bank, .append }, .{ .journal, .open } };
+    const refused = [_]struct { Protocol, Step }{ .{ .status, .seal }, .{ .status, .write }, .{ .worker_status, .cause }, .{ .worker_status, .flip }, .{ .spec_bank, .append }, .{ .journal, .open } };
     for (refused) |case| {
         var page: [@sizeOf(abi.RootStatusPage)]u8 = @splat(0xa5);
         try std.testing.expectError(error.StepNotInProtocol, apply(case[0], &page, case[1]));
@@ -280,5 +318,38 @@ test "a step touches only its protocol's bytes" {
             try std.testing.expectEqualSlices(u8, before[0..region.offset], page[0..region.offset]);
             try std.testing.expectEqualSlices(u8, before[region.offset + region.len ..], page[region.offset + region.len ..]);
         } else |err| try std.testing.expectEqual(error.Finished, err);
+    }
+}
+
+test "each status step changes only the bytes of its one store" {
+    var page = samples.status();
+    const bytes = std.mem.asBytes(&page);
+    const P = abi.RootStatusPage;
+    const row = at(P, "children") + @sizeOf(abi.RootChildStatus);
+    const head = page.header.event_head;
+    const event_size = @sizeOf(abi.RootEvent);
+    const stores = [_]struct { Step, usize, usize }{
+        .{ .open, at(P, "header.seq"), 8 },
+        .{ .row_state, row + at(abi.RootChildStatus, "state"), 1 },
+        .{ .row_count, row + at(abi.RootChildStatus, "lifetime_count"), 4 },
+        .{ .cause, at(P, "events") + @as(usize, @intCast(head % abi.event_count)) * event_size, event_size },
+        .{ .outcome, at(P, "events") + @as(usize, @intCast((head + 1) % abi.event_count)) * event_size, event_size },
+        .{ .head, at(P, "header.event_head"), 8 },
+        .{ .dropped, at(P, "header.event_dropped"), 8 },
+        .{ .stamp, at(P, "header.now_ticks"), 8 },
+        .{ .close, at(P, "header.seq"), 8 },
+    };
+    comptime std.debug.assert(stores.len == status_publish.len);
+    for (stores, status_publish) |expected, step| {
+        try std.testing.expectEqual(expected[0], step);
+        var before: [@sizeOf(P)]u8 = undefined;
+        @memcpy(&before, bytes);
+        try apply(.status, bytes, step);
+        for (bytes, before, 0..) |now, was, offset| {
+            if (now != was and (offset < expected[1] or offset >= expected[1] + expected[2])) {
+                std.debug.print("{t} changed byte {d} outside its store\n", .{ step, offset });
+                return error.StoreOutsideField;
+            }
+        }
     }
 }

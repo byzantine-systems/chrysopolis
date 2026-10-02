@@ -21,7 +21,7 @@ pub fn addBeamExe(
     name: []const u8,
     with_erts: bool,
     util_putchar_debug: *std.Build.Step.Compile,
-) void {
+) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = name,
         .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseFast, .strip = false }),
@@ -47,6 +47,7 @@ pub fn addBeamExe(
     exe.link_gc_sections = false;
     if (with_erts) exe.forceUndefinedSymbol("erl_start");
     b.installArtifact(exe);
+    return exe;
 }
 
 pub fn addRoot(

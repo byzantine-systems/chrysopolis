@@ -30,7 +30,8 @@ page(root_status_page) ->
     Event = #{
         ticks => 1,
         kind => ?CHRYSO_ROOT_EVENT_KIND_BOOT,
-        child => 5,
+        child => 255,
+        flags => 0,
         detail => 0,
         a => 0,
         b => 0

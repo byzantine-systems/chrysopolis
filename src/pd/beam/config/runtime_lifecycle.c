@@ -27,6 +27,10 @@
 
 static libc_socket_config_t beam_socket_config;
 
+/* Linked only into the ERTS test image; production has no status polling path
+ * until the dedicated BEAM adapter is introduced. */
+extern void root_status_probe(void) __attribute__((weak));
+
 static void runtime_libc_init(bool network_enabled) {
   libc_socket_config_t *config = NULL;
   if (network_enabled) {
@@ -50,6 +54,9 @@ runtime_status_t runtime_lifecycle_start(void) {
 
   runtime_serial_init();
   beam_boot_banner();
+  if (root_status_probe != NULL) {
+    root_status_probe();
+  }
 
   /* Binding the filesystem precedes libc because libc_init_file installs its
    * syscall path from these globals. Active filesystem work needs cothreads

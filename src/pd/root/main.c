@@ -50,10 +50,18 @@
  *     child are logged as ignored and make no Microkit call.
  */
 #include "root_policy.h"
+#include "status.h"
 
+#include <chrysopolis/system_abi.h>
 #include <runtime_abi.h>
 
 #include <microkit.h>
+
+/* root_status payload ordering relies on one CPU serializing Root and the
+ * BEAM. The Nix build also rejects this; a bare zig build must too. */
+#if defined(CONFIG_ENABLE_SMP_SUPPORT) || CONFIG_MAX_NUM_NODES != 1
+#error "root_status needs a concurrent payload protocol before an SMP image"
+#endif
 
 #include <stddef.h>
 #include <stdint.h>
@@ -64,7 +72,7 @@
  * plus `microkit` run where nothing patches the section. */
 /* Entry points to resume children at, patched per-board at image assembly.
  * `volatile` + `used` + its own section keep the compiler from folding them and
- * let objcopy overwrite the pair, the same mechanism sDDF uses for its per-PD
+ * let objcopy overwrite the record, the same mechanism sDDF uses for its per-PD
  * config blobs.
  *
  * [0] restart_entry: the shared child ELF entry point (== _start). It is a
@@ -81,12 +89,17 @@
  * src/pd/beam/restart/restart.c). modules/images.nix resolves that symbol with
  * llvm-nm and patches it in.
  *
+ * [2] present_children_mask: the actual children in this image. Production
+ *     omits the crasher that the restart image stages; neither the fault path
+ *     nor the status initializer may treat an absent TCB as present.
+ *
  * The initializers are the fallback for an un-patched build. A zero
  * beam_reset_entry means "not patched", which root treats as "beam_server is
  * not restartable in this image" rather than jumping to address 0. */
 typedef struct {
   uint64_t restart_entry;
   uint64_t beam_reset_entry;
+  uint64_t present_children_mask;
 } root_restart_config_t;
 
 _Static_assert(sizeof(root_restart_config_t) ==
@@ -99,6 +112,9 @@ _Static_assert(offsetof(root_restart_config_t, restart_entry) == 0,
 _Static_assert(offsetof(root_restart_config_t, beam_reset_entry) ==
                    ROOT_RESTART_CONFIG_WORD_BYTES,
                "BEAM reset entry must be the second patch word");
+_Static_assert(offsetof(root_restart_config_t, present_children_mask) ==
+                   2 * ROOT_RESTART_CONFIG_WORD_BYTES,
+               "present children must be the third patch word");
 _Static_assert(sizeof(seL4_Word) == ROOT_RESTART_CONFIG_WORD_BYTES,
                "restart entries must have the target word width");
 
@@ -106,6 +122,7 @@ __attribute__((__section__(ROOT_RESTART_CONFIG_SECTION),
                used)) volatile root_restart_config_t restart_config = {
     .restart_entry = MICROKIT_RESTART_ENTRY,
     .beam_reset_entry = 0,
+    .present_children_mask = 0,
 };
 
 #define restart_entry (restart_config.restart_entry)
@@ -124,16 +141,33 @@ uintptr_t root_status_start;
 uintptr_t orchestrator_spec_view;
 
 /*
- * The children system_abi.zig declares, one bit per child id. fault() only
- * turns a raw id into a root_child when its bit is set, so the budget table is
- * never indexed and BASE_TCB_CAP + id is never invoked for anything else.
- * The crasher's bit is set in every image; in production no PD holds that
- * badge, so no fault can arrive with it.
+ * The policy-supported children, one bit per child id. fault() additionally
+ * checks the image-patched presence mask before accepting an ID: the crasher
+ * is supported by this Root binary but absent from production's TCB slots.
  */
 static constexpr uint64_t root_known_children =
     (UINT64_C(1) << ROOT_CHILD_SERIAL) | (UINT64_C(1) << ROOT_CHILD_TIMER) |
     (UINT64_C(1) << ROOT_CHILD_BLK) | (UINT64_C(1) << ROOT_CHILD_ETH) |
     (UINT64_C(1) << ROOT_CHILD_CRASHER) | (UINT64_C(1) << ROOT_CHILD_BEAM);
+
+static constexpr uint64_t root_base_children =
+    root_known_children & ~(UINT64_C(1) << ROOT_CHILD_CRASHER);
+
+static bool root_presence_valid(void) {
+  const uint64_t patched = restart_config.present_children_mask;
+  return (patched & root_base_children) == root_base_children &&
+         (patched & ~root_known_children) == 0;
+}
+
+/* A hand-assembled image has no patched presence mask; use only children that
+ * are guaranteed to exist in production. A malformed mask cannot grant a
+ * child capability or cause an absent child to appear live in status. */
+static uint64_t root_present_children(void) {
+  if (!root_presence_valid()) {
+    return root_base_children;
+  }
+  return restart_config.present_children_mask;
+}
 
 static_assert(ROOT_MAX_CHILDREN <= root_child_mask_bits,
               "every child id must have a bit in the known-child mask");
@@ -304,6 +338,13 @@ static seL4_Word root_restart_entry(root_child child) {
 /* Indexed by root_child.value, which root_child_from_raw bounds by
  * ROOT_MAX_CHILDREN. */
 static root_child_record child_records[ROOT_MAX_CHILDREN];
+/* Root's publisher. status_page is null when the MR is not mapped at the ABI
+ * address, and publication is then skipped without touching fault policy. */
+static root_status_state status_state;
+static chryso_root_status_page *status_page;
+static_assert(chryso_control_status_root_vaddr %
+                  alignof(chryso_root_status_page) ==
+              0);
 
 /* The generic timer's physical counter is already read by the sDDF timer PD
  * and beam_server on this board. Root reads it directly at EL0: a PPC to the
@@ -332,6 +373,80 @@ static constexpr uint64_t root_test_leak_ms = 2000;
 static constexpr unsigned int root_test_window_capacity = 1;
 static constexpr unsigned int root_test_lifetime_limit = 3;
 #endif
+
+/* A raw counter read. It never goes through root_clock_observe, so status
+ * publication cannot change the clock state the restart policy decides on. */
+static uint64_t root_status_ticks(void) {
+  return root_clock_state.available ? root_now_ticks() : 0;
+}
+
+/* The lifetime ceiling root_restart_child applies to this child. */
+static unsigned int root_status_budget(root_child child) {
+  unsigned int budget = root_restart_budget(child);
+#ifdef ROOT_TEST_BUDGET
+  if (root_test_budget.capacity != 0) {
+    budget = root_test_budget.lifetime_limit;
+  } else if (budget > root_test_lifetime_limit) {
+    budget = root_test_lifetime_limit;
+  }
+#endif
+  return budget;
+}
+
+/* No default, so -Wswitch flags a new action that lacks a wire reason. */
+static chryso_root_giveup_reason
+root_status_giveup(root_restart_action action) {
+  switch (action) {
+  case root_restart_giveup_budget_exhausted:
+    return chryso_root_giveup_reason_budget_exhausted;
+  case root_restart_giveup_window_exhausted:
+    return chryso_root_giveup_reason_window_exhausted;
+  case root_restart_giveup_lifetime_exhausted:
+    return chryso_root_giveup_reason_lifetime_exhausted;
+  case root_restart_giveup_no_entry:
+    return chryso_root_giveup_reason_no_entry;
+  case root_restart_resume:
+  case root_restart_ignore_gone:
+    break;
+  }
+  return chryso_root_giveup_reason_unset;
+}
+
+/* The restart or giveup record for an action that was not ignore_gone. */
+static chryso_root_event root_status_outcome(root_child child,
+                                             root_restart_action action) {
+  const root_child_record *record = &child_records[child.value];
+  const bool resumed = action == root_restart_resume;
+  return (chryso_root_event){
+      .ticks = root_clock_state.available ? root_clock_state.last_ticks : 0,
+      .kind = resumed ? chryso_root_event_kind_restart
+                      : chryso_root_event_kind_giveup,
+      .child = (uint8_t)child.value,
+      .detail = resumed ? 0 : root_status_giveup(action),
+      .a = record->lifetime_count,
+      .b = record->window_count,
+  };
+}
+
+/* Called at the tail of a callback. Diagnostics print once per boot, since a
+ * disabled publisher stays disabled. */
+static void root_publish(root_child child, const chryso_root_event *events,
+                         size_t count) {
+  if (status_page != nullptr && status_state.enabled) {
+    (void)root_status_publish(&status_state, status_page, child.value,
+                              &child_records[child.value],
+                              root_status_budget(child), root_status_ticks(),
+                              root_clock_state.available, events, count);
+  }
+  if (status_state.exhausted) {
+    microkit_dbg_puts("ROOT|status|exhausted\n");
+    status_state.exhausted = false;
+  }
+  if (status_state.misused) {
+    microkit_dbg_puts("ROOT|status|invalid-publish\n");
+    status_state.misused = false;
+  }
+}
 
 /* --- tiny dependency-free formatters (no libc/printf in the Root PD) --- */
 
@@ -402,6 +517,18 @@ void init(void) {
   microkit_dbg_puts("|beam-entry=");
   put_hex((seL4_Word)beam_reset_entry);
   microkit_dbg_puts("\n");
+  /* The ABI vaddr is aligned (asserted at file scope), so a matching patch
+   * is a valid page pointer. Anything else leaves publication off. */
+  status_page = root_presence_valid() &&
+                        root_status_start == chryso_control_status_root_vaddr
+                    ? (chryso_root_status_page *)root_status_start
+                    : nullptr;
+  const uint64_t present = root_present_children();
+  root_status_init(&status_state, status_page, present, root_status_ticks(),
+                   root_clock_state.available ? frequency : 0,
+                   root_status_budget((root_child){.value = ROOT_CHILD_SERIAL}),
+                   root_status_budget((root_child){.value = ROOT_CHILD_BEAM}),
+                   ROOT_CHILD_BEAM);
 }
 
 /*
@@ -453,6 +580,8 @@ static void root_log_ignored(root_child child, const char *request) {
 static void root_giveup(root_child child, const char *reason) {
   root_record_give_up(&child_records[child.value]);
   microkit_pd_stop(child.value);
+  root_status_note_gone(&status_state, child.value, root_status_ticks(),
+                        root_clock_state.available);
 
   const root_channel gone = root_gone_channel(child);
   if (gone.value != ROOT_GONE_CH_NONE) {
@@ -503,7 +632,8 @@ static void root_giveup(root_child child, const char *reason) {
  * (that happens once, at boot, in the Microkit loader), which is why each
  * driver's init() has to be idempotent.
  */
-static void root_restart_child(root_child child, const char *request) {
+static root_restart_action root_restart_child(root_child child,
+                                              const char *request) {
   root_child_record *record = &child_records[child.value];
   const seL4_Word entry = root_restart_entry(child);
   const unsigned int legacy_budget = root_restart_budget(child);
@@ -544,25 +674,28 @@ static void root_restart_child(root_child child, const char *request) {
   switch (action) {
   case root_restart_ignore_gone:
     root_log_ignored(child, request);
-    return;
+    return action;
   case root_restart_giveup_budget_exhausted:
   case root_restart_giveup_window_exhausted:
   case root_restart_giveup_lifetime_exhausted:
   case root_restart_giveup_no_entry:
     root_giveup(child, root_restart_giveup_reason(action));
-    return;
+    return action;
   case root_restart_resume:
     break;
   }
 
   /* Budget remains: spend one and restart. The count is incremented BEFORE the
-   * restart so that if the child faults again immediately (the crasher PD
-   * does exactly this, re-faulting inside init()), the re-entrant fault()
-   * observes the already-charged count and the budget still converges. */
+   * restart so that the child cannot run and fault again (the crasher PD
+   * does exactly this inside init()) before the next serialized fault()
+   * observes the already-charged count. */
   if (!timed_charge) {
     root_record_charge(record);
   }
   microkit_pd_restart(child.value, entry);
+  root_status_note_restart(&status_state, child.value, root_status_ticks(),
+                           root_clock_state.available,
+                           child.value == ROOT_CHILD_BEAM);
   microkit_dbg_puts("ROOT|");
   microkit_dbg_puts(request);
   microkit_dbg_puts("|child=");
@@ -574,6 +707,7 @@ static void root_restart_child(root_child child, const char *request) {
   put_dec(record->window_count);
 #endif
   microkit_dbg_puts("\n");
+  return action;
 }
 
 /*
@@ -590,13 +724,20 @@ void notified(microkit_channel ch) {
   size_t index = 0;
   switch (
       root_notify_route((root_channel){.value = ch}, &root_channels, &index)) {
-  case root_notify_debug_restart:
+  case root_notify_debug_restart: {
     /* A debug-restart request for a known driver class. Unlike fault(),
      * nothing has gone wrong here: a test is asking us to restart a HEALTHY
      * driver so it can isolate the recovery behavior. This path deliberately
      * involves no fault at all. */
-    root_restart_child(root_class_child[index], "debug-restart");
+    const root_child child = root_class_child[index];
+    const root_restart_action action =
+        root_restart_child(child, "debug-restart");
+    if (action != root_restart_ignore_gone) {
+      const chryso_root_event event = root_status_outcome(child, action);
+      root_publish(child, &event, 1);
+    }
     return;
+  }
 
   case root_notify_fault_inject: {
     /* Resume the real driver at an unmapped instruction address. Do not spend
@@ -617,6 +758,13 @@ void notified(microkit_channel ch) {
     put_dec(child.value);
     microkit_dbg_puts("\n");
     microkit_pd_restart(child.value, 0);
+    const chryso_root_event event = {
+        .ticks = root_status_ticks(),
+        .kind = chryso_root_event_kind_control,
+        .child = (uint8_t)child.value,
+        .detail = chryso_root_control_kind_fault_inject,
+    };
+    root_publish(child, &event, 1);
     return;
   }
 
@@ -688,8 +836,8 @@ seL4_Bool fault(microkit_child raw_child, microkit_msginfo msginfo,
    * In practice this is unreachable, because only children carry a fault
    * badge; it exists so a future topology change fails visibly and safely. */
   root_child child = {};
-  if (!root_child_from_raw(raw_child, ROOT_MAX_CHILDREN, root_known_children,
-                           &child)) {
+  if (!root_child_from_raw(raw_child, ROOT_MAX_CHILDREN,
+                           root_present_children(), &child)) {
     microkit_dbg_puts("ROOT|reject|child=");
     put_dec(raw_child);
     microkit_dbg_puts("|reason=out-of-range\n");
@@ -698,7 +846,27 @@ seL4_Bool fault(microkit_child raw_child, microkit_msginfo msginfo,
 
   /* Apply the restart policy. Identical to what a debug-restart request gets,
    * and sharing one budget between the two (see root_restart_child). */
-  root_restart_child(child, "restart");
+  const uint64_t fault_ticks = root_status_ticks();
+  const uint64_t mr0 = count >= 1 ? microkit_mr_get(0) : 0;
+  const uint64_t mr1 = count >= 2 ? microkit_mr_get(1) : 0;
+  root_status_note_fault(&status_state, child.value, label, count, mr0, mr1,
+                         fault_ticks, root_clock_state.available);
+  const root_restart_action action = root_restart_child(child, "restart");
+  const chryso_root_event events[2] = {
+      {
+          .ticks = fault_ticks,
+          .kind = chryso_root_event_kind_fault,
+          .child = (uint8_t)child.value,
+          .flags = (uint16_t)((count >= 1 ? chryso_fault_mr0_valid : 0u) |
+                              (count >= 2 ? chryso_fault_mr1_valid : 0u)),
+          .detail = label <= UINT32_MAX ? (uint32_t)label : 0,
+          .a = mr0,
+          .b = mr1,
+      },
+      action == root_restart_ignore_gone ? (chryso_root_event){}
+                                         : root_status_outcome(child, action),
+  };
+  root_publish(child, events, action == root_restart_ignore_gone ? 1 : 2);
 
   /* seL4_False tells libmicrokit NOT to reply to the fault IPC. Replying is
    * the other way to resume a faulting thread (it restarts it at the faulting

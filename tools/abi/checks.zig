@@ -86,11 +86,54 @@ pub const Compare = struct {
     value: u64,
 };
 
+pub const RingDropped = struct {
+    head: Int,
+    dropped: Int,
+    capacity: u64,
+};
+
+/// Kinds in `global` carry the sentinel child; every other kind a real one.
+pub const EventChild = struct {
+    kind: Int,
+    child: Int,
+    sentinel: u64,
+    global: []const u64,
+    targets: Rows,
+    target_state: Int,
+};
+
+/// A nonzero `int` is allowed only while `kind` holds `value`.
+pub const OnlyForKind = struct {
+    int: Int,
+    kind: Int,
+    value: u64,
+};
+
+/// When any bit of `when` is set, every bit of `requires` is set too.
+pub const Implies = struct {
+    int: Int,
+    when: u64,
+    requires: u64,
+};
+
+/// While `int` is zero (an unset row) the whole span is zero.
+pub const ZeroWhenUnset = struct {
+    int: Int,
+    span: Span,
+};
+
 pub const Member = struct {
     int: Int,
     enumeration: []const u8,
     /// Reject a declared zero tag (`unset` is never published here).
     reject_zero: bool,
+};
+
+/// `member` applies only while `kind` holds `value`.
+pub const KindMember = struct {
+    kind: Int,
+    value: u64,
+    member: Member,
 };
 
 pub const Crc = struct {
@@ -122,8 +165,14 @@ pub const Check = union(enum) {
     crc32: Crc,
     zero: Span,
     member: Member,
+    kind_member: KindMember,
     equal: Compare,
     at_most: Compare,
+    ring_dropped: RingDropped,
+    event_child: EventChild,
+    implies: Implies,
+    only_for_kind: OnlyForKind,
+    zero_when_unset: ZeroWhenUnset,
     /// A live entry repeats the header generation and its own sequence.
     entry_identity: EntryIdentity,
     /// Payload bytes after `min(length, payload.len)` are zero.
@@ -202,8 +251,13 @@ const Entry = abi.JournalEntry;
 
 const status_rows: Scope = .{ .rows = rowsOf(Status, "children") };
 const status_events: Scope = .{ .window = windowOf(Status, "events", "header.event_head", .ring) };
+const child_state: Int = .{ .offset = @offsetOf(Child, "state"), .width = @sizeOf(@FieldType(Child, "state")) };
 const spec_bank: Scope = .{ .selected = rowsOf(Spec, "banks") };
 const journal_entries: Scope = .{ .window = windowOf(Journal, "entries", "header.published_seq", .journal) };
+
+const Kind = abi.RootEventKind;
+const global_event_kinds = [_]u64{ @intFromEnum(Kind.boot), @intFromEnum(Kind.spec_reject) };
+const fault_words = abi.fault_mr0_valid | abi.fault_mr1_valid;
 
 const root_status_rules = [_]Rule{
     rule(.magic, .whole, .{ .magic = .{ .int = int(Status, "header.magic"), .value = abi.magic.status } }),
@@ -211,14 +265,22 @@ const root_status_rules = [_]Rule{
     rule(.torn, .whole, .{ .seqlock = int(Status, "header.seq") }),
     rule(.reserved, .whole, .{ .zero = span(Status, "header.reserved0") }),
     rule(.reserved, status_rows, .{ .zero = span(Child, "reserved") }),
-    rule(.reserved, status_events, .{ .zero = span(Event, "pad") }),
     rule(.reserved, .whole, .{ .zero = span(Status, "reserved_tail") }),
     rule(.unknown_kind, status_rows, .{ .member = .{ .int = int(Child, "state"), .enumeration = "RootChildWireState", .reject_zero = false } }),
     rule(.unknown_kind, status_rows, .{ .member = .{ .int = int(Child, "desired"), .enumeration = "RootDesired", .reject_zero = false } }),
     rule(.unknown_kind, status_events, .{ .member = .{ .int = int(Event, "kind"), .enumeration = "RootEventKind", .reject_zero = true } }),
+    rule(.unknown_kind, status_events, .{ .kind_member = .{ .kind = int(Event, "kind"), .value = @intFromEnum(Kind.giveup), .member = .{ .int = int(Event, "detail"), .enumeration = "RootGiveupReason", .reject_zero = true } } }),
+    rule(.unknown_kind, status_events, .{ .kind_member = .{ .kind = int(Event, "kind"), .value = @intFromEnum(Kind.control), .member = .{ .int = int(Event, "detail"), .enumeration = "RootControlKind", .reject_zero = true } } }),
     rule(.range, .whole, .{ .equal = .{ .int = int(Status, "header.child_count"), .value = abi.child_count } }),
     rule(.range, .whole, .{ .at_most = .{ .int = int(Status, "header.applied_bank"), .value = 1 } }),
-    rule(.range, status_events, .{ .at_most = .{ .int = int(Event, "child"), .value = abi.child_count - 1 } }),
+    rule(.range, status_rows, .{ .at_most = .{ .int = int(Child, "flags"), .value = fault_words | abi.down_interval_open } }),
+    rule(.range, status_rows, .{ .implies = .{ .int = int(Child, "flags"), .when = abi.fault_mr1_valid, .requires = abi.fault_mr0_valid } }),
+    rule(.range, status_rows, .{ .zero_when_unset = .{ .int = int(Child, "state"), .span = .{ .offset = 0, .len = @sizeOf(Child) } } }),
+    rule(.range, status_events, .{ .at_most = .{ .int = int(Event, "flags"), .value = fault_words } }),
+    rule(.range, status_events, .{ .implies = .{ .int = int(Event, "flags"), .when = abi.fault_mr1_valid, .requires = abi.fault_mr0_valid } }),
+    rule(.range, status_events, .{ .only_for_kind = .{ .int = int(Event, "flags"), .kind = int(Event, "kind"), .value = @intFromEnum(Kind.fault) } }),
+    rule(.range, status_events, .{ .event_child = .{ .kind = int(Event, "kind"), .child = int(Event, "child"), .sentinel = abi.root_event_no_child, .global = &global_event_kinds, .targets = status_rows.rows, .target_state = child_state } }),
+    rule(.range, .whole, .{ .ring_dropped = .{ .head = int(Status, "header.event_head"), .dropped = int(Status, "header.event_dropped"), .capacity = abi.event_count } }),
 };
 
 const spec_header_rules = [_]Rule{
@@ -419,8 +481,8 @@ pub fn validateChecker(checker: Checker, description: model.Description, diagnos
             .seqlock, .nonzero, .entry_identity => .torn,
             .crc32 => .checksum,
             .zero, .payload_tail => .reserved,
-            .member => .unknown_kind,
-            .equal, .at_most => .range,
+            .member, .kind_member => .unknown_kind,
+            .equal, .at_most, .ring_dropped, .event_child, .implies, .only_for_kind, .zero_when_unset => .range,
         };
         if (expected != item.class)
             return reject(diagnostic, checker.name, "check kind matches its class", error.RuleClass);
@@ -433,6 +495,31 @@ pub fn validateChecker(checker: Checker, description: model.Description, diagnos
             },
             .version => |value| value.value == description.abi_version and intFits(value.int, extent),
             .equal, .at_most => |value| intFits(value.int, extent) and valueFits(value.value, value.int.width),
+            .ring_dropped => |value| intFits(value.head, extent) and intFits(value.dropped, extent) and value.head.width == 8 and value.dropped.width == 8 and value.capacity != 0,
+            .event_child => |value| blk: {
+                if (!intFits(value.kind, extent) or !intFits(value.child, extent) or
+                    value.kind.width != 1 or value.child.width != 1 or !valueFits(value.sentinel, 1) or
+                    !scopeFits(checker, .{ .rows = value.targets }) or
+                    value.target_state.width != 1 or !intFits(value.target_state, value.targets.stride) or
+                    value.targets.count > value.sentinel)
+                    break :blk false;
+                for (value.global) |kind| {
+                    if (!valueFits(kind, 1)) break :blk false;
+                }
+                break :blk true;
+            },
+            .implies => |value| intFits(value.int, extent) and value.when != 0 and value.requires != 0 and
+                valueFits(value.when, value.int.width) and valueFits(value.requires, value.int.width),
+            .only_for_kind => |value| intFits(value.int, extent) and intFits(value.kind, extent) and valueFits(value.value, value.kind.width),
+            .zero_when_unset => |value| intFits(value.int, extent) and fits(value.span.offset, value.span.len, extent),
+            .kind_member => |value| blk: {
+                const enumeration = findEnum(description, value.member.enumeration) orelse
+                    return reject(diagnostic, checker.name, "member rule names a wire enum", error.UnknownRuleEnum);
+                if (!enumeration.wire)
+                    return reject(diagnostic, checker.name, "member rule names a wire enum", error.UnknownRuleEnum);
+                break :blk intFits(value.kind, extent) and valueFits(value.value, value.kind.width) and
+                    intFits(value.member.int, extent) and enumeration.width == value.member.int.width;
+            },
             .seqlock, .nonzero => |value| intFits(value, extent),
             .zero => |value| fits(value.offset, value.len, extent),
             .crc32 => |value| blk: {
@@ -551,6 +638,28 @@ fn holds(check: Check, bytes: []const u8, base: usize, sequence: u64) bool {
     return switch (check) {
         .magic, .version, .equal => |value| load(bytes, base + value.int.offset, value.int.width) == value.value,
         .at_most => |value| load(bytes, base + value.int.offset, value.int.width) <= value.value,
+        .ring_dropped => |value| blk: {
+            const head = load(bytes, base + value.head.offset, 8);
+            const dropped = load(bytes, base + value.dropped.offset, 8);
+            break :blk dropped == (if (head > value.capacity) head - value.capacity else 0);
+        },
+        .event_child => |value| blk: {
+            const kind = load(bytes, base + value.kind.offset, 1);
+            const child = load(bytes, base + value.child.offset, 1);
+            if (std.mem.indexOfScalar(u64, value.global, kind) != null) break :blk child == value.sentinel;
+            break :blk child < value.targets.count and
+                load(bytes, value.targets.base + child * value.targets.stride + value.target_state.offset, 1) != 0;
+        },
+        .only_for_kind => |value| load(bytes, base + value.int.offset, value.int.width) == 0 or
+            load(bytes, base + value.kind.offset, value.kind.width) == value.value,
+        .implies => |value| blk: {
+            const raw = load(bytes, base + value.int.offset, value.int.width);
+            break :blk raw & value.when == 0 or raw & value.requires == value.requires;
+        },
+        .zero_when_unset => |value| load(bytes, base + value.int.offset, value.int.width) != 0 or
+            std.mem.allEqual(u8, bytes[base + value.span.offset ..][0..value.span.len], 0),
+        .kind_member => |value| load(bytes, base + value.kind.offset, value.kind.width) != value.value or
+            holds(.{ .member = value.member }, bytes, base, sequence),
         .seqlock => |value| blk: {
             const seq = load(bytes, base + value.offset, value.width);
             break :blk seq != 0 and seq & 1 == 0;

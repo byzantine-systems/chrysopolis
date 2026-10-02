@@ -47,6 +47,25 @@
       "BEAM_MARK_AFTER|absent"
     ]
   },
+  "orch-status-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "BEAM reads a validated Root-owned status snapshot without a PPC",
+      "a BEAM restart observes the updated incarnation and charged child row"
+    ],
+    "required_markers": [
+      "ROOT_STATUS|boot|incarnation=1",
+      "ROOT_STATUS|restart|incarnation=2|count=1"
+    ],
+    "forbidden_markers": [
+      "ROOT_STATUS|invalid-map",
+      "ROOT_STATUS|invalid-page",
+      "ROOT_STATUS|invalid-rows",
+      "ROOT_STATUS|unexpected-journal",
+      "ROOT_STATUS|unexpected-transition",
+      "ROOT_STATUS|torn"
+    ]
+  },
   "blk-giveup-smoke": {
     "kind": "qemu",
     "protects": [

@@ -255,7 +255,9 @@ test "load path rejects incomplete and stale JSON projections" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.MissingField, system.load(arena.allocator(), "fixtures/missing-required.json"));
-    try std.testing.expectError(error.StaleSystemAbiProjection, system.load(arena.allocator(), "fixtures/stale-config-section.json"));
+    // This older projection now has an obsolete restart payload width, so
+    // validation rejects it before the content-equality stale check.
+    try std.testing.expectError(error.InvalidRestartConfigLayout, system.load(arena.allocator(), "fixtures/stale-config-section.json"));
     var same_content = system.values;
     const copies = try arena.allocator().dupe(system.ConfigSection, system.values.config_sections);
     copies[0].blob = try arena.allocator().dupe(u8, system.values.config_sections[0].blob);

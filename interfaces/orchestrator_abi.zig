@@ -11,6 +11,10 @@ const std = @import("std");
 pub const abi_version: u32 = 1;
 pub const child_count: usize = 62;
 pub const event_count: usize = 128;
+pub const root_event_no_child: u8 = 255;
+pub const fault_mr0_valid: u16 = 1;
+pub const fault_mr1_valid: u16 = 2;
+pub const down_interval_open: u16 = 4;
 pub const journal_capacity: usize = 15;
 pub const journal_payload_size: usize = 192;
 
@@ -59,6 +63,21 @@ pub const RootEventKind = enum(u8) {
     reclaim = 7,
     control = 8,
     spec_reject = 9,
+};
+
+/// `RootEvent.detail` of a `giveup` event.
+pub const RootGiveupReason = enum(u32) {
+    unset = 0,
+    budget_exhausted = 1,
+    window_exhausted = 2,
+    lifetime_exhausted = 3,
+    no_entry = 4,
+};
+
+/// `RootEvent.detail` of a `control` event: the request Root served.
+pub const RootControlKind = enum(u32) {
+    unset = 0,
+    fault_inject = 1,
 };
 
 pub const PpOpcode = enum(u16) {
@@ -275,10 +294,12 @@ pub const RootChildStatus = extern struct {
     lifetime_count: u32,
     effective_budget: u32,
     fault_label: u32,
-    fault_pc: u64,
-    fault_addr: u64,
+    // Raw fault IPC words; their interpretation depends on fault_label.
+    fault_mr0: u64,
+    fault_mr1: u64,
     last_fault_ticks: u64,
     last_restart_ticks: u64,
+    // When Root first started the child; restarts update last_restart_ticks.
     boot_ticks: u64,
     cumulative_down_ticks: u64,
     slot_generation: u64,
@@ -286,16 +307,46 @@ pub const RootChildStatus = extern struct {
     reserved: u32 = 0,
 };
 
+/// One record of Root's lossy event ring. Payload by kind:
+/// - boot: child 255, a = root_generation, b = beam_incarnation.
+/// - fault: detail = seL4 fault label (0 if wider than 32 bits), a/b = the raw
+///   fault IPC words, present as `flags` says.
+/// - restart: a = lifetime_count, b = window_count after the charge.
+/// - giveup: detail = RootGiveupReason, a = lifetime_count, b = window_count.
+/// - control: detail = RootControlKind, child = its target.
+/// No field carries an address, capability slot or other PD-local handle.
 pub const RootEvent = extern struct {
     ticks: u64,
     kind: u8,
     child: u8,
-    pad: u16 = 0,
+    // The low two bits say whether a/b came from valid fault IPC words.
+    flags: u16 = 0,
     detail: u32,
     a: u64,
     b: u64,
 };
 
+/// Root's status page: Root is the only writer and never reads it back.
+///
+/// Freshness contract for readers:
+/// - Root publishes at the tail of its callbacks (init, fault, notified), not
+///   on a heartbeat. A quiet page that stops changing proves nothing about
+///   whether Root, or any child, is alive.
+/// - A copy is consistent only if `seq` was the same nonzero even value
+///   before and after it; retry a bounded number of times, then report torn.
+/// - Identify a snapshot by (root_generation, beam_incarnation, seq). Within
+///   one generation none of these, `event_head`, a row's `lifetime_count` or
+///   its `cumulative_down_ticks` decreases; an equal seq means equal bytes.
+/// - Age is `reader_ticks - now_ticks`, meaningful only when `cntfrq` is
+///   nonzero and equals the reader's counter frequency. It is an observation,
+///   never a health or readiness verdict.
+/// - Child rows are authoritative. The event ring is diagnostic and may
+///   overwrite: `event_dropped` counts Root's overwrites, while a reader's own
+///   loss is `max(head - 128, 0) - previous_head` when that is positive.
+/// - Root stops publishing, keeping the last even snapshot, before `seq`,
+///   `event_head` or `beam_incarnation` could wrap; fault handling continues.
+/// - Ordering relies on the one-core image serializing Root and the BEAM; an
+///   SMP image needs a separate payload-ordering proof and is rejected.
 pub const RootStatusPage = extern struct {
     header: RootStatusHeader,
     children: [child_count]RootChildStatus,
@@ -581,7 +632,7 @@ test "reserved fields default to zero" {
     for (command.reserved) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 
     const event: RootEvent = .{ .ticks = 0, .kind = 0, .child = 0, .detail = 0, .a = 0, .b = 0 };
-    try std.testing.expectEqual(@as(u16, 0), event.pad);
+    try std.testing.expectEqual(@as(u16, 0), event.flags);
 
     const status = std.mem.zeroes(RootStatusPage);
     const spec = std.mem.zeroes(SpecPage);

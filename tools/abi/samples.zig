@@ -7,7 +7,7 @@ pub fn status() abi.RootStatusPage {
     page.header = .{ .magic = abi.magic.status, .abi_version = abi.abi_version, .child_count = abi.child_count, .seq = 2, .root_generation = 1, .beam_incarnation = 1, .now_ticks = 9, .cntfrq = 62_500_000, .event_head = 130, .event_dropped = 2, .applied_spec_generation = 1, .applied_bank = 0 };
     page.children[0].state = @intFromEnum(abi.RootChildWireState.live);
     page.children[0].desired = @intFromEnum(abi.RootDesired.running);
-    for (&page.events) |*event| event.* = .{ .ticks = 1, .kind = @intFromEnum(abi.RootEventKind.boot), .child = 5, .detail = 0, .a = 0, .b = 0 };
+    for (&page.events) |*event| event.* = .{ .ticks = 1, .kind = @intFromEnum(abi.RootEventKind.boot), .child = abi.root_event_no_child, .detail = 0, .a = 0, .b = 0 };
     return page;
 }
 
