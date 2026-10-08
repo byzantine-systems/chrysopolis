@@ -127,6 +127,7 @@ jobs:
           - budget-decay-smoke
           - beam-restart-smoke
           - orch-status-smoke
+          - orch-spec-smoke
           - serial-recovery
           - timer-recovery
           - blk-recovery

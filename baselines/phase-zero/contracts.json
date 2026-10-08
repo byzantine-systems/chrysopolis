@@ -66,6 +66,28 @@
       "ROOT_STATUS|torn"
     ]
   },
+  "orch-spec-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "Root applies a complete committed spec while a newer commit is half written across a BEAM restart",
+      "Root rejects a conflicting equal generation, keeps its applied budget and gives up where the compiled budget would restart"
+    ],
+    "required_markers": [
+      "SPEC_FIXTURE|open|committed=1|pending=2",
+      "ROOT|spec|applied|generation=0x0000000000000001|bank=1",
+      "SPEC_FIXTURE|applied|generation=1",
+      "SPEC_FIXTURE|conflict-staged",
+      "ROOT|spec|reject|reason=conflict|generation=0x0000000000000001|bank=0",
+      "ROOT|giveup|child=5|reason=budget-exhausted"
+    ],
+    "forbidden_markers": [
+      "SPEC_FIXTURE|unexpected-applied",
+      "SPEC_FIXTURE|writer-refused",
+      "SPEC_FIXTURE|invalid-map",
+      "SPEC_FIXTURE|status-unreadable",
+      "SPEC_FIXTURE|later"
+    ]
+  },
   "blk-giveup-smoke": {
     "kind": "qemu",
     "protects": [

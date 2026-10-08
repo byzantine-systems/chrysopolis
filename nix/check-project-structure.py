@@ -80,7 +80,7 @@ def framework(include: str) -> str | None:
 
 
 def permitted_framework(path: str, kind: str) -> bool:
-    if path in ("src/pd/root/main.c", "src/pd/test_support/crasher.c", "src/pd/test_support/status_probe.c"):
+    if path in ("src/pd/root/main.c", "src/pd/test_support/crasher.c", "src/pd/test_support/status_probe.c", "src/pd/test_support/spec_fixture.c"):
         return kind == "kernel"
     if path == "src/pd/smp/smp.c":
         return kind == "kernel"
