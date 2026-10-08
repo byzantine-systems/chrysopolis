@@ -238,6 +238,10 @@
               ../src/pd/root/policy
               ../src/pd/root/status.c
               ../src/pd/root/status.h
+              ../src/pd/root/spec.c
+              ../src/pd/root/spec.h
+              ../src/lib/abi/spec_writer.c
+              ../src/lib/abi/spec_writer.h
               ../src/lib/abi/root_status_reader.c
               ../src/lib/abi/root_status_reader.h
               abiGeneratorFiles

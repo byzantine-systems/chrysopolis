@@ -41,15 +41,19 @@
  *     declares. An id outside that set never reaches a capability invocation.
  *
  * Child lifecycle:
- *   - Every child starts live with zero restart counts. Production still uses
- *     the original lifetime budget until a validated orchestration policy can
- *     select the timed path. A separate test Root exercises that path now.
+ *   - Every child starts live with zero restart counts. Its lifetime ceiling
+ *     is the compiled budget until the BEAM commits a spec, then the spec's
+ *     budget for it, capped at the ABI's hard maximum (spec.h). Root reads
+ *     the spec page at each restart decision and never lets a torn,
+ *     malformed, older or conflicting commit change the policy it holds. A
+ *     separate test Root exercises the timed path.
  *   - When the selected budget is spent (or there is no entry to restart at)
  * Root stops the child, marks it gone and tells its dependents once. Gone is
  *     terminal: later faults, debug restarts and fault injections for that
  *     child are logged as ignored and make no Microkit call.
  */
 #include "root_policy.h"
+#include "spec.h"
 #include "status.h"
 
 #include <chrysopolis/system_abi.h>
@@ -342,6 +346,18 @@ static root_child_record child_records[ROOT_MAX_CHILDREN];
  * address, and publication is then skipped without touching fault policy. */
 static root_status_state status_state;
 static chryso_root_status_page *status_page;
+/* The BEAM's committed policy, null when the MR is not mapped at the ABI
+ * address. Root reads it into spec_scratch at each decision and keeps the
+ * last applied policy in spec_state; it never writes the shared page. */
+static root_spec_state spec_state;
+static chryso_spec_page spec_scratch;
+static const chryso_spec_page *spec_page;
+static_assert(chryso_control_spec_root_vaddr % alignof(chryso_spec_page) == 0);
+/* A compiled budget above the ceiling would let the no-spec path exceed
+ * what any spec may ask for. */
+static_assert(ROOT_RESTART_BUDGET <= chryso_control_hard_budget_max &&
+                  ROOT_BEAM_RESTART_BUDGET <= chryso_control_hard_budget_max,
+              "compiled budgets must not exceed the spec hard maximum");
 static_assert(chryso_control_status_root_vaddr %
                   alignof(chryso_root_status_page) ==
               0);
@@ -380,17 +396,34 @@ static uint64_t root_status_ticks(void) {
   return root_clock_state.available ? root_now_ticks() : 0;
 }
 
+/* The compiled budget, or the applied spec's, capped at the hard maximum. */
+static unsigned int root_effective_budget(root_child child) {
+  return root_spec_budget(&spec_state, child.value, root_restart_budget(child),
+                          chryso_control_hard_budget_max);
+}
+
 /* The lifetime ceiling root_restart_child applies to this child. */
 static unsigned int root_status_budget(root_child child) {
-  unsigned int budget = root_restart_budget(child);
+  unsigned int budget = root_effective_budget(child);
 #ifdef ROOT_TEST_BUDGET
-  if (root_test_budget.capacity != 0) {
-    budget = root_test_budget.lifetime_limit;
-  } else if (budget > root_test_lifetime_limit) {
-    budget = root_test_lifetime_limit;
+  const unsigned int test_limit = root_test_budget.capacity != 0
+                                      ? root_test_budget.lifetime_limit
+                                      : root_test_lifetime_limit;
+  if (budget > test_limit) {
+    budget = test_limit;
   }
 #endif
   return budget;
+}
+
+/* The per-child budgets and desired states status rows publish. Children
+ * outside the presence mask are ignored by the status writer. */
+static void root_status_policy(uint32_t budget[static chryso_child_count],
+                               uint8_t desired[static chryso_child_count]) {
+  for (unsigned int i = 0; i < chryso_child_count; i++) {
+    budget[i] = root_status_budget((root_child){.value = i});
+    desired[i] = root_spec_desired(&spec_state, i, 0);
+  }
 }
 
 /* No default, so -Wswitch flags a new action that lacks a wire reason. */
@@ -434,8 +467,7 @@ static void root_publish(root_child child, const chryso_root_event *events,
                          size_t count) {
   if (status_page != nullptr && status_state.enabled) {
     (void)root_status_publish(&status_state, status_page, child.value,
-                              &child_records[child.value],
-                              root_status_budget(child), root_status_ticks(),
+                              &child_records[child.value], root_status_ticks(),
                               root_clock_state.available, events, count);
   }
   if (status_state.exhausted) {
@@ -471,6 +503,48 @@ static void put_hex(seL4_Word v) {
   }
   buf[2 + 16] = '\0';
   microkit_dbg_puts(buf);
+}
+
+/* Reads the spec page before a restart decision. A newly applied policy
+ * reaches every status row at the next publish; a new rejection is logged
+ * here and published by the caller as a spec_reject event. */
+static root_spec_result root_spec_refresh(void) {
+  const root_spec_result result = root_spec_consume(
+      &spec_state, spec_page, &spec_scratch, root_present_children());
+  if (result.outcome == root_spec_applied) {
+    uint32_t budget[chryso_child_count] = {};
+    uint8_t desired[chryso_child_count] = {};
+    root_status_policy(budget, desired);
+    root_status_note_policy(&status_state, spec_state.retained.generation,
+                            spec_state.retained.bank, budget, desired);
+    microkit_dbg_puts("ROOT|spec|applied|generation=");
+    put_hex(spec_state.retained.generation);
+    microkit_dbg_puts("|bank=");
+    put_dec(spec_state.retained.bank);
+    microkit_dbg_puts("\n");
+  }
+  if (result.record) {
+    microkit_dbg_puts("ROOT|spec|reject|reason=");
+    microkit_dbg_puts(root_spec_reject_name(result.reason));
+    microkit_dbg_puts("|generation=");
+    put_hex(result.generation);
+    microkit_dbg_puts("|bank=");
+    put_dec(result.bank);
+    microkit_dbg_puts("\n");
+  }
+  return result;
+}
+
+/* The spec_reject event for a rejection root_spec_refresh just recorded. */
+static chryso_root_event root_spec_event(const root_spec_result *result) {
+  return (chryso_root_event){
+      .ticks = root_status_ticks(),
+      .kind = chryso_root_event_kind_spec_reject,
+      .child = chryso_root_event_no_child,
+      .detail = result->reason,
+      .a = result->generation,
+      .b = result->bank,
+  };
 }
 
 void init(void) {
@@ -523,12 +597,16 @@ void init(void) {
                         root_status_start == chryso_control_status_root_vaddr
                     ? (chryso_root_status_page *)root_status_start
                     : nullptr;
+  spec_page = orchestrator_spec_view == chryso_control_spec_root_vaddr
+                  ? (const chryso_spec_page *)orchestrator_spec_view
+                  : nullptr;
+  root_spec_init(&spec_state);
   const uint64_t present = root_present_children();
+  uint32_t budget[chryso_child_count] = {};
+  uint8_t desired[chryso_child_count] = {};
+  root_status_policy(budget, desired);
   root_status_init(&status_state, status_page, present, root_status_ticks(),
-                   root_clock_state.available ? frequency : 0,
-                   root_status_budget((root_child){.value = ROOT_CHILD_SERIAL}),
-                   root_status_budget((root_child){.value = ROOT_CHILD_BEAM}),
-                   ROOT_CHILD_BEAM);
+                   root_clock_state.available ? frequency : 0, budget);
 }
 
 /*
@@ -633,10 +711,12 @@ static void root_giveup(root_child child, const char *reason) {
  * driver's init() has to be idempotent.
  */
 static root_restart_action root_restart_child(root_child child,
-                                              const char *request) {
+                                              const char *request,
+                                              root_spec_result *spec) {
+  *spec = root_spec_refresh();
   root_child_record *record = &child_records[child.value];
   const seL4_Word entry = root_restart_entry(child);
-  const unsigned int legacy_budget = root_restart_budget(child);
+  const unsigned int legacy_budget = root_effective_budget(child);
   if (root_clock_state.available &&
       root_clock_observe(&root_clock_state, root_now_ticks()) !=
           root_clock_ok) {
@@ -646,8 +726,13 @@ static root_restart_action root_restart_child(root_child child,
   bool timed_charge = false;
 #ifdef ROOT_TEST_BUDGET
   if (root_clock_state.available && root_test_budget.capacity != 0) {
+    /* The spec may lower the lifetime ceiling, never raise it. */
+    root_budget_policy policy = root_test_budget;
+    if (policy.lifetime_limit > legacy_budget) {
+      policy.lifetime_limit = legacy_budget;
+    }
     const root_timed_decision decision = root_restart_decide_at(
-        record, &root_test_budget, entry, root_clock_state.last_ticks);
+        record, &policy, entry, root_clock_state.last_ticks);
     if (decision.error == root_timed_valid) {
       action = decision.action;
       if (action == root_restart_resume) {
@@ -730,12 +815,18 @@ void notified(microkit_channel ch) {
      * driver so it can isolate the recovery behavior. This path deliberately
      * involves no fault at all. */
     const root_child child = root_class_child[index];
+    root_spec_result spec = {};
     const root_restart_action action =
-        root_restart_child(child, "debug-restart");
-    if (action != root_restart_ignore_gone) {
-      const chryso_root_event event = root_status_outcome(child, action);
-      root_publish(child, &event, 1);
+        root_restart_child(child, "debug-restart", &spec);
+    chryso_root_event events[2] = {};
+    size_t count = 0;
+    if (spec.record) {
+      events[count++] = root_spec_event(&spec);
     }
+    if (action != root_restart_ignore_gone) {
+      events[count++] = root_status_outcome(child, action);
+    }
+    root_publish(child, events, count);
     return;
   }
 
@@ -851,8 +942,11 @@ seL4_Bool fault(microkit_child raw_child, microkit_msginfo msginfo,
   const uint64_t mr1 = count >= 2 ? microkit_mr_get(1) : 0;
   root_status_note_fault(&status_state, child.value, label, count, mr0, mr1,
                          fault_ticks, root_clock_state.available);
-  const root_restart_action action = root_restart_child(child, "restart");
-  const chryso_root_event events[2] = {
+  root_spec_result spec = {};
+  const root_restart_action action =
+      root_restart_child(child, "restart", &spec);
+  /* fault, then the spec rejection seen while deciding, then the outcome. */
+  chryso_root_event events[3] = {
       {
           .ticks = fault_ticks,
           .kind = chryso_root_event_kind_fault,
@@ -863,10 +957,15 @@ seL4_Bool fault(microkit_child raw_child, microkit_msginfo msginfo,
           .a = mr0,
           .b = mr1,
       },
-      action == root_restart_ignore_gone ? (chryso_root_event){}
-                                         : root_status_outcome(child, action),
   };
-  root_publish(child, events, action == root_restart_ignore_gone ? 1 : 2);
+  size_t event_count = 1;
+  if (spec.record) {
+    events[event_count++] = root_spec_event(&spec);
+  }
+  if (action != root_restart_ignore_gone) {
+    events[event_count++] = root_status_outcome(child, action);
+  }
+  root_publish(child, events, event_count);
 
   /* seL4_False tells libmicrokit NOT to reply to the fault IPC. Replying is
    * the other way to resume a faulting thread (it restarts it at the faulting

@@ -57,6 +57,8 @@ const suites = [_]Suite{
     .{ .name = "root_policy", .source = "root/suite_root_policy.c", .unit_dir = "../../src/pd/root/policy", .units = &.{} },
     // root_control builds the shared BEAM reader with the suite's stricter flags.
     .{ .name = "root_control", .source = "root/suite_root_control.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{ "../../src/pd/root/policy", "../../src/lib/abi" }, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{"../../src/lib/abi/root_status_reader.c"}, .units = &.{"status.c"} },
+    // spec.c and spec_writer.c build as sources so they also meet the conversion warnings.
+    .{ .name = "root_spec", .source = "root/suite_root_spec.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{ "../../src/pd/root/policy", "../../src/lib/abi" }, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{ "../../src/pd/root/spec.c", "../../src/lib/abi/spec_writer.c" }, .units = &.{} },
     .{ .name = "snapshot", .source = "beam/restart/suite_snapshot.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{"beam_snapshot_codec.c"} },
     .{ .name = "restart_layout", .source = "beam/restart/suite_restart_layout.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{} },
     .{ .name = "rng_select", .source = "beam/security/suite_rng_select.c", .unit_dir = "../../src/pd/beam/security", .units = &.{"rng_select.c"} },
