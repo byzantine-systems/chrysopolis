@@ -80,6 +80,20 @@ pub const RootControlKind = enum(u32) {
     fault_inject = 1,
 };
 
+/// `RootEvent.detail` of a `spec_reject` event: why Root did not apply the
+/// header or active bank it read. An inactive bank mid-write is not reported.
+pub const RootSpecReject = enum(u32) {
+    unset = 0,
+    header = 1,
+    bank_torn = 2,
+    bank_checksum = 3,
+    bank_malformed = 4,
+    undeclared_child = 5,
+    regressed = 6,
+    conflict = 7,
+    unstable_copy = 8,
+};
+
 pub const PpOpcode = enum(u16) {
     unset = 0,
     hello = 1,
@@ -314,6 +328,9 @@ pub const RootChildStatus = extern struct {
 /// - restart: a = lifetime_count, b = window_count after the charge.
 /// - giveup: detail = RootGiveupReason, a = lifetime_count, b = window_count.
 /// - control: detail = RootControlKind, child = its target.
+/// - spec_reject: child 255, detail = RootSpecReject, a = the candidate
+///   generation (0 when unreadable), b = the bank it concerns (0 for header
+///   and unstable_copy). Root records a reason once until it changes.
 /// No field carries an address, capability slot or other PD-local handle.
 pub const RootEvent = extern struct {
     ticks: u64,
@@ -354,6 +371,24 @@ pub const RootStatusPage = extern struct {
     reserved_tail: [7240]u8 = [_]u8{0} ** 7240,
 };
 
+/// BEAM's committed policy page: the BEAM is the only writer, Root reads it.
+///
+/// Commit protocol, one bank at a time, always the inactive one:
+/// - open: `bank_seq` becomes the next odd value (release);
+/// - write: generation, length, record_count, budget[], desired[];
+/// - seal: `crc32` is CRC-32/IEEE (seed 0xFFFFFFFF, reflected 0xEDB88320,
+///   final complement) over all 2016 bank bytes with `crc32` and `bank_seq`
+///   read as zero;
+/// - close: `bank_seq` becomes the next even value (release);
+/// - flip: `active_bank` selects the bank (release).
+///
+/// Root prefers the active bank and falls back to any other sealed bank, and
+/// applies a bank only if its generation is newer than the one it holds, or
+/// equal with identical budget[] and desired[]. Generation 0 means no spec. A
+/// zero header or a bank whose `bank_seq` is 0 was never written. The writer
+/// refuses to reopen a bank at `bank_seq` 0xffff_fffe rather than wrap it.
+/// The CRC detects torn or corrupted writes, not a hostile writer; Root's
+/// clamps bound what any accepted bank can do.
 pub const SpecHeader = extern struct {
     magic: u64,
     abi_version: u32,

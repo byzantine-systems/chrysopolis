@@ -109,6 +109,20 @@
         .edits = .{ .{ .set = .{ .field = "events[0].kind", .value = 8 } }, .{ .set = .{ .field = "events[0].child", .value = 1 } } },
         .expect = .unknown_kind,
     },
+    // events[0] is the sample's global boot event; these turn it into a spec rejection.
+    .{
+        .name = "status_spec_reject",
+        .checker = "root_status_page",
+        .edits = .{ .{ .set = .{ .field = "events[0].kind", .value = 9 } }, .{ .set = .{ .field = "events[0].detail", .value = 7 } }, .{ .set = .{ .field = "events[0].a", .value = 1 } }, .{ .set = .{ .field = "events[0].b", .value = 1 } } },
+        .expect = .ok,
+    },
+    .{ .name = "status_spec_reject_unset", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "events[0].kind", .value = 9 } }}, .expect = .unknown_kind },
+    .{
+        .name = "status_spec_reject_on_child",
+        .checker = "root_status_page",
+        .edits = .{ .{ .set = .{ .field = "children[1].state", .value = 1 } }, .{ .set = .{ .field = "events[0].kind", .value = 9 } }, .{ .set = .{ .field = "events[0].child", .value = 1 } }, .{ .set = .{ .field = "events[0].detail", .value = 7 } } },
+        .expect = .range,
+    },
     .{ .name = "status_generation_zero", .checker = "root_status_page", .edits = .{.{ .set = .{ .field = "header.applied_spec_generation", .value = 0 } }}, .expect = .ok },
 
     // Spec page. The sample publishes bank 0 (generation 1, bank_seq 2); bank 1 is unpublished.
@@ -139,6 +153,7 @@
     },
     .{ .name = "bank_length_zero", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].length", .value = 0 } }}, .reseal = true, .expect = .range },
     .{ .name = "bank_record_count", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].record_count", .value = 61 } }}, .reseal = true, .expect = .range },
+    .{ .name = "bank_generation_covered", .checker = "spec_bank", .edits = .{.{ .add = .{ .field = "banks[0].generation", .value = 1 } }}, .expect = .checksum },
     .{ .name = "bank_generation_zero", .checker = "spec_bank", .edits = .{.{ .set = .{ .field = "banks[0].generation", .value = 0 } }}, .reseal = true, .expect = .ok },
 
     // Both banks published; the header selects bank 1. Each image is checked at both indices.

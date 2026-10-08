@@ -176,6 +176,7 @@ const enums = [_]Enum{
     describeEnum(abi.RootEventKind, true),
     describeEnum(abi.RootGiveupReason, true),
     describeEnum(abi.RootControlKind, true),
+    describeEnum(abi.RootSpecReject, true),
     describeEnum(abi.PpOpcode, true),
     describeEnum(abi.CtlResult, true),
     describeEnum(abi.WorkerHealth, true),
@@ -366,7 +367,7 @@ pub fn validateDescription(value: Description, diagnostic: *abi.Diagnostic) !voi
         diagnostic.* = .{ .path = "constants", .invariant = "typed ABI version and capacities" };
         return error.InvalidModelConstants;
     }
-    if (value.records.len != 16 or value.enums.len != 14 or
+    if (value.records.len != 16 or value.enums.len != 15 or
         value.magics.len != 8 or value.transitions.len != abi.slot_transitions.len)
     {
         diagnostic.* = .{ .path = "description", .invariant = "complete wire metadata" };
