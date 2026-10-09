@@ -62,6 +62,7 @@
         sel4BudgetDecayImage = config.packages.budget-decay-image;
         sel4LifecycleFailureImage = config.packages.lifecycle-failure-image;
         sel4ThreadProbeImage = config.packages.cothread-probe-image;
+        sel4SpecCommitImage = config.packages.spec-commit-image;
         fatDisk = config.packages.disk;
       };
       vmScenarioPackages = builtins.listToAttrs (

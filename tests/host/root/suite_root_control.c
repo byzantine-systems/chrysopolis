@@ -17,6 +17,12 @@ static root_status_state state;
 /* Serial, timer, blk, eth and beam; the crasher (4) is absent. */
 static constexpr uint64_t production = UINT64_C(0x2f);
 
+/* Compiled ceilings: 8 for every driver, 64 for the BEAM (child 5). */
+static constexpr uint32_t budgets[chryso_child_count] = {
+    8, 8, 8, 8, 8, 64, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8,  8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8,  8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8};
+
 static bool page_valid(void) {
   return chryso_check_root_status_page((const uint8_t *)&page, sizeof(page)) ==
          chryso_abi_reject_ok;
@@ -24,7 +30,7 @@ static bool page_valid(void) {
 
 static void start(uint64_t mask) {
   memset(&page, 0xa5, sizeof(page));
-  root_status_init(&state, &page, mask, 100, 62500000, 8, 64, 5);
+  root_status_init(&state, &page, mask, 100, 62500000, budgets);
   CHECK_EQ_U64(atomic_load(&page.header.seq), 2);
   CHECK_EQ_U64(page.header.event_head, 1);
   CHECK(page.events[0].kind == chryso_root_event_kind_boot);
@@ -60,7 +66,7 @@ static void test_fault_and_giveup(void) {
        .child = 2,
        .a = 1},
   };
-  CHECK(root_status_publish(&state, &page, 2, &child, 8, 114, true, events, 2));
+  CHECK(root_status_publish(&state, &page, 2, &child, 114, true, events, 2));
   CHECK_EQ_U64(page.header.seq, 4);
   CHECK_EQ_U64(page.header.event_head, 3);
   CHECK_EQ_U64(page.children[2].lifetime_count, 1);
@@ -81,7 +87,7 @@ static void test_fault_and_giveup(void) {
                           .child = 2,
                           .detail = chryso_root_giveup_reason_budget_exhausted,
                           .a = 1};
-  CHECK(root_status_publish(&state, &page, 2, &child, 8, 121, true, events, 2));
+  CHECK(root_status_publish(&state, &page, 2, &child, 121, true, events, 2));
   CHECK_EQ_U64(page.children[2].state, chryso_root_child_wire_state_gone);
   CHECK_EQ_U64(page.children[2].flags, chryso_down_interval_open);
   CHECK_EQ_U64(page.children[2].cumulative_down_ticks, 4);
@@ -128,8 +134,7 @@ static void test_writer_between_halves(void) {
                                        chryso_root_control_kind_fault_inject};
   uint64_t seq = 0;
   CHECK(root_status_copy_begin(&page, &scratch, &seq));
-  CHECK(
-      root_status_publish(&state, &page, 1, nullptr, 0, 101, true, &event, 1));
+  CHECK(root_status_publish(&state, &page, 1, nullptr, 101, true, &event, 1));
   CHECK(root_status_copy_finish(&page, &scratch, &output, seq) ==
         root_status_read_torn);
 
@@ -164,7 +169,7 @@ static void test_repeated_sequence_churn(void) {
     uint64_t seq = 0;
     CHECK(root_status_copy_begin(&page, &scratch, &seq));
     event.ticks = 101 + attempt;
-    CHECK(root_status_publish(&state, &page, 0, nullptr, 0, event.ticks, true,
+    CHECK(root_status_publish(&state, &page, 0, nullptr, event.ticks, true,
                               &event, 1));
     CHECK(root_status_copy_finish(&page, &scratch, &output, seq) ==
           root_status_read_torn);
@@ -204,35 +209,33 @@ static void test_exhaustion_and_misuse(void) {
                                    .detail =
                                        chryso_root_control_kind_fault_inject};
   /* An absent child is misuse: publication stops, the page is untouched. */
-  CHECK(!root_status_publish(&state, &page, 4, &(root_child_record){}, 8, 0,
-                             false, &event, 1));
+  CHECK(!root_status_publish(&state, &page, 4, &(root_child_record){}, 0, false,
+                             &event, 1));
   CHECK(state.misused && !state.exhausted && !state.enabled);
   CHECK_EQ_U64(atomic_load(&page.header.seq), 2);
 
   start(production);
-  const chryso_root_event three[3] = {event, event, event};
-  CHECK(!root_status_publish(&state, &page, 0, nullptr, 0, 0, false, three, 3));
+  const chryso_root_event four[4] = {event, event, event, event};
+  CHECK(!root_status_publish(&state, &page, 0, nullptr, 0, false, four, 4));
   CHECK(state.misused && !state.exhausted);
 
   start(production);
   state.seq = UINT64_MAX - 1;
-  CHECK(
-      !root_status_publish(&state, &page, 0, nullptr, 0, 0, false, &event, 1));
+  CHECK(!root_status_publish(&state, &page, 0, nullptr, 0, false, &event, 1));
   CHECK(state.exhausted && !state.misused && !state.enabled);
   CHECK_EQ_U64(page.header.event_head, 1);
   CHECK_EQ_U64(atomic_load(&page.header.seq), 2);
   /* Disabled stays disabled, and the last snapshot still reads. */
   state.seq = 2;
-  CHECK(
-      !root_status_publish(&state, &page, 0, nullptr, 0, 0, false, &event, 1));
+  CHECK(!root_status_publish(&state, &page, 0, nullptr, 0, false, &event, 1));
   CHECK(root_status_read(&page, &scratch, &output, sizeof(output), 1) ==
         root_status_read_ok);
 }
 
 static void test_unmapped_and_clock(void) {
-  root_status_init(&state, nullptr, production, 0, 0, 8, 64, 5);
+  root_status_init(&state, nullptr, production, 0, 0, budgets);
   CHECK(!state.enabled);
-  CHECK(!root_status_publish(&state, nullptr, 5, &(root_child_record){}, 64, 0,
+  CHECK(!root_status_publish(&state, nullptr, 5, &(root_child_record){}, 0,
                              false, nullptr, 0));
   CHECK(!state.exhausted && !state.misused);
 
@@ -241,8 +244,8 @@ static void test_unmapped_and_clock(void) {
   CHECK_EQ_U64(state.beam_incarnation, 2);
   const chryso_root_event event = {.kind = chryso_root_event_kind_restart,
                                    .child = 5};
-  CHECK(root_status_publish(&state, &page, 5, &(root_child_record){}, 64, 0,
-                            false, &event, 1));
+  CHECK(root_status_publish(&state, &page, 5, &(root_child_record){}, 0, false,
+                            &event, 1));
   CHECK_EQ_U64(page.header.cntfrq, 0);
   CHECK_EQ_U64(page.header.now_ticks, 0);
   CHECK_EQ_U64(page.header.beam_incarnation, 2);
@@ -280,8 +283,7 @@ static void test_observe(void) {
 
   root_child_record record = {};
   root_record_charge(&record);
-  CHECK(
-      root_status_publish(&state, &page, 2, &record, 8, 130, true, nullptr, 0));
+  CHECK(root_status_publish(&state, &page, 2, &record, 130, true, nullptr, 0));
   CHECK(root_status_observe(&prior, &page, 130, 62500000, &fresh) ==
         root_status_observe_ok);
   CHECK(fresh.changed);
@@ -316,8 +318,8 @@ static void test_ring(void) {
   memcpy(&prior, &page, sizeof(prior));
   for (size_t i = 0; i < 130; i++) {
     event.ticks = 100 + i;
-    CHECK(root_status_publish(&state, &page, 0, nullptr, 0, 100 + i, true,
-                              &event, 1));
+    CHECK(root_status_publish(&state, &page, 0, nullptr, 100 + i, true, &event,
+                              1));
   }
   CHECK_EQ_U64(page.header.event_head, 131);
   CHECK_EQ_U64(page.header.event_dropped, 3);
@@ -337,8 +339,7 @@ static void test_ring(void) {
         root_status_read_invalid);
   page.header.event_dropped = 3;
   state.event_head = UINT64_MAX;
-  CHECK(
-      !root_status_publish(&state, &page, 0, nullptr, 0, 0, false, &event, 1));
+  CHECK(!root_status_publish(&state, &page, 0, nullptr, 0, false, &event, 1));
   CHECK(state.exhausted);
   CHECK_EQ_U64(page.header.event_head, 131);
 }
@@ -435,15 +436,15 @@ static void fuzz_build_timeline(void) {
        .child = 2,
        .a = 1},
   };
-  CHECK(root_status_publish(&state, &page, 2, &record, 8, 114, true, pair, 2));
+  CHECK(root_status_publish(&state, &page, 2, &record, 114, true, pair, 2));
   memcpy(&published[1], &page, sizeof(page));
   const chryso_root_event control = {.ticks = 120,
                                      .kind = chryso_root_event_kind_control,
                                      .child = 3,
                                      .detail =
                                          chryso_root_control_kind_fault_inject};
-  CHECK(root_status_publish(&state, &page, 3, &(root_child_record){}, 8, 120,
-                            true, &control, 1));
+  CHECK(root_status_publish(&state, &page, 3, &(root_child_record){}, 120, true,
+                            &control, 1));
   memcpy(&published[2], &page, sizeof(page));
   root_status_note_fault(&state, 5, 6, 1, 0x30, 0, 130, true);
   root_record_charge(&record);
@@ -455,7 +456,7 @@ static void fuzz_build_timeline(void) {
        .child = 5,
        .a = 1},
   };
-  CHECK(root_status_publish(&state, &page, 5, &record, 64, 131, true, beam, 2));
+  CHECK(root_status_publish(&state, &page, 5, &record, 131, true, beam, 2));
   memcpy(&published[3], &page, sizeof(page));
 
   constexpr size_t seq_begin = offsetof(chryso_root_status_page, header.seq);
@@ -588,6 +589,49 @@ static void test_arbitrary_pages(void) {
   }
 }
 
+/* A newly applied spec rewrites every present row in one publication, with a
+ * fault, a spec rejection and the outcome as its three events. */
+static void test_policy_publication(void) {
+  start(production);
+  uint32_t lowered[chryso_child_count] = {};
+  uint8_t desired[chryso_child_count] = {};
+  for (size_t i = 0; i < chryso_child_count; i++) {
+    lowered[i] = 2;
+    desired[i] = chryso_root_desired_running;
+  }
+  root_status_note_policy(&state, 7, 1, lowered, desired);
+  root_child_record child = {};
+  root_record_charge(&child);
+  const chryso_root_event events[3] = {
+      fault_event(2, chryso_fault_mr0_valid, 110),
+      {.ticks = 111,
+       .kind = chryso_root_event_kind_spec_reject,
+       .child = chryso_root_event_no_child,
+       .detail = chryso_root_spec_reject_conflict,
+       .a = 7,
+       .b = 0},
+      {.ticks = 112,
+       .kind = chryso_root_event_kind_restart,
+       .child = 2,
+       .a = 1},
+  };
+  CHECK(root_status_publish(&state, &page, 2, &child, 112, true, events, 3));
+  CHECK_EQ_U64(page.header.applied_spec_generation, 7);
+  CHECK_EQ_U64(page.header.applied_bank, 1);
+  CHECK_EQ_U64(page.header.event_head, 4);
+  for (unsigned int i = 0; i < chryso_child_count; i++) {
+    const bool on = ((production >> i) & 1u) != 0;
+    CHECK_EQ_U64(page.children[i].effective_budget, on ? 2 : 0);
+    CHECK_EQ_U64(page.children[i].desired,
+                 on ? chryso_root_desired_running : chryso_root_desired_unset);
+  }
+  CHECK(page_valid());
+  /* The rows are rewritten once; a later publish leaves them alone. */
+  page.children[0].effective_budget = 9;
+  CHECK(root_status_publish(&state, &page, 2, &child, 113, true, nullptr, 0));
+  CHECK_EQ_U64(page.children[0].effective_budget, 9);
+}
+
 int main(void) {
   test_fault_and_giveup();
   test_reader_bounds();
@@ -595,6 +639,7 @@ int main(void) {
   test_repeated_sequence_churn();
   test_semantic_rejections();
   test_exhaustion_and_misuse();
+  test_policy_publication();
   test_unmapped_and_clock();
   test_observe();
   test_ring();

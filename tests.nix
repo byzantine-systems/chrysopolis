@@ -61,6 +61,7 @@
   sel4BudgetDecayImage,
   sel4LifecycleFailureImage,
   sel4ThreadProbeImage,
+  sel4SpecCommitImage,
   fatDisk,
 }:
 let
@@ -421,6 +422,39 @@ in
           wait_console_count(chryso, r"Eshell", 2, 300)
           assert not re.search(r"ROOT_STATUS\|(invalid|torn|unexpected)", chryso.get_console_log())
           assert_no_pd_fault(chryso)
+      finally:
+          power_off(chryso)
+    '';
+  };
+
+  # Root reads the BEAM's committed spec at each restart decision. The
+  # fixture commits generation 1 (BEAM budget 1) and leaves generation 2 half
+  # written, so the first BEAM restart happens mid-commit and must apply
+  # generation 1. It then stages a conflicting generation 1 (budget 64): Root
+  # must reject it, keep budget 1 and give up on the next fault, where the
+  # compiled BEAM budget alone would restart.
+  orch-spec-smoke = mkSel4Test {
+    name = "orch-spec-smoke";
+    image = sel4SpecCommitImage;
+    testScript = ''
+      try:
+          wait_console(chryso, r"Eshell", 300)
+          wait_console(chryso, r"SPEC_FIXTURE\|open\|committed=1\|pending=2", 60)
+          load_test_modules(chryso)
+          chryso.send_console("chryso_beam:stop_vm().\r")
+          wait_console(chryso, r"ROOT\|spec\|applied\|generation=0x0000000000000001\|bank=1", 120)
+          wait_console(chryso, r"ROOT\|restart\|child=${beamChild}\|count=1", 120)
+          wait_console(chryso, r"SPEC_FIXTURE\|conflict-staged", 300)
+          wait_console_count(chryso, r"Eshell", 2, 300)
+          load_test_modules(chryso)
+          chryso.send_console("chryso_beam:stop_vm().\r")
+          wait_console(chryso, r"ROOT\|spec\|reject\|reason=conflict\|generation=0x0000000000000001\|bank=0", 120)
+          wait_console(chryso, r"ROOT\|giveup\|child=${beamChild}\|reason=budget-exhausted", 120)
+          log = chryso.get_console_log()
+          assert "SPEC_FIXTURE|applied|generation=1" in log
+          assert not re.search(r"SPEC_FIXTURE\|(unexpected|writer-refused|invalid|status-unreadable|later)", log)
+          assert not re.search(r"ROOT_STATUS\|(invalid|torn|unexpected)", log)
+          assert not re.search(r"ROOT\|restart\|child=${beamChild}\|count=2", log)
       finally:
           power_off(chryso)
     '';

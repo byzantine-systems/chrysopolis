@@ -27,15 +27,19 @@ static const chryso_root_event *root_status_probe_event(uint64_t index) {
   return &snapshot.events[index % chryso_event_count];
 }
 
-/* The newest two events must be this BEAM's fault and Root's restart of it,
- * carrying the counters its row now shows. */
+/* The newest events must be this BEAM's fault and Root's restart of it,
+ * carrying the counters its row now shows. Root may record one spec
+ * rejection between them, seen while it decided. */
 static bool
 root_status_probe_restart_journal(const chryso_root_child_status *beam) {
   const uint64_t head = snapshot.header.event_head;
   if (head < 3) {
     return false;
   }
-  const chryso_root_event *fault = root_status_probe_event(head - 2);
+  const bool rejected = head >= 4 && root_status_probe_event(head - 2)->kind ==
+                                         chryso_root_event_kind_spec_reject;
+  const chryso_root_event *fault =
+      root_status_probe_event(head - (rejected ? 3 : 2));
   const chryso_root_event *restart = root_status_probe_event(head - 1);
   return fault->kind == chryso_root_event_kind_fault &&
          fault->child == ROOT_CHILD_BEAM &&

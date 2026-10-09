@@ -8,6 +8,7 @@ IMAGES = {
     "boot-shell-tcp": "test-image",
     "beam-restart-smoke": "test-image",
     "orch-status-smoke": "test-image",
+    "orch-spec-smoke": "spec-commit-image",
     "rng-smoke": "test-image",
     "socket-smoke": "default",
     "serial-recovery": "restart-image",

@@ -12,6 +12,9 @@
 #     - diagnostic bring-up image with native pthread checks.
 #   packages.budget-decay-image
 #     - restart topology with a test Root that enables timed fault budgets.
+#   packages.spec-commit-image
+#     - the ERTS image with the spec commit fixture that drives Root's
+#       spec consumer across a BEAM restart.
 {
   perSystem =
     {
@@ -102,6 +105,9 @@
           # Test-only config corruption applied after normal section injection.
           # Used to prove ReleaseFast rejects malformed blobs explicitly.
           corruptConfig ? null,
+          # Enable the beam_test-only spec commit fixture
+          # (src/pd/test_support/spec_fixture.c) by patching its magic.
+          specFixture ? false,
         }:
         pkgs.stdenvNoCC.mkDerivation {
           name = imgName;
@@ -447,6 +453,24 @@
                 ${runtimeAbi.restart.pd_config_section}=pd_restart_channels.bin \
                 build/beam_server.elf
             ''}
+            ${pkgs.lib.optionalString specFixture ''
+              # "SPECFIX1" little-endian, the value spec_fixture.c checks. The
+              # section exists only in beam_test.elf; its absence, size or a
+              # lost write fails the image rather than leaving the fixture off.
+              : > spec_fixture.bin
+              emit_u64 spec_fixture.bin 0x3158494643455053
+              check_section_layout build/beam_server.elf .spec_fixture_config 8 8
+              llvm-objcopy --update-section .spec_fixture_config=spec_fixture.bin \
+                build/beam_server.elf
+              llvm-objcopy --dump-section .spec_fixture_config=spec_fixture.readback \
+                build/beam_server.elf spec_fixture.readback.elf
+              if ! cmp -s spec_fixture.bin spec_fixture.readback; then
+                echo "spec-fixture: beam_server.elf .spec_fixture_config" \
+                     "does not hold the patched magic" >&2
+                exit 1
+              fi
+              rm spec_fixture.readback spec_fixture.readback.elf
+            ''}
             # Generated from the configSections list above.
             ${pkgs.lib.concatMapStringsSep "\n            " (
               c: "oc ${c.section} ${c.blob} ${c.elf}"
@@ -630,6 +654,16 @@
               "rng-smoke"
               "beam-restart-smoke"
             ];
+
+        # The ERTS test topology with the spec commit fixture enabled: the
+        # BEAM leaves a commit half written across a restart and then stages
+        # a conflicting generation, so Root's spec consumer decides a real
+        # fault. Its own image, because the fixture lowers the BEAM's budget.
+        spec-commit-image = withImageTests (mkSel4Image {
+          imgName = "sel4-beam-spec-commit-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+          specFixture = true;
+        }) [ "orch-spec-smoke" ];
 
         # Diagnostic C pthread probe on the bring-up topology. The probe code
         # is compiled only by beam-zig-diagnostic and is absent from shipped

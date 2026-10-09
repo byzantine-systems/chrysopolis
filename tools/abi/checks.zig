@@ -259,28 +259,32 @@ const Kind = abi.RootEventKind;
 const global_event_kinds = [_]u64{ @intFromEnum(Kind.boot), @intFromEnum(Kind.spec_reject) };
 const fault_words = abi.fault_mr0_valid | abi.fault_mr1_valid;
 
-const root_status_rules = [_]Rule{
-    rule(.magic, .whole, .{ .magic = .{ .int = int(Status, "header.magic"), .value = abi.magic.status } }),
-    rule(.version, .whole, .{ .version = .{ .int = int(Status, "header.abi_version"), .value = abi.abi_version } }),
-    rule(.torn, .whole, .{ .seqlock = int(Status, "header.seq") }),
-    rule(.reserved, .whole, .{ .zero = span(Status, "header.reserved0") }),
-    rule(.reserved, status_rows, .{ .zero = span(Child, "reserved") }),
-    rule(.reserved, .whole, .{ .zero = span(Status, "reserved_tail") }),
-    rule(.unknown_kind, status_rows, .{ .member = .{ .int = int(Child, "state"), .enumeration = "RootChildWireState", .reject_zero = false } }),
-    rule(.unknown_kind, status_rows, .{ .member = .{ .int = int(Child, "desired"), .enumeration = "RootDesired", .reject_zero = false } }),
-    rule(.unknown_kind, status_events, .{ .member = .{ .int = int(Event, "kind"), .enumeration = "RootEventKind", .reject_zero = true } }),
-    rule(.unknown_kind, status_events, .{ .kind_member = .{ .kind = int(Event, "kind"), .value = @intFromEnum(Kind.giveup), .member = .{ .int = int(Event, "detail"), .enumeration = "RootGiveupReason", .reject_zero = true } } }),
-    rule(.unknown_kind, status_events, .{ .kind_member = .{ .kind = int(Event, "kind"), .value = @intFromEnum(Kind.control), .member = .{ .int = int(Event, "detail"), .enumeration = "RootControlKind", .reject_zero = true } } }),
-    rule(.range, .whole, .{ .equal = .{ .int = int(Status, "header.child_count"), .value = abi.child_count } }),
-    rule(.range, .whole, .{ .at_most = .{ .int = int(Status, "header.applied_bank"), .value = 1 } }),
-    rule(.range, status_rows, .{ .at_most = .{ .int = int(Child, "flags"), .value = fault_words | abi.down_interval_open } }),
-    rule(.range, status_rows, .{ .implies = .{ .int = int(Child, "flags"), .when = abi.fault_mr1_valid, .requires = abi.fault_mr0_valid } }),
-    rule(.range, status_rows, .{ .zero_when_unset = .{ .int = int(Child, "state"), .span = .{ .offset = 0, .len = @sizeOf(Child) } } }),
-    rule(.range, status_events, .{ .at_most = .{ .int = int(Event, "flags"), .value = fault_words } }),
-    rule(.range, status_events, .{ .implies = .{ .int = int(Event, "flags"), .when = abi.fault_mr1_valid, .requires = abi.fault_mr0_valid } }),
-    rule(.range, status_events, .{ .only_for_kind = .{ .int = int(Event, "flags"), .kind = int(Event, "kind"), .value = @intFromEnum(Kind.fault) } }),
-    rule(.range, status_events, .{ .event_child = .{ .kind = int(Event, "kind"), .child = int(Event, "child"), .sentinel = abi.root_event_no_child, .global = &global_event_kinds, .targets = status_rows.rows, .target_state = child_state } }),
-    rule(.range, .whole, .{ .ring_dropped = .{ .head = int(Status, "header.event_head"), .dropped = int(Status, "header.event_dropped"), .capacity = abi.event_count } }),
+const root_status_rules = blk: {
+    @setEvalBranchQuota(4000);
+    break :blk [_]Rule{
+        rule(.magic, .whole, .{ .magic = .{ .int = int(Status, "header.magic"), .value = abi.magic.status } }),
+        rule(.version, .whole, .{ .version = .{ .int = int(Status, "header.abi_version"), .value = abi.abi_version } }),
+        rule(.torn, .whole, .{ .seqlock = int(Status, "header.seq") }),
+        rule(.reserved, .whole, .{ .zero = span(Status, "header.reserved0") }),
+        rule(.reserved, status_rows, .{ .zero = span(Child, "reserved") }),
+        rule(.reserved, .whole, .{ .zero = span(Status, "reserved_tail") }),
+        rule(.unknown_kind, status_rows, .{ .member = .{ .int = int(Child, "state"), .enumeration = "RootChildWireState", .reject_zero = false } }),
+        rule(.unknown_kind, status_rows, .{ .member = .{ .int = int(Child, "desired"), .enumeration = "RootDesired", .reject_zero = false } }),
+        rule(.unknown_kind, status_events, .{ .member = .{ .int = int(Event, "kind"), .enumeration = "RootEventKind", .reject_zero = true } }),
+        rule(.unknown_kind, status_events, .{ .kind_member = .{ .kind = int(Event, "kind"), .value = @intFromEnum(Kind.giveup), .member = .{ .int = int(Event, "detail"), .enumeration = "RootGiveupReason", .reject_zero = true } } }),
+        rule(.unknown_kind, status_events, .{ .kind_member = .{ .kind = int(Event, "kind"), .value = @intFromEnum(Kind.control), .member = .{ .int = int(Event, "detail"), .enumeration = "RootControlKind", .reject_zero = true } } }),
+        rule(.unknown_kind, status_events, .{ .kind_member = .{ .kind = int(Event, "kind"), .value = @intFromEnum(Kind.spec_reject), .member = .{ .int = int(Event, "detail"), .enumeration = "RootSpecReject", .reject_zero = true } } }),
+        rule(.range, .whole, .{ .equal = .{ .int = int(Status, "header.child_count"), .value = abi.child_count } }),
+        rule(.range, .whole, .{ .at_most = .{ .int = int(Status, "header.applied_bank"), .value = 1 } }),
+        rule(.range, status_rows, .{ .at_most = .{ .int = int(Child, "flags"), .value = fault_words | abi.down_interval_open } }),
+        rule(.range, status_rows, .{ .implies = .{ .int = int(Child, "flags"), .when = abi.fault_mr1_valid, .requires = abi.fault_mr0_valid } }),
+        rule(.range, status_rows, .{ .zero_when_unset = .{ .int = int(Child, "state"), .span = .{ .offset = 0, .len = @sizeOf(Child) } } }),
+        rule(.range, status_events, .{ .at_most = .{ .int = int(Event, "flags"), .value = fault_words } }),
+        rule(.range, status_events, .{ .implies = .{ .int = int(Event, "flags"), .when = abi.fault_mr1_valid, .requires = abi.fault_mr0_valid } }),
+        rule(.range, status_events, .{ .only_for_kind = .{ .int = int(Event, "flags"), .kind = int(Event, "kind"), .value = @intFromEnum(Kind.fault) } }),
+        rule(.range, status_events, .{ .event_child = .{ .kind = int(Event, "kind"), .child = int(Event, "child"), .sentinel = abi.root_event_no_child, .global = &global_event_kinds, .targets = status_rows.rows, .target_state = child_state } }),
+        rule(.range, .whole, .{ .ring_dropped = .{ .head = int(Status, "header.event_head"), .dropped = int(Status, "header.event_dropped"), .capacity = abi.event_count } }),
+    };
 };
 
 const spec_header_rules = [_]Rule{

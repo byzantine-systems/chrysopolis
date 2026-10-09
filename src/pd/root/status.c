@@ -38,10 +38,14 @@ static void clear_page(chryso_root_status_page *page) {
 
 void root_status_init(root_status_state *state, chryso_root_status_page *page,
                       uint64_t present_mask, uint64_t now, uint64_t frequency,
-                      uint32_t driver_budget, uint32_t beam_budget,
-                      unsigned int beam_id) {
+                      const uint32_t budget[static chryso_child_count]) {
   *state = (root_status_state){};
   state->present_mask = present_mask;
+  for (unsigned int i = 0; i < chryso_child_count; i++) {
+    state->effective_budget[i] = present(state, i) ? budget[i] : 0;
+    state->desired[i] = present(state, i) ? chryso_root_desired_running
+                                          : chryso_root_desired_unset;
+  }
   state->root_generation = 1; /* Root is not restartable in this topology. */
   state->beam_incarnation = 1;
   state->frequency = frequency;
@@ -63,9 +67,8 @@ void root_status_init(root_status_state *state, chryso_root_status_page *page,
       continue;
     }
     page->children[i].state = chryso_root_child_wire_state_live;
-    page->children[i].desired = chryso_root_desired_running;
-    page->children[i].effective_budget =
-        i == beam_id ? beam_budget : driver_budget;
+    page->children[i].desired = state->desired[i];
+    page->children[i].effective_budget = state->effective_budget[i];
     page->children[i].boot_ticks = stamp;
     state->observations[i].boot_ticks = stamp;
   }
@@ -144,15 +147,29 @@ void root_status_note_gone(root_status_state *state, unsigned int child,
   }
 }
 
+void root_status_note_policy(root_status_state *state, uint64_t generation,
+                             uint32_t bank,
+                             const uint32_t budget[static chryso_child_count],
+                             const uint8_t desired[static chryso_child_count]) {
+  for (unsigned int i = 0; i < chryso_child_count; i++) {
+    state->effective_budget[i] = present(state, i) ? budget[i] : 0;
+    state->desired[i] =
+        present(state, i) ? desired[i] : chryso_root_desired_unset;
+  }
+  state->applied_generation = generation;
+  state->applied_bank = bank;
+  state->policy_dirty = true;
+}
+
 [[nodiscard]] bool
 root_status_publish(root_status_state *state, chryso_root_status_page *page,
                     unsigned int child, const root_child_record *record,
-                    uint32_t effective_budget, uint64_t now, bool clock_valid,
+                    uint64_t now, bool clock_valid,
                     const chryso_root_event *events, size_t event_count) {
   if (!state->enabled || page == nullptr) {
     return false;
   }
-  if (event_count > 2 || (event_count != 0 && events == nullptr) ||
+  if (event_count > 3 || (event_count != 0 && events == nullptr) ||
       (record != nullptr && !present(state, child))) {
     state->enabled = false;
     state->misused = true;
@@ -176,11 +193,11 @@ root_status_publish(root_status_state *state, chryso_root_status_page *page,
     row->state = record->state == root_child_gone
                      ? chryso_root_child_wire_state_gone
                      : chryso_root_child_wire_state_live;
-    row->desired = chryso_root_desired_running;
+    row->desired = state->desired[child];
     row->flags = (uint16_t)(obs->fault_flags |
                             (obs->down_open ? chryso_down_interval_open : 0u));
     row->lifetime_count = record->lifetime_count;
-    row->effective_budget = effective_budget;
+    row->effective_budget = state->effective_budget[child];
     row->fault_label = obs->fault_label;
     row->fault_mr0 = obs->fault_mr0;
     row->fault_mr1 = obs->fault_mr1;
@@ -188,6 +205,17 @@ root_status_publish(root_status_state *state, chryso_root_status_page *page,
     row->last_restart_ticks = obs->last_restart_ticks;
     row->cumulative_down_ticks = obs->cumulative_down_ticks;
     row->window_count = record->window_count;
+  }
+  if (state->policy_dirty) {
+    for (unsigned int i = 0; i < chryso_child_count; i++) {
+      if (present(state, i)) {
+        page->children[i].effective_budget = state->effective_budget[i];
+        page->children[i].desired = state->desired[i];
+      }
+    }
+    page->header.applied_spec_generation = state->applied_generation;
+    page->header.applied_bank = state->applied_bank;
+    state->policy_dirty = false;
   }
   for (size_t i = 0; i < event_count; i++) {
     page->events[state->event_head % chryso_event_count] = events[i];

@@ -30,6 +30,8 @@ static libc_socket_config_t beam_socket_config;
 /* Linked only into the ERTS test image; production has no status polling path
  * until the dedicated BEAM adapter is introduced. */
 extern void root_status_probe(void) __attribute__((weak));
+/* Also test-image only: drives Root's spec consumer across a BEAM restart. */
+extern void spec_fixture_run(void) __attribute__((weak));
 
 static void runtime_libc_init(bool network_enabled) {
   libc_socket_config_t *config = NULL;
@@ -56,6 +58,9 @@ runtime_status_t runtime_lifecycle_start(void) {
   beam_boot_banner();
   if (root_status_probe != NULL) {
     root_status_probe();
+  }
+  if (spec_fixture_run != NULL) {
+    spec_fixture_run();
   }
 
   /* Binding the filesystem precedes libc because libc_init_file installs its

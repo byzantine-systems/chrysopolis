@@ -529,6 +529,7 @@ pub fn build(b: *std.Build) void {
     const root_pd = microkit.addPd(microkit_context, "root.elf", target, first_party_optimize);
     root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/main.c"), .flags = first_party_flags });
     root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/status.c"), .flags = first_party_flags });
+    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/spec.c"), .flags = first_party_flags });
     root_pd.root_module.addIncludePath(b.path("src/pd/root"));
     root_pd.root_module.addIncludePath(b.path("src/pd/root/policy"));
     if (diagnostic) {
@@ -557,6 +558,7 @@ pub fn build(b: *std.Build) void {
         const test_root = microkit.addPd(microkit_context, "root_budget_test.elf", target, first_party_optimize);
         test_root.root_module.addCSourceFile(.{ .file = root_test_source, .flags = test_root_flags });
         test_root.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/status.c"), .flags = test_root_flags });
+        test_root.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/spec.c"), .flags = test_root_flags });
         test_root.root_module.addIncludePath(b.path("src/pd/root"));
         test_root.root_module.addIncludePath(b.path("src/pd/root/policy"));
         test_root.root_module.addConfigHeader(generated_abi);
@@ -725,6 +727,8 @@ pub fn build(b: *std.Build) void {
         const beam_test = pds.addBeamExe(b, target, beam_cfg, "beam_test.elf", true, util_putchar_debug);
         beam_test.root_module.addCSourceFile(.{ .file = b.path("src/pd/test_support/status_probe.c"), .flags = first_party_flags });
         beam_test.root_module.addCSourceFile(.{ .file = b.path("src/lib/abi/root_status_reader.c"), .flags = first_party_flags });
+        beam_test.root_module.addCSourceFile(.{ .file = b.path("src/pd/test_support/spec_fixture.c"), .flags = first_party_flags });
+        beam_test.root_module.addCSourceFile(.{ .file = b.path("src/lib/abi/spec_writer.c"), .flags = first_party_flags });
         beam_test.root_module.addIncludePath(b.path("src/lib/abi"));
         beam_test.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });
         beam_test.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });

@@ -22,10 +22,11 @@ case "$mode" in
       .#budget-decay-image \
       .#cothread-probe-image \
       .#lifecycle-failure-image \
+      .#spec-commit-image \
       --no-link --print-out-paths --print-build-logs > "$transfer_dir/outputs.txt"
     mapfile -t outputs < "$transfer_dir/outputs.txt"
-    if [[ ${#outputs[@]} != 7 ]]; then
-      echo "expected seven image and disk outputs, got ${#outputs[@]}" >&2
+    if [[ ${#outputs[@]} != 8 ]]; then
+      echo "expected eight image and disk outputs, got ${#outputs[@]}" >&2
       exit 1
     fi
     nix-store --query --requisites "${outputs[@]}" > "$transfer_dir/closure.txt"
@@ -46,8 +47,8 @@ case "$mode" in
     # setup-nix marks the runner as trusted so this local import is allowed.
     nix-store --option require-sigs false --import < "$transfer_dir/images.nar"
     mapfile -t outputs < "$transfer_dir/outputs.txt"
-    if [[ ${#outputs[@]} != 7 ]]; then
-      echo "expected seven image and disk outputs, got ${#outputs[@]}" >&2
+    if [[ ${#outputs[@]} != 8 ]]; then
+      echo "expected eight image and disk outputs, got ${#outputs[@]}" >&2
       exit 1
     fi
     for output in "${outputs[@]}"; do

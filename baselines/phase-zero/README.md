@@ -38,6 +38,6 @@ cd tests/host && zig build test --summary all
 nix build .#checks.x86_64-linux.runtime-host-tests -L
 nix build .#checks.x86_64-linux.production-sdf-gate -L
 nix build .#checks.x86_64-linux.restart-topology -L
-nix build .#test-image .#default .#disk .#restart-image .#budget-decay-image -L
+nix build .#test-image .#default .#disk .#restart-image .#budget-decay-image .#spec-commit-image -L
 nix flake check -L
 ```
