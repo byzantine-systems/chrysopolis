@@ -15,6 +15,9 @@
 #   packages.spec-commit-image
 #     - the ERTS image with the spec commit fixture that drives Root's
 #       spec consumer across a BEAM restart.
+#   packages.command-image
+#     - the ERTS image with the command fixture that drives Root's PPC
+#       commands before ERTS starts.
 {
   perSystem =
     {
@@ -77,6 +80,28 @@
         assert runtimeAbi.microkit.id_count == 62;
         config_sections;
 
+      # Patch a beam_test-only fixture's enabling magic into its 8-byte
+      # section. The section's absence, size or a lost write fails the image
+      # rather than leaving the fixture silently off.
+      patchFixture =
+        { section, magic }:
+        let
+          blob = "${builtins.substring 1 64 section}.bin";
+        in
+        ''
+          : > ${blob}
+          emit_u64 ${blob} ${magic}
+          check_section_layout build/beam_server.elf ${section} 8 8
+          llvm-objcopy --update-section ${section}=${blob} build/beam_server.elf
+          llvm-objcopy --dump-section ${section}=${blob}.readback \
+            build/beam_server.elf ${blob}.readback.elf
+          if ! cmp -s ${blob} ${blob}.readback; then
+            echo "fixture: beam_server.elf ${section} does not hold the patched magic" >&2
+            exit 1
+          fi
+          rm ${blob}.readback ${blob}.readback.elf
+        '';
+
       # Synthesize a bootable image from a beam_server ELF: gather every
       # PD ELF into the search path, embed the per-PD config blobs the
       # metaprogram emitted into the matching ELF sections (the LionsOS
@@ -108,6 +133,9 @@
           # Enable the beam_test-only spec commit fixture
           # (src/pd/test_support/spec_fixture.c) by patching its magic.
           specFixture ? false,
+          # Enable the beam_test-only PPC command fixture
+          # (src/pd/test_support/command_fixture.c) by patching its magic.
+          commandFixture ? false,
         }:
         pkgs.stdenvNoCC.mkDerivation {
           name = imgName;
@@ -453,24 +481,16 @@
                 ${runtimeAbi.restart.pd_config_section}=pd_restart_channels.bin \
                 build/beam_server.elf
             ''}
-            ${pkgs.lib.optionalString specFixture ''
-              # "SPECFIX1" little-endian, the value spec_fixture.c checks. The
-              # section exists only in beam_test.elf; its absence, size or a
-              # lost write fails the image rather than leaving the fixture off.
-              : > spec_fixture.bin
-              emit_u64 spec_fixture.bin 0x3158494643455053
-              check_section_layout build/beam_server.elf .spec_fixture_config 8 8
-              llvm-objcopy --update-section .spec_fixture_config=spec_fixture.bin \
-                build/beam_server.elf
-              llvm-objcopy --dump-section .spec_fixture_config=spec_fixture.readback \
-                build/beam_server.elf spec_fixture.readback.elf
-              if ! cmp -s spec_fixture.bin spec_fixture.readback; then
-                echo "spec-fixture: beam_server.elf .spec_fixture_config" \
-                     "does not hold the patched magic" >&2
-                exit 1
-              fi
-              rm spec_fixture.readback spec_fixture.readback.elf
-            ''}
+            # "SPECFIX1" and "CMDFIX01" little-endian, the values the
+            # fixtures check. Both sections exist only in beam_test.elf.
+            ${pkgs.lib.optionalString specFixture (patchFixture {
+              section = ".spec_fixture_config";
+              magic = "0x3158494643455053";
+            })}
+            ${pkgs.lib.optionalString commandFixture (patchFixture {
+              section = ".command_fixture_config";
+              magic = "0x3130584946444d43";
+            })}
             # Generated from the configSections list above.
             ${pkgs.lib.concatMapStringsSep "\n            " (
               c: "oc ${c.section} ${c.blob} ${c.elf}"
@@ -664,6 +684,16 @@
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
           specFixture = true;
         }) [ "orch-spec-smoke" ];
+
+        # The ERTS test topology with the command fixture enabled: before ERTS
+        # starts, the BEAM sends Root every rejection class, one timer restart,
+        # its lost-reply retry and a SYNC flood. Its own image, because the
+        # restart spends one timer budget slot.
+        command-image = withImageTests (mkSel4Image {
+          imgName = "sel4-beam-command-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+          commandFixture = true;
+        }) [ "orch-command-smoke" ];
 
         # Diagnostic C pthread probe on the bring-up topology. The probe code
         # is compiled only by beam-zig-diagnostic and is absent from shipped

@@ -7,3 +7,7 @@
 #define ROOT_SPEC_HEADER "spec.h"
 #include ROOT_SPEC_HEADER
 #include ROOT_SPEC_HEADER
+
+#define ROOT_COMMAND_HEADER "command.h"
+#include ROOT_COMMAND_HEADER
+#include ROOT_COMMAND_HEADER

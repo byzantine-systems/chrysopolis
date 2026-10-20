@@ -11,22 +11,28 @@ fi
 mode=$1
 transfer_dir=$2
 
+# Both modes check outputs.txt against this list, so it is the only place an
+# image needs adding.
+attrs=(
+  .#test-image
+  .#default
+  .#disk
+  .#restart-image
+  .#budget-decay-image
+  .#cothread-probe-image
+  .#lifecycle-failure-image
+  .#spec-commit-image
+  .#command-image
+)
+
 case "$mode" in
   export)
     mkdir -p "$transfer_dir"
-    nix build \
-      .#test-image \
-      .#default \
-      .#disk \
-      .#restart-image \
-      .#budget-decay-image \
-      .#cothread-probe-image \
-      .#lifecycle-failure-image \
-      .#spec-commit-image \
+    nix build "${attrs[@]}" \
       --no-link --print-out-paths --print-build-logs > "$transfer_dir/outputs.txt"
     mapfile -t outputs < "$transfer_dir/outputs.txt"
-    if [[ ${#outputs[@]} != 8 ]]; then
-      echo "expected eight image and disk outputs, got ${#outputs[@]}" >&2
+    if [[ ${#outputs[@]} != "${#attrs[@]}" ]]; then
+      echo "expected ${#attrs[@]} image and disk outputs, got ${#outputs[@]}" >&2
       exit 1
     fi
     nix-store --query --requisites "${outputs[@]}" > "$transfer_dir/closure.txt"
@@ -47,8 +53,8 @@ case "$mode" in
     # setup-nix marks the runner as trusted so this local import is allowed.
     nix-store --option require-sigs false --import < "$transfer_dir/images.nar"
     mapfile -t outputs < "$transfer_dir/outputs.txt"
-    if [[ ${#outputs[@]} != 8 ]]; then
-      echo "expected eight image and disk outputs, got ${#outputs[@]}" >&2
+    if [[ ${#outputs[@]} != "${#attrs[@]}" ]]; then
+      echo "expected ${#attrs[@]} image and disk outputs, got ${#outputs[@]}" >&2
       exit 1
     fi
     for output in "${outputs[@]}"; do

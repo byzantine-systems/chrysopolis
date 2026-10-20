@@ -240,6 +240,8 @@
               ../src/pd/root/status.h
               ../src/pd/root/spec.c
               ../src/pd/root/spec.h
+              ../src/pd/root/command.c
+              ../src/pd/root/command.h
               ../src/lib/abi/spec_writer.c
               ../src/lib/abi/spec_writer.h
               ../src/lib/abi/root_status_reader.c

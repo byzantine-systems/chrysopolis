@@ -78,6 +78,8 @@ pub const RootGiveupReason = enum(u32) {
 pub const RootControlKind = enum(u32) {
     unset = 0,
     fault_inject = 1,
+    // An accepted ROOT_PP_RESTART_CHILD; the outcome follows as its own event.
+    restart_child = 2,
 };
 
 /// `RootEvent.detail` of a `spec_reject` event: why Root did not apply the
@@ -327,7 +329,8 @@ pub const RootChildStatus = extern struct {
 ///   fault IPC words, present as `flags` says.
 /// - restart: a = lifetime_count, b = window_count after the charge.
 /// - giveup: detail = RootGiveupReason, a = lifetime_count, b = window_count.
-/// - control: detail = RootControlKind, child = its target.
+/// - control: detail = RootControlKind, child = its target; for
+///   restart_child, a = the status seq the command observed.
 /// - spec_reject: child 255, detail = RootSpecReject, a = the candidate
 ///   generation (0 when unreadable), b = the bank it concerns (0 for header
 ///   and unstable_copy). Root records a reason once until it changes.
@@ -412,15 +415,27 @@ pub const SpecPage = extern struct {
     banks: [2]SpecBank,
 };
 
-// The four words suffice for a conditional command
-// when allocated as {child/slot, expected Root generation, observed Root
-// transition sequence, operation-specific count or slot generation}. HELLO
-// and SYNC are read-only. Root must advance the sequence on every completed
-// state-changing command and reject a stale observation before invoking any
-// capability. State and fault count alone cannot fence a delayed STOP retry
-// after STOP/RESUME returns a slot to the same state. The command dispatcher
-// must define how commands fail closed if that sequence cannot be observed
-// or published and pin each opcode's argument and reply semantics.
+// The device framing of one PPC (B3.5). On the PPC itself the label is the
+// opcode alone and exactly four MRs carry args; the reply label is the
+// CtlResult and four MRs carry values. Any other word count is bad_arg and
+// no MR is read.
+//
+// State-changing args are {child/slot, expected root_generation, observed
+// RootStatusHeader.seq, operation value}: the lifetime_count for
+// restart_child, the slot generation for slot opcodes. Every completed
+// command publishes, so seq advances and one observation succeeds at most
+// once. Root repeats the reply of its last completed command as
+// already_done for an identical retry and answers any other mismatch with
+// stale {root_generation, seq, lifetime_count, 0}. With publication stopped
+// a state change is refused rather than left unfenced.
+//
+// HELLO: args {caller abi_version, 0, 0, 0}; values {abi_version,
+// root_generation, beam_incarnation, cntfrq}, bad_version on mismatch.
+// SYNC: args zero; values {seq, accepted, rate_limited, rejected}, refused
+// while publication is stopped. RESTART_CHILD: values {RootEventKind of the
+// outcome, RootGiveupReason or 0, lifetime_count, seq after publication}.
+// Slot opcodes are refused until pool slots exist. Every well-formed
+// request spends a rate token; an empty bucket answers rate_limited.
 pub const CtlCommand = extern struct {
     magic: u64,
     version: u16,

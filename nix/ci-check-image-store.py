@@ -9,6 +9,7 @@ IMAGES = {
     "beam-restart-smoke": "test-image",
     "orch-status-smoke": "test-image",
     "orch-spec-smoke": "spec-commit-image",
+    "orch-command-smoke": "command-image",
     "rng-smoke": "test-image",
     "socket-smoke": "default",
     "serial-recovery": "restart-image",

@@ -80,6 +80,12 @@
         .expect = .ok,
     },
     .{
+        .name = "status_control_restart_child",
+        .checker = "root_status_page",
+        .edits = .{ .{ .set = .{ .field = "children[1].state", .value = 1 } }, .{ .set = .{ .field = "events[0].kind", .value = 8 } }, .{ .set = .{ .field = "events[0].child", .value = 1 } }, .{ .set = .{ .field = "events[0].detail", .value = 2 } }, .{ .set = .{ .field = "events[0].a", .value = 2 } } },
+        .expect = .ok,
+    },
+    .{
         .name = "status_target_requires_present_row",
         .checker = "root_status_page",
         .edits = .{ .{ .set = .{ .field = "events[0].kind", .value = 8 } }, .{ .set = .{ .field = "events[0].child", .value = 1 } }, .{ .set = .{ .field = "events[0].detail", .value = 1 } } },
