@@ -63,6 +63,7 @@
         sel4LifecycleFailureImage = config.packages.lifecycle-failure-image;
         sel4ThreadProbeImage = config.packages.cothread-probe-image;
         sel4SpecCommitImage = config.packages.spec-commit-image;
+        sel4CommandImage = config.packages.command-image;
         fatDisk = config.packages.disk;
       };
       vmScenarioPackages = builtins.listToAttrs (

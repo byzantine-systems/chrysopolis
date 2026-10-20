@@ -62,6 +62,7 @@
   sel4LifecycleFailureImage,
   sel4ThreadProbeImage,
   sel4SpecCommitImage,
+  sel4CommandImage,
   fatDisk,
 }:
 let
@@ -455,6 +456,43 @@ in
           assert not re.search(r"SPEC_FIXTURE\|(unexpected|writer-refused|invalid|status-unreadable|later)", log)
           assert not re.search(r"ROOT_STATUS\|(invalid|torn|unexpected)", log)
           assert not re.search(r"ROOT\|restart\|child=${beamChild}\|count=2", log)
+      finally:
+          power_off(chryso)
+    '';
+  };
+
+  # Root's PPC command path, driven by a test-only caller before ERTS
+  # starts. Every rejection class must come back typed with no effect; one
+  # timer restart goes through the shared budget path, its verbatim retry is
+  # already_done without a second restart, and a SYNC flood reaches
+  # rate_limited with Root's tallies matching the caller's. The restarted
+  # timer must still serve the BEAM afterwards.
+  orch-command-smoke = mkSel4Test {
+    name = "orch-command-smoke";
+    image = sel4CommandImage;
+    testScript = ''
+      steps = [
+          "hello", "hello-version", "short", "unknown-opcode",
+          "undeclared-child", "beam-child", "slot", "stale", "restart",
+          "retry", "published", "flood",
+      ]
+      try:
+          wait_console(chryso, r"CMD_FIXTURE\|done", 300)
+          wait_console(chryso, r"Eshell", 300)
+          log = chryso.get_console_log()
+          for step in steps:
+              assert re.search(r"CMD_FIXTURE\|" + step + r"\|result=\d+\|ok", log), step
+          assert not re.search(r"CMD_FIXTURE\|[^|\n]*\|result=\d+\|unexpected", log)
+          assert not re.search(r"CMD_FIXTURE\|(invalid-map|status-unreadable|later)", log)
+          restarts = re.findall(r"ROOT\|ctl-restart\|child=(\d+)\|count=(\d+)", log)
+          assert restarts == [("${timerChild}", "1")], restarts
+          assert not re.search(r"ROOT\|(fault|giveup|restart)\|child=${timerChild}", log)
+          assert re.search(r"CMD_FIXTURE\|syncs=\d+", log)
+          load_test_modules(chryso)
+          chryso.send_console("chryso_clock:sleep_check('cmd_slept').\r")
+          wait_console(chryso, r"CMD_SLEPT\|\d+", 120)
+          slept = re.findall(r"CMD_SLEPT\|(\d+)", chryso.get_console_log())
+          assert slept and int(slept[-1]) >= 500, slept
       finally:
           power_off(chryso)
     '';

@@ -23,10 +23,11 @@ case "$mode" in
       .#cothread-probe-image \
       .#lifecycle-failure-image \
       .#spec-commit-image \
+      .#command-image \
       --no-link --print-out-paths --print-build-logs > "$transfer_dir/outputs.txt"
     mapfile -t outputs < "$transfer_dir/outputs.txt"
-    if [[ ${#outputs[@]} != 8 ]]; then
-      echo "expected eight image and disk outputs, got ${#outputs[@]}" >&2
+    if [[ ${#outputs[@]} != 9 ]]; then
+      echo "expected nine image and disk outputs, got ${#outputs[@]}" >&2
       exit 1
     fi
     nix-store --query --requisites "${outputs[@]}" > "$transfer_dir/closure.txt"

@@ -88,6 +88,27 @@
       "SPEC_FIXTURE|later"
     ]
   },
+  "orch-command-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "Root answers every malformed, undeclared, non-driver, slot and stale command with a typed result and no effect",
+      "a lost-reply retry of a completed restart is already_done without a second restart",
+      "the command token bucket reaches rate_limited and Root's tallies match the caller's"
+    ],
+    "required_markers": [
+      "CMD_FIXTURE|restart|result=1|ok",
+      "CMD_FIXTURE|retry|result=8|ok",
+      "CMD_FIXTURE|flood|result=4|ok",
+      "ROOT|ctl-restart|child=1|count=1",
+      "CMD_FIXTURE|done"
+    ],
+    "forbidden_markers": [
+      "|unexpected",
+      "CMD_FIXTURE|invalid-map",
+      "CMD_FIXTURE|status-unreadable",
+      "CMD_FIXTURE|later"
+    ]
+  },
   "blk-giveup-smoke": {
     "kind": "qemu",
     "protects": [
