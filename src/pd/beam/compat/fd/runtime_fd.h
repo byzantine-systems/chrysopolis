@@ -35,12 +35,29 @@ int runtime_fd_close(int fd);
 /*
  * Allocate a descriptor with the given callbacks and open flags. A null read
  * or write callback, or a null fstat callback, becomes an operation that
- * returns -EBADF. close and dup3 are always installed; duplicating these
- * callback-backed descriptors is safe because they have no per-open state
- * outside the libc fd entry. Returns the descriptor, fully initialised, or
+ * returns -EBADF. close and dup3 get defaults that assume no per-open state
+ * outside the libc fd entry; use runtime_fd_alloc_ops when there is some.
+ * Returns the descriptor, fully initialised, or
  * -EMFILE with nothing allocated.
  */
 [[__nodiscard__]] int runtime_fd_alloc(fd_read_func read, fd_write_func write,
                                        fd_fstat_func fstat, int flags);
+
+/* Callbacks for a descriptor with per-open state outside its fd entry. A
+ * null member gets runtime_fd_alloc's default. */
+typedef struct {
+  fd_read_func read;
+  fd_write_func write;
+  fd_fstat_func fstat;
+  /* Must release the descriptor with runtime_fd_close. */
+  fd_close_func close;
+  /* sys_dup3 has already copied the entry into newfd; refusing must
+   * deallocate newfd. */
+  fd_dup3_func dup3;
+} runtime_fd_ops;
+
+/* runtime_fd_alloc with every callback chosen. Same result contract. */
+[[__nodiscard__]] int runtime_fd_alloc_ops(const runtime_fd_ops *ops,
+                                           int flags);
 
 #endif

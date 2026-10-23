@@ -79,6 +79,12 @@ int runtime_fd_close(int fd) { return posix_fd_deallocate(fd); }
 
 int runtime_fd_alloc(fd_read_func read, fd_write_func write,
                      fd_fstat_func fstat, int flags) {
+  return runtime_fd_alloc_ops(
+      &(const runtime_fd_ops){.read = read, .write = write, .fstat = fstat},
+      flags);
+}
+
+int runtime_fd_alloc_ops(const runtime_fd_ops *ops, int flags) {
   const int fd = posix_fd_allocate();
   if (fd < 0) {
     return -EMFILE;
@@ -92,11 +98,11 @@ int runtime_fd_alloc(fd_read_func read, fd_write_func write,
   /* posix_fd_allocate only marks the slot active. Write the whole entry so no
    * field (dup3, file_ptr) depends on how a previous owner released it. */
   *e = (fd_entry_t){
-      .read = read != nullptr ? read : runtime_fd_bad_read,
-      .write = write != nullptr ? write : runtime_fd_bad_write,
-      .close = runtime_fd_close,
-      .dup3 = runtime_fd_dup3,
-      .fstat = fstat != nullptr ? fstat : runtime_fd_bad_fstat,
+      .read = ops->read != nullptr ? ops->read : runtime_fd_bad_read,
+      .write = ops->write != nullptr ? ops->write : runtime_fd_bad_write,
+      .close = ops->close != nullptr ? ops->close : runtime_fd_close,
+      .dup3 = ops->dup3 != nullptr ? ops->dup3 : runtime_fd_dup3,
+      .fstat = ops->fstat != nullptr ? ops->fstat : runtime_fd_bad_fstat,
       .flags = flags,
   };
   return fd;
