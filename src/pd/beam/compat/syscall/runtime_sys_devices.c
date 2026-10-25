@@ -9,13 +9,15 @@
  *
  * getrandom fills from the DRBG, replacing LionsOS's unseeded rand() loop.
  *
- * openat intercepts /dev/urandom and /dev/random with DRBG-backed descriptors
- * and, in the restart image, the /dev/pd-restart trigger. Every other path
+ * openat intercepts /dev/urandom and /dev/random with DRBG-backed descriptors,
+ * Root's /dev/chrysostat and /dev/chrysoctl (runtime_control_dev.c) and, in
+ * the restart image, the /dev/pd-restart trigger. Every other path
  * chains to the libc filesystem path (file.c sys_openat, then the FAT
  * fs_server). The disk image deliberately omits ::/dev/urandom, so without the
  * intercept those reads would reach fatfs and see EOF.
  */
 #include "rng.h"
+#include "runtime_control_dev.h"
 #include "runtime_fd.h"
 #include "runtime_pd_restart.h"
 #include "runtime_syscall_handlers.h"
@@ -76,10 +78,16 @@ long runtime_sys_openat(va_list ap) {
   va_copy(copy, ap);
   (void)va_arg(ap, long); /* dirfd */
   const char *path = runtime_sys_arg_pointer(va_arg(ap, long));
+  const int flags = runtime_sys_arg_int(va_arg(ap, long));
 
   if (path != nullptr && is_rng_device_path(path)) {
     va_end(copy);
     return runtime_fd_alloc(urandom_read, nullptr, urandom_fstat, O_RDONLY);
+  }
+
+  if (path != nullptr && runtime_control_dev_handles_path(path)) {
+    va_end(copy);
+    return runtime_control_dev_open(path, flags);
   }
 
   /* In a production image this is false for every path, which then falls
