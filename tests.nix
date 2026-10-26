@@ -341,16 +341,17 @@ let
           """
           wait_console(machine, r"Eshell", 300)
           time.sleep(2)  # banner precedes the prompt; let the line editor come up
+          # Only this call's report counts: after a BEAM restart the previous
+          # VM's TEST_MODULES line is still in the accumulated log.
+          offset = len(machine.get_console_log())
           machine.send_console(
               'code:add_patha("/lib/chryso_test/ebin"), '
               "{module,chryso_test}=code:load_file(chryso_test), "
               "chryso_test:loaded([${testModules}]).\r"
           )
-          wait_console(machine, r"TEST_MODULES\|", timeout)
-          log = machine.get_console_log()
-          assert re.search(r"TEST_MODULES\|ok", log), \
-              "test probes failed to load: " + \
-              (re.findall(r"TEST_MODULES\|missing.*", log) or ["(no report)"])[-1]
+          report = wait_console_since(machine, r"TEST_MODULES\|[^\r\n]*", offset, timeout)
+          assert report.group(0).startswith("TEST_MODULES|ok"), \
+              "test probes failed to load: " + report.group(0)
 
       chryso = create_machine(
           "${startCommand { inherit image netdev; }}",
