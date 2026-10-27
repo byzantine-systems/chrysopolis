@@ -214,11 +214,15 @@
             root = ../.;
             fileset = pkgs.lib.fileset.unions [
               ../rebar.config
+              ../rebar.config.script
               (pkgs.lib.fileset.fileFilter (
                 file: file.hasExt "erl" || file.name == "chryso_test.app.src"
               ) ../tests)
             ];
           };
+          # orchestrator_abi.hrl for chryso_ctl, via rebar.config.script.
+          # buildRebar3 forwards only env, not arbitrary attributes.
+          env.CHRYSO_ABI_GENERATED = "${config.packages.orchestrator-abi}";
           beamDeps = [ ];
         };
 

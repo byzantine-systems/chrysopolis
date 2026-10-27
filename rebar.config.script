@@ -1,0 +1,17 @@
+%% Puts the generated orchestrator_abi.hrl on the include path for
+%% tests/chryso_ctl.erl. CHRYSO_ABI_GENERATED names the orchestrator-abi
+%% package; modules/beam.nix sets it for packages.test-modules. Locally:
+%%   CHRYSO_ABI_GENERATED=$(nix build --no-link --print-out-paths .#orchestrator-abi) rebar3 compile
+case os:getenv("CHRYSO_ABI_GENERATED") of
+    false ->
+        io:format(
+            standard_error,
+            "chryso_test: CHRYSO_ABI_GENERATED is unset; chryso_ctl will not compile~n",
+            []
+        ),
+        CONFIG;
+    Generated ->
+        ErlOpts = proplists:get_value(erl_opts, CONFIG, []),
+        Include = filename:join([Generated, "erlang", "include"]),
+        lists:keystore(erl_opts, 1, CONFIG, {erl_opts, [{i, Include} | ErlOpts]})
+end.
