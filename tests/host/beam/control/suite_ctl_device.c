@@ -3,6 +3,7 @@
  * ok, so every (phase, event) cell is pinned here, from the owner's fd and a
  * foreign one. */
 #include "check.h"
+#include "prop.h"
 
 #include "runtime_ctl_device.h"
 
@@ -260,6 +261,84 @@ static void test_stat_decide(void) {
   CHECK_EQ_U64(runtime_stat_read_decide(1, 1, page), runtime_stat_eof);
 }
 
+/* The header table as a model, plus the ownership rule. */
+static cell model_step(runtime_ctl_phase phase, int owner, int fd, event ev) {
+  if (phase != runtime_ctl_closed && fd != owner) {
+    return (cell){ev == ev_open ? runtime_ctl_busy : runtime_ctl_not_owner,
+                  phase};
+  }
+  return expected[phase][ev];
+}
+
+/* Random open/write/reply/read/close sequences from two fds. Each reply is
+ * tagged, and every successful read must return the tag of the reply that
+ * followed the reading owner's last write, so no reply crosses a close, a
+ * reopen or another fd. */
+static void test_random_sequences(void) {
+  prop_rng rng = prop_seed(UINT64_C(0x510e527fade682d1));
+  static constexpr int fds[] = {owner_fd, other_fd};
+  bool ok = true;
+  for (unsigned int c = 0; c < 2000 && ok; c++) {
+    runtime_ctl_owner o = {};
+    runtime_ctl_phase phase = runtime_ctl_closed;
+    int owner = -1;
+    uint64_t pending = 0;
+    for (uint64_t step = 1; step <= 64 && ok; step++) {
+      const int fd = fds[prop_below(&rng, 2)];
+      const event ev = (event)prop_below(&rng, ev_count);
+      const cell want = model_step(phase, owner, fd, ev);
+      runtime_ctl_status got = runtime_ctl_out_of_order;
+      unaligned u = {};
+      const chryso_ctl_command cmd = valid_command();
+      runtime_ctl_call call = {};
+      const uint64_t tagged[runtime_ctl_words] = {step};
+      switch (ev) {
+      case ev_open:
+        got = runtime_ctl_open(&o, fd);
+        break;
+      case ev_write:
+        got = runtime_ctl_write(&o, fd, place(&u, &cmd), record, &call);
+        break;
+      case ev_reply:
+        got = runtime_ctl_reply(&o, fd, chryso_ctl_result_ok, runtime_ctl_words,
+                                tagged);
+        break;
+      case ev_read:
+        got = runtime_ctl_read(&o, fd, &u.bytes[1], record);
+        if (got == runtime_ctl_ok) {
+          chryso_ctl_reply reply = {};
+          memcpy(&reply, &u.bytes[1], sizeof(reply));
+          ok &= reply.values[0] == pending;
+        }
+        break;
+      case ev_close:
+        got = runtime_ctl_close(&o, fd);
+        break;
+      case ev_count:
+        break;
+      }
+      ok &= got == want.status && o.phase == want.next;
+      if (got == runtime_ctl_ok && ev == ev_open) {
+        owner = fd;
+      }
+      if (got == runtime_ctl_ok && ev == ev_reply) {
+        pending = step;
+      }
+      if (got == runtime_ctl_ok && (ev == ev_read || ev == ev_close)) {
+        pending = 0;
+      }
+      phase = want.next;
+      if (!ok) {
+        fprintf(stderr,
+                "random sequence case %u diverged at step %" PRIu64
+                " (event %d, fd %d)\n",
+                c, step, (int)ev, fd);
+      }
+    }
+  }
+  CHECK(ok);
+}
+
 int main(void) {
   test_owner_table();
   test_foreign_fd();
@@ -269,5 +348,6 @@ int main(void) {
   test_close_drops_reply();
   test_corrupt_phase();
   test_stat_decide();
+  test_random_sequences();
   return check_finish("ctl_device");
 }

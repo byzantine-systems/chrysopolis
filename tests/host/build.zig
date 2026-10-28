@@ -59,9 +59,11 @@ const suites = [_]Suite{
     .{ .name = "root_control", .source = "root/suite_root_control.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{ "../../src/pd/root/policy", "../../src/lib/abi" }, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{"../../src/lib/abi/root_status_reader.c"}, .units = &.{"status.c"} },
     // spec.c and spec_writer.c build as sources so they also meet the conversion warnings.
     .{ .name = "root_spec", .source = "root/suite_root_spec.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{ "../../src/pd/root/policy", "../../src/lib/abi" }, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{ "../../src/pd/root/spec.c", "../../src/lib/abi/spec_writer.c" }, .units = &.{} },
+    // The composition main.c performs, built from every pure Root unit it uses.
+    .{ .name = "root_fallback", .source = "root/suite_root_fallback.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{ "../../src/pd/root/policy", "../../src/lib/abi" }, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{ "prop.c", "../../src/pd/root/restart_plan.c", "../../src/pd/root/spec.c", "../../src/pd/root/command.c", "../../src/pd/root/status.c", "../../src/lib/abi/spec_writer.c" }, .units = &.{} },
     .{ .name = "root_command", .source = "root/suite_root_command.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{"../../src/pd/root/policy"}, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{"../../src/pd/root/command.c"}, .units = &.{} },
     // Built as a source so the owner machine also meets the conversion warnings.
-    .{ .name = "ctl_device", .source = "beam/control/suite_ctl_device.c", .unit_dir = "../../src/pd/beam/control", .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{"../../src/pd/beam/control/runtime_ctl_device.c"}, .units = &.{} },
+    .{ .name = "ctl_device", .source = "beam/control/suite_ctl_device.c", .unit_dir = "../../src/pd/beam/control", .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{ "prop.c", "../../src/pd/beam/control/runtime_ctl_device.c" }, .units = &.{} },
     .{ .name = "snapshot", .source = "beam/restart/suite_snapshot.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{"beam_snapshot_codec.c"} },
     .{ .name = "restart_layout", .source = "beam/restart/suite_restart_layout.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{} },
     .{ .name = "rng_select", .source = "beam/security/suite_rng_select.c", .unit_dir = "../../src/pd/beam/security", .units = &.{"rng_select.c"} },
