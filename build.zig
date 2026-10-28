@@ -534,6 +534,7 @@ pub fn build(b: *std.Build) void {
     root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/status.c"), .flags = first_party_flags });
     root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/spec.c"), .flags = first_party_flags });
     root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/command.c"), .flags = first_party_flags });
+    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/restart_plan.c"), .flags = first_party_flags });
     root_pd.root_module.addIncludePath(b.path("src/pd/root"));
     root_pd.root_module.addIncludePath(b.path("src/pd/root/policy"));
     if (diagnostic) {
@@ -564,6 +565,7 @@ pub fn build(b: *std.Build) void {
         test_root.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/status.c"), .flags = test_root_flags });
         test_root.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/spec.c"), .flags = test_root_flags });
         test_root.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/command.c"), .flags = test_root_flags });
+        test_root.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/restart_plan.c"), .flags = test_root_flags });
         test_root.root_module.addIncludePath(b.path("src/pd/root"));
         test_root.root_module.addIncludePath(b.path("src/pd/root/policy"));
         test_root.root_module.addConfigHeader(generated_abi);

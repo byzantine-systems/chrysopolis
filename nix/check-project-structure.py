@@ -154,9 +154,9 @@ def check_sources(root: Path) -> None:
     entries += DIRECT_SOURCE.findall(source + helpers)
     entries += PROBE_SOURCE.findall(source + helpers)
     # The production and timed-test Root ELFs intentionally compile the same
-    # pure publisher, spec consumer and command decisions; all other target
-    # source memberships remain unique.
-    shared_root = {"src/pd/root/status.c": 2, "src/pd/root/spec.c": 2, "src/pd/root/command.c": 2}
+    # pure publisher, spec consumer, command and restart decisions; all other
+    # target source memberships remain unique.
+    shared_root = {"src/pd/root/status.c": 2, "src/pd/root/spec.c": 2, "src/pd/root/command.c": 2, "src/pd/root/restart_plan.c": 2}
     duplicates = {name: count for name, count in Counter(entries).items() if count > 1}
     if duplicates and duplicates != shared_root:
         fail("explicit-source", "build.zig", "duplicate first-party C source")

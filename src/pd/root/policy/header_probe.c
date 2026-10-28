@@ -11,3 +11,7 @@
 #define ROOT_COMMAND_HEADER "command.h"
 #include ROOT_COMMAND_HEADER
 #include ROOT_COMMAND_HEADER
+
+#define ROOT_RESTART_PLAN_HEADER "restart_plan.h"
+#include ROOT_RESTART_PLAN_HEADER
+#include ROOT_RESTART_PLAN_HEADER

@@ -246,6 +246,8 @@
               ../src/pd/root/spec.h
               ../src/pd/root/command.c
               ../src/pd/root/command.h
+              ../src/pd/root/restart_plan.c
+              ../src/pd/root/restart_plan.h
               ../src/lib/abi/spec_writer.c
               ../src/lib/abi/spec_writer.h
               ../src/lib/abi/root_status_reader.c
