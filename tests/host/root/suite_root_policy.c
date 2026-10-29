@@ -341,6 +341,17 @@ static void test_notify_routing(void) {
       &(root_channel_layout){.debug_first = 58, .fault_first = 1, .count = 4});
 }
 
+/* A gone notification goes only to a channel the image declared. */
+static void test_channel_wired(void) {
+  const uint64_t mask = (UINT64_C(1) << 10) | (UINT64_C(1) << 63);
+  CHECK(root_channel_wired(mask, (root_channel){.value = 10}));
+  CHECK(root_channel_wired(mask, (root_channel){.value = 63}));
+  CHECK(!root_channel_wired(mask, (root_channel){.value = 12}));
+  CHECK(!root_channel_wired(mask, (root_channel){.value = 64}));
+  CHECK(!root_channel_wired(mask, (root_channel){.value = 255}));
+  CHECK(!root_channel_wired(0, (root_channel){.value = 0}));
+}
+
 int main(void) {
   test_child_from_raw();
   test_decision_order();
@@ -351,5 +362,6 @@ int main(void) {
   test_timed_errors_and_idle();
   test_layout_validity();
   test_notify_routing();
+  test_channel_wired();
   return check_finish("root_policy");
 }

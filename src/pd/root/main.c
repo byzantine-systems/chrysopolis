@@ -253,6 +253,13 @@ static_assert((ROOT_GONE_CH_BLK < ROOT_DEBUG_CH_SERIAL ||
 static_assert(ROOT_GONE_CH_BLK < MICROKIT_MAX_CHANNELS &&
                   ROOT_GONE_CH_NONE >= MICROKIT_MAX_CHANNELS,
               "the give-up channel must be valid and its sentinel must not");
+static_assert((ROOT_GONE_CH_BEAM < ROOT_DEBUG_CH_SERIAL ||
+               ROOT_GONE_CH_BEAM > ROOT_DEBUG_CH_MAX) &&
+                  (ROOT_GONE_CH_BEAM < ROOT_FAULT_CH_SERIAL ||
+                   ROOT_GONE_CH_BEAM > ROOT_FAULT_CH_MAX) &&
+                  ROOT_GONE_CH_BEAM != ROOT_GONE_CH_BLK &&
+                  ROOT_GONE_CH_BEAM < MICROKIT_MAX_CHANNELS,
+              "the BEAM give-up channel must be a distinct valid channel");
 
 /* Driver-class index -> child id, for both channel groups. Built from the ABI
  * constants checked above rather than through root_child_from_raw. */
@@ -296,15 +303,18 @@ static const root_child
  * 0, which is a perfectly valid channel id, and signalling an unwired one is a
  * cap fault in the PD that is supposed to be handling faults.
  *
- * beam_server is deliberately absent. Nothing in the system depends on it the
- * way fatfs depends on blk, so there is no dependent to inform; when root gives
- * up on beam_server the giveup log line is the system's obituary, because the
- * component that would have reported anything is the one that just stopped.
+ * beam_server has a channel, but no production image wires a dependent to
+ * it: nothing depends on the BEAM the way fatfs depends on blk, so there the
+ * giveup log line is the obituary. Only the fallback test image declares it,
+ * for the peer that checks driver recovery with the BEAM gone. root_giveup
+ * signals a channel only when the image declares it.
  */
 static root_channel root_gone_channel(root_child child) {
   switch (child.value) {
   case ROOT_CHILD_BLK:
     return (root_channel){.value = ROOT_GONE_CH_BLK};
+  case ROOT_CHILD_BEAM:
+    return (root_channel){.value = ROOT_GONE_CH_BEAM};
   default:
     return (root_channel){.value = ROOT_GONE_CH_NONE};
   }
@@ -695,7 +705,7 @@ static void root_giveup(root_child child, const char *reason) {
                         root_clock_state.available);
 
   const root_channel gone = root_gone_channel(child);
-  if (gone.value != ROOT_GONE_CH_NONE) {
+  if (root_channel_wired(microkit_notifications, gone)) {
     microkit_notify(gone.value);
   }
 
