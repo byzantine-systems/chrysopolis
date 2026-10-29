@@ -24,6 +24,14 @@ pub const Contract = struct {
     giveup: struct {
         root_blk_channel: u8,
         blk_virt_channel: u8,
+        // Root's end of the BEAM gone channel. Only the fallback test image
+        // wires a dependent to it; elsewhere the id stays undeclared.
+        root_beam_channel: u8,
+    },
+    // The test-only fallback peer's channel ends, in its own id space.
+    fallback_peer: struct {
+        beam_gone_channel: u8,
+        timer_fault_channel: u8,
     },
     restart: struct {
         driver_budget: u32,
@@ -184,7 +192,8 @@ pub const values: Contract = .{
         .{ .name = "blk", .child = 2, .root_debug_channel = 2, .root_fault_channel = 6, .beam_debug_channel = 60, .beam_fault_channel = 56 },
         .{ .name = "eth", .child = 3, .root_debug_channel = 3, .root_fault_channel = 7, .beam_debug_channel = 61, .beam_fault_channel = 57 },
     },
-    .giveup = .{ .root_blk_channel = 10, .blk_virt_channel = 61 },
+    .giveup = .{ .root_blk_channel = 10, .blk_virt_channel = 61, .root_beam_channel = 12 },
+    .fallback_peer = .{ .beam_gone_channel = 0, .timer_fault_channel = 1 },
     .restart = .{
         .driver_budget = 8,
         .beam_budget = 64,
@@ -414,7 +423,10 @@ pub fn validate(contract: Contract) !void {
     if (survivors_end > snapshot.data_offset or snapshot.data_offset >= snapshot.size) return error.InvalidSnapshotDataLayout;
 
     var child_ids = [_]u8{ contract.children.crasher, contract.children.beam, 0, 0, 0, 0 };
-    var root_channels: [driver_count * 2 + 1]u8 = undefined;
+    // Root's fixed channels, filled through a cursor so a new one cannot
+    // overwrite another by position.
+    var root_channels: [driver_count * 2 + 2]u8 = undefined;
+    var root_len: usize = driver_count * 2;
     var beam_channels: [driver_count * 2]u8 = undefined;
     const driver_names = [_][]const u8{ "serial", "timer", "blk", "eth" };
     for (contract.drivers, 0..) |driver, i| {
@@ -427,11 +439,16 @@ pub fn validate(contract: Contract) !void {
         if (driver.root_debug_channel != i) return error.NonDenseRootDebugChannels;
         if (driver.root_fault_channel != i + driver_count) return error.NonDenseRootFaultChannels;
     }
-    root_channels[root_channels.len - 1] = contract.giveup.root_blk_channel;
+    for ([_]u8{ contract.giveup.root_blk_channel, contract.giveup.root_beam_channel }) |id| {
+        root_channels[root_len] = id;
+        root_len += 1;
+    }
+    std.debug.assert(root_len == root_channels.len);
     try validateIds(&child_ids, contract.microkit.id_count);
-    try validateIds(&root_channels, contract.microkit.id_count);
+    try validateIds(root_channels[0..root_len], contract.microkit.id_count);
     try validateIds(&beam_channels, contract.microkit.id_count);
     try validateIds(&.{contract.giveup.blk_virt_channel}, contract.microkit.id_count);
+    try validateIds(&.{ contract.fallback_peer.beam_gone_channel, contract.fallback_peer.timer_fault_channel }, contract.microkit.id_count);
 
     if (contract.config_sections.len == 0) return error.EmptyConfigSectionMap;
     for (contract.config_sections, 0..) |mapping, i| {
@@ -542,7 +559,7 @@ pub fn validateSemantics(contract: Contract, diagnostic: *Diagnostic) !void {
     validateIds(child_ids[0..child_len], contract.microkit.id_count) catch
         return reject(diagnostic, "pool.child_base", "worker and existing child IDs are unique and in range");
 
-    var root_channels: [driver_count * 2 + 2]u8 = undefined;
+    var root_channels: [driver_count * 2 + 3]u8 = undefined;
     var beam_channels: [driver_count * 2 + 1 + 62]u8 = undefined;
     var root_len: usize = 0;
     var beam_len: usize = 0;
@@ -557,6 +574,8 @@ pub fn validateSemantics(contract: Contract, diagnostic: *Diagnostic) !void {
         beam_len += 1;
     }
     root_channels[root_len] = contract.giveup.root_blk_channel;
+    root_len += 1;
+    root_channels[root_len] = contract.giveup.root_beam_channel;
     root_len += 1;
     root_channels[root_len] = control.pp_channel.root;
     root_len += 1;

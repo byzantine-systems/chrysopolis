@@ -93,6 +93,18 @@ test "worker child range and channel collisions are rejected" {
     try expectInvalid(bad, "control.pp_channel.root", "Root channel IDs are unique and in range");
 
     bad = system.values;
+    bad.giveup.root_beam_channel = bad.control.pp_channel.root;
+    try expectInvalid(bad, "control.pp_channel.root", "Root channel IDs are unique and in range");
+
+    bad = system.values;
+    bad.giveup.root_beam_channel = bad.giveup.root_blk_channel;
+    try std.testing.expectError(error.DuplicateId, system.validate(bad));
+
+    bad = system.values;
+    bad.fallback_peer.timer_fault_channel = bad.fallback_peer.beam_gone_channel;
+    try std.testing.expectError(error.DuplicateId, system.validate(bad));
+
+    bad = system.values;
     bad.pool.transport.beam_channel_base = bad.drivers[0].beam_debug_channel;
     try expectInvalid(bad, "pool.transport.beam_channel_base", "worker channel IDs are in range");
 
