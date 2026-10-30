@@ -583,6 +583,24 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(crasher_pd);
     }
 
+    // fallback_peer.elf, the test-only PD orch-fallback-smoke uses to fault the
+    // timer once Root has given up on beam_server. It shares the crasher's gate
+    // for the same reason: only an SDF generated with --with-fallback-peer
+    // references it. It reads Root's status page through the shared reader.
+    if (with_crasher) {
+        const peer_pd = microkit.addPd(microkit_context, "fallback_peer.elf", target, first_party_optimize);
+        peer_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/test_support/fallback_peer.c"), .flags = first_party_flags });
+        peer_pd.root_module.addCSourceFile(.{ .file = b.path("src/lib/abi/root_status_reader.c"), .flags = first_party_flags });
+        peer_pd.root_module.addIncludePath(b.path("src/lib/abi"));
+        // The shared reader includes <string.h>; resolve it to the LionsOS musl
+        // headers as beam_test does. The peer links no libc: memcpy and memcmp
+        // come from Zig's compiler_rt, as they do for root.elf.
+        peer_pd.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
+        peer_pd.root_module.addConfigHeader(generated_abi);
+        abi_probes.addGenerated(b, peer_pd.root_module);
+        b.installArtifact(peer_pd);
+    }
+
     // === beam_server PD glue. Compile the first-party runtime into ONE object
     // (see addBeamExe for why the object, not module C). -O2 is pinned via
     // cflags. Production uses ReleaseFast; -Ddiagnostic uses ReleaseSafe and

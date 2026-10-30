@@ -49,7 +49,7 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(allocator);
     if (args.len < 4) {
-        std.debug.print("usage: gen-sdf <board.dtb> <sddf-path> <output-dir> [--with-crasher] [--with-restart-debug]\n", .{});
+        std.debug.print("usage: gen-sdf <board.dtb> <sddf-path> <output-dir> [--with-crasher] [--with-restart-debug] [--with-fallback-peer] [--without-control-pages]\n", .{});
         std.process.exit(1);
     }
     const dtb_path = args[1];
@@ -65,9 +65,23 @@ pub fn main() !void {
     // takes a genuine instruction fault. Off by default, so production images
     // carry no such channel.
     var with_restart_debug = false;
+    // Optional test-only flag: add the fallback peer, which Root wakes when it
+    // gives up on beam_server and which then injects timer faults. It takes
+    // over beam_server's end of the timer fault-injection channel, so it
+    // requires --with-restart-debug.
+    var with_fallback_peer = false;
+    // Optional test-only flag: leave root_status and orchestrator_spec unmapped,
+    // so Root runs with publication off and no spec, as on a bare image.
+    var without_control_pages = false;
     for (args[4..]) |arg| {
         if (std.mem.eql(u8, arg, "--with-crasher")) with_crasher = true;
         if (std.mem.eql(u8, arg, "--with-restart-debug")) with_restart_debug = true;
+        if (std.mem.eql(u8, arg, "--with-fallback-peer")) with_fallback_peer = true;
+        if (std.mem.eql(u8, arg, "--without-control-pages")) without_control_pages = true;
+    }
+    if (with_fallback_peer and (!with_restart_debug or without_control_pages)) {
+        std.debug.print("gen-sdf: --with-fallback-peer needs --with-restart-debug and the control pages\n", .{});
+        std.process.exit(1);
     }
 
     // Parse the board device tree (compiled from sDDF's own dts) so the
@@ -156,14 +170,16 @@ pub fn main() !void {
     // ABI rejects an uncached control region, so an alias-attribute mismatch
     // cannot be expressed here without failing validation elsewhere.
     const root_status = Mr.create(allocator, "root_status", abi.status_size, .{});
-    sdf.addMemoryRegion(root_status);
-    root.addMap(Map.create(root_status, abi.status_root_vaddr, .rw, .{ .setvar_vaddr = abi.status_root_setvar }));
-    beam_server.addMap(Map.create(root_status, abi.status_beam_vaddr, .r, .{ .setvar_vaddr = abi.status_beam_setvar }));
+    if (!without_control_pages) {
+        sdf.addMemoryRegion(root_status);
+        root.addMap(Map.create(root_status, abi.status_root_vaddr, .rw, .{ .setvar_vaddr = abi.status_root_setvar }));
+        beam_server.addMap(Map.create(root_status, abi.status_beam_vaddr, .r, .{ .setvar_vaddr = abi.status_beam_setvar }));
 
-    const orchestrator_spec = Mr.create(allocator, "orchestrator_spec", abi.spec_size, .{});
-    sdf.addMemoryRegion(orchestrator_spec);
-    beam_server.addMap(Map.create(orchestrator_spec, abi.spec_beam_vaddr, .rw, .{ .setvar_vaddr = abi.spec_beam_setvar }));
-    root.addMap(Map.create(orchestrator_spec, abi.spec_root_vaddr, .r, .{ .setvar_vaddr = abi.spec_root_setvar }));
+        const orchestrator_spec = Mr.create(allocator, "orchestrator_spec", abi.spec_size, .{});
+        sdf.addMemoryRegion(orchestrator_spec);
+        beam_server.addMap(Map.create(orchestrator_spec, abi.spec_beam_vaddr, .rw, .{ .setvar_vaddr = abi.spec_beam_setvar }));
+        root.addMap(Map.create(orchestrator_spec, abi.spec_root_vaddr, .r, .{ .setvar_vaddr = abi.spec_root_setvar }));
+    }
 
     _ = try root.addChild(&beam_server, .{ .id = abi.child_beam });
 
@@ -456,13 +472,38 @@ pub fn main() !void {
                 .pd_a_notify = false,
             }));
         }
-        for (abi.root_fault_channels, abi.beam_fault_channels) |root_id, beam_id| {
+        for (abi.root_fault_channels, abi.beam_fault_channels, 0..) |root_id, beam_id, class| {
+            // The fallback peer holds the timer's fault-injection channel.
+            if (with_fallback_peer and class == abi.timer_class) continue;
             sdf.addChannel(try Channel.create(&root, &beam_server, .{
                 .pd_a_id = root_id,
                 .pd_b_id = beam_id,
                 .pd_a_notify = false,
             }));
         }
+    }
+
+    // Test-only fallback peer (see --with-fallback-peer above). Priority 0, so
+    // it runs only when every other PD is idle, and it is not a child of Root.
+    // It maps root_status read-only, like beam_server, to report what Root
+    // decided. Root signals it on the BEAM give-up channel (one way), and it
+    // signals Root on the timer fault-injection channel (one way). Root's ids
+    // are the production ones, so Root's code paths are the production paths.
+    var fallback_peer: Pd = undefined;
+    if (with_fallback_peer) {
+        fallback_peer = Pd.create(allocator, "fallback_peer", "fallback_peer.elf", .{ .priority = 0 });
+        sdf.addProtectionDomain(&fallback_peer);
+        fallback_peer.addMap(Map.create(root_status, abi.status_beam_vaddr, .r, .{ .setvar_vaddr = abi.status_beam_setvar }));
+        sdf.addChannel(try Channel.create(&root, &fallback_peer, .{
+            .pd_a_id = abi.root_beam_gone_channel,
+            .pd_b_id = abi.peer_beam_gone_channel,
+            .pd_b_notify = false,
+        }));
+        sdf.addChannel(try Channel.create(&root, &fallback_peer, .{
+            .pd_a_id = abi.root_fault_channels[abi.timer_class],
+            .pd_b_id = abi.peer_timer_fault_channel,
+            .pd_a_notify = false,
+        }));
     }
 
     // beam_server asks root to restart it by faulting deliberately at
@@ -481,7 +522,7 @@ pub fn main() !void {
     // The one page from the base covers every encodable exit code (the code is
     // masked to a byte).
     const pd_count = sdf.pds.items.len + root.child_pds.items.len;
-    const expected_pd_count = abi.non_crasher_pd_count + @as(usize, @intFromBool(with_crasher));
+    const expected_pd_count = abi.non_crasher_pd_count + @as(usize, @intFromBool(with_crasher)) + @as(usize, @intFromBool(with_fallback_peer));
     if (pd_count != expected_pd_count) {
         std.debug.print("SDF has {d} PDs, expected {d}\n", .{ pd_count, expected_pd_count });
         return error.UnexpectedProtectionDomainCount;

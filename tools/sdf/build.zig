@@ -20,6 +20,10 @@ pub fn build(b: *std.Build) void {
     const abi_options = b.addOptions();
     abi_options.addOption(u8, "child_serial", abi.drivers[0].child);
     abi_options.addOption(u8, "child_timer", abi.drivers[1].child);
+    const timer_class = for (abi.drivers, 0..) |driver, i| {
+        if (std.mem.eql(u8, driver.name, "timer")) break i;
+    } else std.debug.panic("system-abi.json declares no timer driver", .{});
+    abi_options.addOption(usize, "timer_class", timer_class);
     abi_options.addOption(u8, "child_blk", abi.drivers[2].child);
     abi_options.addOption(u8, "child_eth", abi.drivers[3].child);
     abi_options.addOption(u8, "child_crasher", abi.children.crasher);
@@ -50,6 +54,9 @@ pub fn build(b: *std.Build) void {
     });
     abi_options.addOption(u8, "root_blk_gone_channel", abi.giveup.root_blk_channel);
     abi_options.addOption(u8, "blk_virt_gone_channel", abi.giveup.blk_virt_channel);
+    abi_options.addOption(u8, "root_beam_gone_channel", abi.giveup.root_beam_channel);
+    abi_options.addOption(u8, "peer_beam_gone_channel", abi.fallback_peer.beam_gone_channel);
+    abi_options.addOption(u8, "peer_timer_fault_channel", abi.fallback_peer.timer_fault_channel);
     abi_options.addOption(u64, "heap_size", abi.memory.heap.size);
     abi_options.addOption(u64, "heap_vaddr", abi.memory.heap.vaddr);
     abi_options.addOption([]const u8, "heap_setvar", abi.memory.heap.setvar);
