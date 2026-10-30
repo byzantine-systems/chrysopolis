@@ -1,0 +1,9 @@
+{
+  "note": "Measured on fallback-image under the CI QEMU command (TCG, cortex-a53, 2 GiB). An observed envelope for this image and setup, not a WCET bound.",
+  "metric": "published - inject, microseconds, from Root's status page ticks (control event, fault event, restart event, header now_ticks)",
+  "samples_per_run": 21,
+  "baseline": { "min_us": 601, "median_us": 669, "max_us": 3820 },
+  "flood_first_run": { "max_us": 3778, "sync_calls": 113, "rate_limited": 0 },
+  "flood_limit": "The /dev/chrysoctl path reached about 11 SYNC calls per second, below the 32 per second token refill, so this run did not drive Root into rate limiting.",
+  "bound_us": 8000
+}

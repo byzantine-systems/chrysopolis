@@ -64,6 +64,8 @@
         sel4ThreadProbeImage = config.packages.cothread-probe-image;
         sel4SpecCommitImage = config.packages.spec-commit-image;
         sel4CommandImage = config.packages.command-image;
+        sel4FallbackImage = config.packages.fallback-image;
+        sel4FallbackNomapImage = config.packages.fallback-nomap-image;
         fatDisk = config.packages.disk;
       };
       vmScenarioPackages = builtins.listToAttrs (
