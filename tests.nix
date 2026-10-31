@@ -341,16 +341,45 @@ let
           """
           wait_console(machine, r"Eshell", 300)
           time.sleep(2)  # banner precedes the prompt; let the line editor come up
+          # Only this call's report counts: after a BEAM restart the previous
+          # VM's TEST_MODULES line is still in the accumulated log.
+          offset = len(machine.get_console_log())
           machine.send_console(
               'code:add_patha("/lib/chryso_test/ebin"), '
               "{module,chryso_test}=code:load_file(chryso_test), "
               "chryso_test:loaded([${testModules}]).\r"
           )
-          wait_console(machine, r"TEST_MODULES\|", timeout)
-          log = machine.get_console_log()
-          assert re.search(r"TEST_MODULES\|ok", log), \
-              "test probes failed to load: " + \
-              (re.findall(r"TEST_MODULES\|missing.*", log) or ["(no report)"])[-1]
+          report = wait_console_since(machine, r"TEST_MODULES\|[^\r\n]*", offset, timeout)
+          assert report.group(0).startswith("TEST_MODULES|ok"), \
+              "test probes failed to load: " + report.group(0)
+
+      def run_probe(machine, call, prefix, steps, timeout=120):
+          """Run a step probe and assert each named step printed ok.
+
+          Step probes (tests/chryso_ctl.erl) print `<prefix>|<step>|<got>|ok`
+          or `|unexpected` per step, then `<prefix>|done|unexpected=N`. The
+          typed call holds the lower-case tag, so the upper-case prefix never
+          appears in its echo. Only output after this call counts, so a
+          reused prefix cannot pass on an earlier run. Failures quote the
+          guest's own lines.
+          """
+          offset = len(machine.get_console_log())
+          machine.send_console(call + "\r")
+          done = re.escape(prefix) + r"\|done\|unexpected=(\d+)"
+          wait_console_since(machine, done, offset, timeout)
+          log = machine.get_console_log()[offset:]
+          lines = re.findall(re.escape(prefix) + r"\|[^\r\n]*", log)
+          bad = [line for line in lines if line.endswith("|unexpected")]
+          missing = [
+              step for step in steps
+              if not any(
+                  line.startswith(f"{prefix}|{step}|") and line.endswith("|ok")
+                  for line in lines
+              )
+          ]
+          assert not bad and not missing, \
+              f"{prefix}: unexpected={bad} missing={missing}"
+          assert re.search(done, log).group(1) == "0", lines
 
       chryso = create_machine(
           "${startCommand { inherit image netdev; }}",
@@ -409,19 +438,34 @@ in
 
   # The ERTS test ELF alone links a read-only shared-page probe. A BEAM
   # restart observes Root's completed update without PPC or notification.
+  # Erlang reads the same page through /dev/chrysostat before and after.
   orch-status-smoke = mkSel4Test {
     name = "orch-status-smoke";
     image = sel4TestImage;
     testScript = ''
       try:
-          wait_console(chryso, r"Eshell", 300)
-          wait_console(chryso, r"ROOT_STATUS\|boot\|incarnation=1", 60)
-          load_test_modules(chryso)
-          chryso.send_console("chryso_beam:stop_vm().\r")
-          wait_console(chryso, r"ROOT\|restart\|child=${beamChild}\|count=1", 120)
-          wait_console(chryso, r"ROOT_STATUS\|restart\|incarnation=2\|count=1", 120)
-          wait_console_count(chryso, r"Eshell", 2, 300)
-          assert not re.search(r"ROOT_STATUS\|(invalid|torn|unexpected)", chryso.get_console_log())
+          with subtest("boot: C probe and /dev/chrysostat agree"):
+              wait_console(chryso, r"Eshell", 300)
+              wait_console(chryso, r"ROOT_STATUS\|boot\|incarnation=1", 60)
+              load_test_modules(chryso)
+              chryso.send_console("chryso_ctl:stat(boot, ${beamChild}).\r")
+              wait_console(chryso, r"CTL_STAT\|BOOT\|incarnation=1\|seq=\d+\|count=0", 60)
+          with subtest("/dev/chrysostat local errors"):
+              run_probe(
+                  chryso, "chryso_ctl:stat_errors(probe).", "CTL_STAT_ERR|PROBE",
+                  ["short_read", "write_readonly", "second_read", "open_write"],
+              )
+          with subtest("BEAM restart is visible through both readers"):
+              chryso.send_console("chryso_beam:stop_vm().\r")
+              wait_console(chryso, r"ROOT\|restart\|child=${beamChild}\|count=1", 120)
+              wait_console(chryso, r"ROOT_STATUS\|restart\|incarnation=2\|count=1", 120)
+              wait_console_count(chryso, r"Eshell", 2, 300)
+              load_test_modules(chryso)
+              chryso.send_console("chryso_ctl:stat(restarted, ${beamChild}).\r")
+              wait_console(chryso, r"CTL_STAT\|RESTARTED\|incarnation=2\|seq=\d+\|count=1", 60)
+          log = chryso.get_console_log()
+          assert not re.search(r"ROOT_STATUS\|(invalid|torn|unexpected)", log)
+          assert not re.search(r"CTL_STAT\|[A-Z]+\|error=", log)
           assert_no_pd_fault(chryso)
       finally:
           power_off(chryso)
@@ -465,8 +509,10 @@ in
   # starts. Every rejection class must come back typed with no effect; one
   # timer restart goes through the shared budget path, its verbatim retry is
   # already_done without a second restart, and a SYNC flood reaches
-  # rate_limited with Root's tallies matching the caller's. The restarted
-  # timer must still serve the BEAM afterwards.
+  # rate_limited with Root's tallies matching the caller's. Erlang then drives
+  # the same path through /dev/chrysoctl: local rejects, a stale fence, a
+  # second timer restart, its already_done retry and a reply dropped by close.
+  # The twice-restarted timer must still serve the BEAM afterwards.
   orch-command-smoke = mkSel4Test {
     name = "orch-command-smoke";
     image = sel4CommandImage;
@@ -484,11 +530,21 @@ in
               assert re.search(r"CMD_FIXTURE\|" + step + r"\|result=\d+\|ok", log), step
           assert not re.search(r"CMD_FIXTURE\|[^|\n]*\|result=\d+\|unexpected", log)
           assert not re.search(r"CMD_FIXTURE\|(invalid-map|status-unreadable|later)", log)
-          restarts = re.findall(r"ROOT\|ctl-restart\|child=(\d+)\|count=(\d+)", log)
-          assert restarts == [("${timerChild}", "1")], restarts
-          assert not re.search(r"ROOT\|(fault|giveup|restart)\|child=${timerChild}", log)
           assert re.search(r"CMD_FIXTURE\|syncs=\d+", log)
           load_test_modules(chryso)
+          with subtest("/dev/chrysoctl drives Root from Erlang"):
+              run_probe(
+                  chryso, "chryso_ctl:ctl_script(cmd, ${timerChild}).", "CTL|CMD",
+                  [
+                      "second_open", "read_idle", "hello", "short_write",
+                      "bad_magic", "bad_opcode", "stale", "restart", "retry",
+                      "dropped_reply",
+                  ],
+              )
+          log = chryso.get_console_log()
+          restarts = re.findall(r"ROOT\|ctl-restart\|child=(\d+)\|count=(\d+)", log)
+          assert restarts == [("${timerChild}", "1"), ("${timerChild}", "2")], restarts
+          assert not re.search(r"ROOT\|(fault|giveup|restart)\|child=${timerChild}", log)
           chryso.send_console("chryso_clock:sleep_check('cmd_slept').\r")
           wait_console(chryso, r"CMD_SLEPT\|\d+", 120)
           slept = re.findall(r"CMD_SLEPT\|(\d+)", chryso.get_console_log())

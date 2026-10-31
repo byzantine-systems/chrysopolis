@@ -1,26 +1,30 @@
-%% Net-class probes for tcp-smoke and net-restart-smoke.
-%%
-%% These drive the whole path: ERTS inet_drv -> libc sock.c -> src/runtime/tcp.c
-%% -> lwIP -> sDDF net -> virtio-net/slirp. The test driver process is itself
-%% the slirp host, so the peer on the other end is a plain Python socket: the
-%% guest reaches it by dialling the gateway at 10.0.2.2, and the host reaches
-%% the guest through a hostfwd.
-%%
-%% See chryso_test for why tags arrive as lower-case atoms and are upper-cased
-%% here rather than by the caller.
 -module(chryso_net).
+-moduledoc """
+Net-class probes for tcp-smoke and net-restart-smoke.
+
+These drive the whole path: ERTS inet_drv -> libc sock.c ->
+`src/pd/beam/io/tcp.c` -> lwIP -> sDDF net -> virtio-net/slirp. The test
+driver process is itself the slirp host, so the peer on the other end is a
+plain Python socket: the guest reaches it by dialling the gateway at
+10.0.2.2, and the host reaches the guest through a hostfwd.
+
+See `chryso_test` for why tags arrive as lower-case atoms and are upper-cased
+here rather than by the caller.
+""".
 
 -export([ping/2, echo_server/1]).
 
-%% Guest -> host: connect through the slirp gateway, send the tag as the
-%% payload, and report from the guest side. Asserting from BOTH ends is the
-%% point: the host must receive the bytes and the guest must print its own
-%% success line, so a half-working path cannot pass.
-%%
-%% The payload IS the upper-cased tag, which is what lets one function serve
-%% both callers: tcp-smoke's chryso_ping sends "CHRYSO_PING" and
-%% net-restart-smoke's before/after1/after2 send "BEFORE"/"AFTER1"/"AFTER2",
-%% each matching what its host-side listener already asserts.
+-doc """
+Guest -> host: connect through the slirp gateway, send the tag as the
+payload, and report from the guest side. Asserting from both ends is the
+point: the host must receive the bytes and the guest must print its own
+success line, so a half-working path cannot pass.
+
+The payload is the upper-cased tag, which is what lets one function serve
+both callers: tcp-smoke's `chryso_ping` sends `CHRYSO_PING` and
+net-restart-smoke's `before`/`after1`/`after2` send `BEFORE`/`AFTER1`/`AFTER2`,
+each matching what its host-side listener already asserts.
+""".
 -spec ping(atom(), inet:port_number()) -> ok.
 ping(Tag, Port) ->
     Name = chryso_test:tag(Tag),
@@ -33,9 +37,11 @@ ping(Tag, Port) ->
             io:format("NET_ERR|~s ~p~n", [Name, Err])
     end.
 
-%% Host -> guest: a LOOPING echo server, so early half-open probes cannot
-%% consume a one-shot acceptor. {packet,raw} because the payload is raw bytes,
-%% not line-framed.
+-doc """
+Host -> guest: a looping echo server, so early half-open probes cannot
+consume a one-shot acceptor. `{packet, raw}` because the payload is raw
+bytes, not line-framed.
+""".
 -spec echo_server(inet:port_number()) -> pid().
 echo_server(Port) ->
     spawn(fun() ->

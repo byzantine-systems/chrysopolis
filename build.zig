@@ -131,6 +131,9 @@ const beam_include_dirs = [_][]const u8{
     "src/pd/beam/io/timer",
     "src/pd/beam/restart",
     "src/pd/beam/security",
+    "src/pd/beam/control",
+    // The shared status reader behind /dev/chrysostat.
+    "src/lib/abi",
 };
 
 // Build + install one sDDF component PD: its sources, the shared sDDF includes,
@@ -619,6 +622,8 @@ pub fn build(b: *std.Build) void {
             "compat/syscall/runtime_sys_devices.c",
             "restart/runtime_pd_restart.c",
             "restart/runtime_pd_restart_parse.c",
+            "control/runtime_control_dev.c",
+            "control/runtime_ctl_device.c",
             "compat/pthread/runtime_cothread.c",
             "compat/pthread/runtime_stack.c",
             "compat/pthread/runtime_wait.c",
@@ -636,6 +641,8 @@ pub fn build(b: *std.Build) void {
         },
         .flags = runtime_flags,
     });
+    // Root's status reader, shared with tests/host, backs /dev/chrysostat.
+    glue.root_module.addCSourceFile(.{ .file = b.path("src/lib/abi/root_status_reader.c"), .flags = runtime_flags });
 
     if (diagnostic) {
         glue.root_module.addCSourceFile(.{
@@ -728,7 +735,6 @@ pub fn build(b: *std.Build) void {
         if (beam_cfg.erts_dir == null) @panic("set -Derts-archive-dir with -Dwith-erts");
         const beam_test = pds.addBeamExe(b, target, beam_cfg, "beam_test.elf", true, util_putchar_debug);
         beam_test.root_module.addCSourceFile(.{ .file = b.path("src/pd/test_support/status_probe.c"), .flags = first_party_flags });
-        beam_test.root_module.addCSourceFile(.{ .file = b.path("src/lib/abi/root_status_reader.c"), .flags = first_party_flags });
         beam_test.root_module.addCSourceFile(.{ .file = b.path("src/pd/test_support/spec_fixture.c"), .flags = first_party_flags });
         beam_test.root_module.addCSourceFile(.{ .file = b.path("src/lib/abi/spec_writer.c"), .flags = first_party_flags });
         beam_test.root_module.addCSourceFile(.{ .file = b.path("src/pd/test_support/command_fixture.c"), .flags = first_party_flags });

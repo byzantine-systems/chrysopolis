@@ -1,21 +1,28 @@
-%% Entropy probe for rng-smoke.
-%%
-%% rng-smoke boots the image TWICE and asserts every value here differs between
-%% the two boots, which is what proves the jitter-seeded HMAC-DRBG is really
-%% seeded rather than replaying a fixed sequence.
-%%
-%% All three values are printed on ONE console line because writes cost about a
-%% second each under TCG. They are tagged and space-separated so each is
-%% unambiguous to the extractor even though they share a line.
 -module(chryso_rng).
+-moduledoc """
+Entropy probe for rng-smoke.
+
+rng-smoke boots the image twice and asserts every value here differs between
+the two boots, which is what proves the jitter-seeded HMAC-DRBG is really
+seeded rather than replaying a fixed sequence.
+
+All three values are printed on one console line because writes cost about a
+second each under TCG. They are tagged and space-separated so each is
+unambiguous to the extractor even though they share a line.
+""".
 
 -export([sample/0]).
 
-%% The bounded file:read(Fd, 8) is not an optimisation, it is a requirement:
-%% /dev/urandom is synthesised by the openat handler in src/runtime/runtime_sys_devices.c and
-%% NEVER returns EOF, so file:read_file/1 would loop forever. Reading it at all
-%% is the point of including it here, since that exercises the shim rather than
-%% just ERTS's own RNG.
+-doc """
+Print the DRBG-backed samples on one line.
+
+The bounded `file:read(Fd, 8)` is not an optimisation, it is a requirement:
+`/dev/urandom` is synthesised by the openat handler in
+`src/pd/beam/compat/syscall/runtime_sys_devices.c` and never returns EOF, so
+`file:read_file/1` would loop forever. Reading it at all is the point of
+including it here, since that exercises the shim rather than just ERTS's own
+RNG.
+""".
 -spec sample() -> ok.
 sample() ->
     {ok, Fd} = file:open("/dev/urandom", [read, binary, raw]),

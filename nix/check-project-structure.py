@@ -87,6 +87,9 @@ def permitted_framework(path: str, kind: str) -> bool:
     if not path.startswith(BEAM):
         return False
     relative = path[len(BEAM) :]
+    # control/ holds a pure unit; only its adapter may reach Microkit.
+    if relative == "control/runtime_control_dev.c":
+        return kind == "kernel"
     if kind == "kernel":
         return relative.startswith(("config/", "compat/", "io/", "restart/", "payload/"))
     return relative.startswith(("config/", "compat/", "io/", "security/", "payload/"))
