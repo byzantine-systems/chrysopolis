@@ -109,6 +109,30 @@
       "CMD_FIXTURE|later"
     ]
   },
+  "orch-fallback-smoke": {
+    "kind": "qemu",
+    "protects": [
+      "a driver fault is decided within the recorded bound while the BEAM floods Root with commands",
+      "a restarted BEAM observes its committed spec and the current fence before commanding, and a conflicting bank leaves driver policy intact",
+      "with the BEAM gone Root still faults and restarts the timer for the fallback peer",
+      "with no status or spec page the compiled driver budget decides exactly"
+    ],
+    "required_markers": [
+      "LAT|FB_BASE|done|samples=21|missing=0",
+      "LAT|FB_FLOOD|done|samples=21|missing=0",
+      "CTL_RECONCILE|FB_POST|done|unexpected=0",
+      "ROOT|spec|reject|reason=conflict",
+      "PEER|fallback|timer|count=2",
+      "PEER|done",
+      "CTL_STAT|FB_NOMAP|error=enodev"
+    ],
+    "forbidden_markers": [
+      "|unexpected",
+      "PEER|failed",
+      "PEER|beam-not-gone",
+      "ROOT|reject"
+    ]
+  },
   "blk-giveup-smoke": {
     "kind": "qemu",
     "protects": [

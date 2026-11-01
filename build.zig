@@ -36,6 +36,9 @@ fn runtimeAbiConfigHeader(b: *std.Build, abi: abi_schema.Contract) *std.Build.St
         .ROOT_FAULT_CH_ETH = @as(i64, abi.drivers[3].root_fault_channel),
         .ROOT_FAULT_CH_MAX = @as(i64, abi.drivers[3].root_fault_channel),
         .ROOT_GONE_CH_BLK = @as(i64, abi.giveup.root_blk_channel),
+        .ROOT_GONE_CH_BEAM = @as(i64, abi.giveup.root_beam_channel),
+        .FALLBACK_PEER_BEAM_GONE_CH = @as(i64, abi.fallback_peer.beam_gone_channel),
+        .FALLBACK_PEER_TIMER_FAULT_CH = @as(i64, abi.fallback_peer.timer_fault_channel),
         .ROOT_GONE_CH_NONE = @as(i64, abi.microkit.absent_id),
         .ROOT_RESTART_BUDGET = @as(i64, abi.restart.driver_budget),
         .ROOT_BEAM_RESTART_BUDGET = @as(i64, abi.restart.beam_budget),
@@ -534,6 +537,7 @@ pub fn build(b: *std.Build) void {
     root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/status.c"), .flags = first_party_flags });
     root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/spec.c"), .flags = first_party_flags });
     root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/command.c"), .flags = first_party_flags });
+    root_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/restart_plan.c"), .flags = first_party_flags });
     root_pd.root_module.addIncludePath(b.path("src/pd/root"));
     root_pd.root_module.addIncludePath(b.path("src/pd/root/policy"));
     if (diagnostic) {
@@ -564,6 +568,7 @@ pub fn build(b: *std.Build) void {
         test_root.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/status.c"), .flags = test_root_flags });
         test_root.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/spec.c"), .flags = test_root_flags });
         test_root.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/command.c"), .flags = test_root_flags });
+        test_root.root_module.addCSourceFile(.{ .file = b.path("src/pd/root/restart_plan.c"), .flags = test_root_flags });
         test_root.root_module.addIncludePath(b.path("src/pd/root"));
         test_root.root_module.addIncludePath(b.path("src/pd/root/policy"));
         test_root.root_module.addConfigHeader(generated_abi);
@@ -576,6 +581,24 @@ pub fn build(b: *std.Build) void {
         const crasher_pd = microkit.addPd(microkit_context, "crasher.elf", target, first_party_optimize);
         crasher_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/test_support/crasher.c"), .flags = first_party_flags });
         b.installArtifact(crasher_pd);
+    }
+
+    // fallback_peer.elf, the test-only PD orch-fallback-smoke uses to fault the
+    // timer once Root has given up on beam_server. It shares the crasher's gate
+    // for the same reason: only an SDF generated with --with-fallback-peer
+    // references it. It reads Root's status page through the shared reader.
+    if (with_crasher) {
+        const peer_pd = microkit.addPd(microkit_context, "fallback_peer.elf", target, first_party_optimize);
+        peer_pd.root_module.addCSourceFile(.{ .file = b.path("src/pd/test_support/fallback_peer.c"), .flags = first_party_flags });
+        peer_pd.root_module.addCSourceFile(.{ .file = b.path("src/lib/abi/root_status_reader.c"), .flags = first_party_flags });
+        peer_pd.root_module.addIncludePath(b.path("src/lib/abi"));
+        // The shared reader includes <string.h>; resolve it to the LionsOS musl
+        // headers as beam_test does. The peer links no libc: memcpy and memcmp
+        // come from Zig's compiler_rt, as they do for root.elf.
+        peer_pd.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });
+        peer_pd.root_module.addConfigHeader(generated_abi);
+        abi_probes.addGenerated(b, peer_pd.root_module);
+        b.installArtifact(peer_pd);
     }
 
     // === beam_server PD glue. Compile the first-party runtime into ONE object

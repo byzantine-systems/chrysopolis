@@ -292,6 +292,14 @@ root_channel_group_fits(unsigned int first, unsigned int count,
   return first < max_channels && count <= max_channels - first;
 }
 
+/* True when the image declares ch for this PD: its bit is set in mask, the
+ * channel word the Microkit tool patches (microkit_notifications). An id at
+ * or above the mask width is never declared. */
+[[__nodiscard__]] static inline bool root_channel_wired(uint64_t mask,
+                                                        root_channel ch) {
+  return ch.value < root_child_mask_bits && ((mask >> ch.value) & 1u) != 0;
+}
+
 /* True when ch lies in the group of count channels from first. */
 [[__nodiscard__]] static inline bool
 root_channel_in_group(unsigned int ch, unsigned int first, unsigned int count) {

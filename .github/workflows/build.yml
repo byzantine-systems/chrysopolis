@@ -129,6 +129,7 @@ jobs:
           - orch-status-smoke
           - orch-spec-smoke
           - orch-command-smoke
+          - orch-fallback-smoke
           - serial-recovery
           - timer-recovery
           - blk-recovery

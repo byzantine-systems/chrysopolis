@@ -18,6 +18,12 @@
 #   packages.command-image
 #     - the ERTS image with the command fixture that drives Root's PPC
 #       commands before ERTS starts.
+#   packages.fallback-image
+#     - the restart topology plus the fallback peer and the spec fixture
+#       (BEAM budget 1), so the BEAM can be made gone and driver recovery
+#       checked without it.
+#   packages.fallback-nomap-image
+#     - the restart topology with root_status and orchestrator_spec unmapped.
 {
   perSystem =
     {
@@ -127,6 +133,10 @@
           # Exact child set in the selected SDF. The crasher exists only in the
           # restart topology, regardless of which Root ELF is selected.
           withCrasher ? false,
+          # The SDF was generated with --with-fallback-peer: stage
+          # fallback_peer.elf and mark beam_server's timer fault-injection id
+          # absent, since the peer holds that channel.
+          withFallbackPeer ? false,
           # Test-only config corruption applied after normal section injection.
           # Used to prove ReleaseFast rejects malformed blobs explicitly.
           corruptConfig ? null,
@@ -174,6 +184,16 @@
               }
             elif grep -q '<protection_domain name="crasher"' "$cfg/system.sdf"; then
               echo "root children: crasher is in SDF but mask excludes it" >&2
+              exit 1
+            fi
+            if [ ${if withFallbackPeer then "1" else "0"} -eq 1 ]; then
+              grep -q '<protection_domain name="fallback_peer"' "$cfg/system.sdf" || {
+                echo "fallback peer: staged but absent from SDF" >&2
+                exit 1
+              }
+              cp ${config.packages.beam-zig}/bin/fallback_peer.elf build/
+            elif grep -q '<protection_domain name="fallback_peer"' "$cfg/system.sdf"; then
+              echo "fallback peer: in SDF but not staged" >&2
               exit 1
             fi
 
@@ -471,7 +491,17 @@
               # rather than behind a build flag.
               : > pd_restart_channels.bin
               for ch in ${pkgs.lib.concatMapStringsSep " " (d: toString d.beam_debug_channel) drivers} \
-                        ${pkgs.lib.concatMapStringsSep " " (d: toString d.beam_fault_channel) drivers}; do
+                        ${
+                          pkgs.lib.concatMapStringsSep " " (
+                            d:
+                            toString (
+                              if withFallbackPeer && d.name == "timer" then
+                                runtimeAbi.microkit.absent_id
+                              else
+                                d.beam_fault_channel
+                            )
+                          ) drivers
+                        }; do
                 emit_u8 pd_restart_channels.bin "$ch"
               done
               check_section_layout build/beam_server.elf \
@@ -572,6 +602,29 @@
         # partition table (the blk virtualiser reads partition 0). BEAM
         # bytecode is platform-independent, so the host pkgs.erlang .beam
         # files load directly on the cross-built aarch64 ERTS.
+        # The restart SDF plus the fallback peer, without the crasher: its
+        # boot-time faults would only add noise to the latency samples.
+        sdf-fallback = pkgs.runCommand "chrysopolis-system-sdf-fallback" { } ''
+          mkdir -p $out
+          ${zigSdfTool}/bin/gen-sdf \
+            ${config.packages.lions-stack}/${chryso.microkitBoard}.dtb \
+            ${config.packages.lionsos-src}/dep/sddf \
+            $out \
+            --with-restart-debug \
+            --with-fallback-peer
+        '';
+
+        # The restart SDF with Root's control pages left unmapped.
+        sdf-nomap = pkgs.runCommand "chrysopolis-system-sdf-nomap" { } ''
+          mkdir -p $out
+          ${zigSdfTool}/bin/gen-sdf \
+            ${config.packages.lions-stack}/${chryso.microkitBoard}.dtb \
+            ${config.packages.lionsos-src}/dep/sddf \
+            $out \
+            --with-restart-debug \
+            --without-control-pages
+        '';
+
         disk =
           let
             otp = "${pkgs.beamPackages.erlang}/lib/erlang";
@@ -738,6 +791,22 @@
 
         # Same restart SDF, but Root selects a short test-only fault window.
         # The normal root.elf remains the sole Root in shipped images.
+        fallback-image = withImageTests (mkSel4Image {
+          imgName = "sel4-beam-fallback-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+          sdf = config.packages.sdf-fallback;
+          restartDebug = true;
+          withFallbackPeer = true;
+          specFixture = true;
+        }) [ "orch-fallback-smoke" ];
+
+        fallback-nomap-image = withImageTests (mkSel4Image {
+          imgName = "sel4-beam-fallback-nomap-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+          sdf = config.packages.sdf-nomap;
+          restartDebug = true;
+        }) [ "orch-fallback-smoke" ];
+
         budget-decay-image = withImageTests (mkSel4Image {
           imgName = "sel4-beam-budget-decay-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";

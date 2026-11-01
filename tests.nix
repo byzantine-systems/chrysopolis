@@ -63,6 +63,8 @@
   sel4ThreadProbeImage,
   sel4SpecCommitImage,
   sel4CommandImage,
+  sel4FallbackImage,
+  sel4FallbackNomapImage,
   fatDisk,
 }:
 let
@@ -74,6 +76,7 @@ let
   ethChild = toString (builtins.elemAt runtimeAbi.drivers 3).child;
   beamChild = toString runtimeAbi.children.beam;
   driverRestartBudget = toString runtimeAbi.restart.driver_budget;
+  fallbackLatency = builtins.fromJSON (builtins.readFile ./baselines/fallback/latency.json);
   beamExitCode3Address = pkgs.lib.toLower (
     pkgs.lib.toHexString (runtimeAbi.restart.exit_fault_base + 3)
   );
@@ -502,6 +505,165 @@ in
           assert not re.search(r"ROOT\|restart\|child=${beamChild}\|count=2", log)
       finally:
           power_off(chryso)
+    '';
+  };
+
+  # Root's fault safety without the BEAM (B3.6). Three boots:
+  #
+  #   1. fallback-image, quiet: 21 driver faults (serial, blk, eth in turn)
+  #      timed from Root's own status-page ticks, as the baseline.
+  #   2. fallback-image, flood: the same 21 faults while a BEAM process keeps
+  #      /dev/chrysoctl busy with SYNC commands. The worst published - inject
+  #      must stay within baselines/fallback/latency.json's bound. Then the BEAM
+  #      halts (the spec fixture's generation 1 is applied), the restarted BEAM
+  #      reconciles against Root before commanding (its committed spec
+  #      survived, the old seq is stale, a fresh command works, and the
+  #      fixture's conflicting bank is rejected without touching driver
+  #      policy), and halts again: budget 1 is spent, Root gives up on it and
+  #      wakes the fallback peer, which has Root fault and restart the timer
+  #      twice with no BEAM running.
+  #   3. fallback-nomap-image: no status or spec page. Faults on eth follow the
+  #      compiled budget exactly, then Root gives up, and /dev/chrysostat
+  #      reports enodev.
+  orch-fallback-smoke = mkSel4Test {
+    name = "orch-fallback-smoke";
+    image = sel4FallbackImage;
+    testScript = ''
+      samples = "[" + ",".join(
+          ["{serial,${serialChild}}", "{blk,${blkChild}}", "{eth,${ethChild}}"] * 7
+      ) + "]"
+
+      def latency(machine, tag, mode):
+          """Run chryso_ctl:latency/3 and return each sample's timings in us."""
+          offset = len(machine.get_console_log())
+          machine.send_console(f"chryso_ctl:latency({tag}, {mode}, {samples}).\r")
+          prefix = "LAT|" + tag.upper()
+          done = re.escape(prefix) + r"\|done\|samples=(\d+)\|missing=(\d+)"
+          wait_console_since(machine, done, offset, 900)
+          log = machine.get_console_log()[offset:]
+          count, missing = re.search(done, log).groups()
+          assert count == "21" and missing == "0", f"{prefix}: {count} samples, {missing} missing"
+          rows = []
+          pattern = (re.escape(prefix) + r"\|\d+\|child=(\d+)\|inject=(\d+)\|fault=(\d+)"
+                     r"\|decided=(\d+)\|published=(\d+)\|cntfrq=(\d+)")
+          for child, inject, fault, decided, published, freq in re.findall(pattern, log):
+              t0, t1, t2, t3, f = map(int, (inject, fault, decided, published, freq))
+              assert t0 <= t1 <= t2 <= t3, (child, t0, t1, t2, t3)
+              rows.append({
+                  "child": int(child),
+                  "deliver_us": (t1 - t0) * 1e6 / f,
+                  "decide_us": (t2 - t1) * 1e6 / f,
+                  "total_us": (t3 - t0) * 1e6 / f,
+              })
+          assert len(rows) == 21, rows
+          return rows
+
+      def summary(rows, key):
+          values = sorted(row[key] for row in rows)
+          return {"min": values[0], "median": values[len(values) // 2], "max": values[-1]}
+
+      def report(name, rows):
+          print(f"{name}: " + json.dumps({k: summary(rows, k)
+                                          for k in ("deliver_us", "decide_us", "total_us")}))
+
+      # Boot 1: the quiet baseline.
+      try:
+          wait_console(chryso, r"Eshell", 300)
+          load_test_modules(chryso)
+          baseline = latency(chryso, "fb_base", "baseline")
+          report("baseline", baseline)
+          assert_no_pd_fault(chryso)
+      finally:
+          power_off(chryso)
+
+      # Boot 2: the flood, then BEAM halt, reconciliation and BEAM gone.
+      second = create_machine(
+          "${
+            startCommand {
+              image = sel4FallbackImage;
+              netdev = "user,id=net0";
+            }
+          }",
+          name="chrysopolis-2",
+      )
+      second.start()
+      try:
+          wait_console(second, r"Eshell", 300)
+          wait_console(second, r"SPEC_FIXTURE\|open\|committed=1\|pending=2", 60)
+          load_test_modules(second)
+          flood = latency(second, "fb_flood", "flood")
+          report("flood", flood)
+          offset = len(second.get_console_log())
+          second.send_console("chryso_ctl:stat(fb_pre, ${ethChild}).\r")
+          wait_console_since(second, r"CTL_STAT\|FB_PRE\|incarnation=", offset, 60)
+          pre = re.search(r"CTL_STAT\|FB_PRE\|incarnation=(\d+)\|seq=(\d+)",
+                          second.get_console_log()[offset:])
+          old_incarnation, old_seq = pre.groups()
+
+          second.send_console("chryso_beam:stop_vm().\r")
+          wait_console(second, r"ROOT\|spec\|applied\|generation=0x0000000000000001", 120)
+          wait_console(second, r"ROOT\|restart\|child=${beamChild}\|count=1", 120)
+          wait_console(second, r"SPEC_FIXTURE\|conflict-staged", 300)
+          wait_console_count(second, r"Eshell", 2, 300)
+          load_test_modules(second)
+          run_probe(
+              second,
+              f"chryso_ctl:reconcile(fb_post, ${ethChild}, {old_incarnation}, {old_seq}, 1).",
+              "CTL_RECONCILE|FB_POST",
+              ["incarnation_advanced", "applied_spec", "old_seq", "fresh"],
+          )
+          wait_console(second, r"ROOT\|spec\|reject\|reason=conflict", 60)
+
+          offset = len(second.get_console_log())
+          second.send_console("chryso_beam:stop_vm().\r")
+          wait_console_since(second, r"ROOT\|giveup\|child=${beamChild}\|reason=budget-exhausted",
+                             offset, 120)
+          wait_console_since(second, r"PEER\|done", offset, 120)
+          tail = second.get_console_log()[offset:]
+          assert "PEER|fallback|timer|count=1" in tail, tail
+          assert "PEER|fallback|timer|count=2" in tail, tail
+          assert tail.count("ROOT|fault-inject|child=${timerChild}") == 2, tail
+          assert re.search(r"ROOT\|restart\|child=${timerChild}\|count=1", tail), tail
+          assert re.search(r"ROOT\|restart\|child=${timerChild}\|count=2", tail), tail
+          assert not re.search(r"PEER\|(failed|beam-not-gone|unexpected|invalid)", tail), tail
+          assert tail.count("ROOT|giveup|child=${beamChild}|") == 1, tail
+          assert "ROOT|reject" not in second.get_console_log()
+
+          bound = ${toString fallbackLatency.bound_us}
+          worst = max(row["total_us"] for row in flood)
+          print(f"flood worst total {worst:.1f} us, bound {bound} us")
+          assert worst <= bound, f"flood worst {worst:.1f} us exceeds the {bound} us bound"
+      finally:
+          power_off(second)
+
+      # Boot 3: no control pages, the compiled budget exactly.
+      third = create_machine(
+          "${
+            startCommand {
+              image = sel4FallbackNomapImage;
+              netdev = "user,id=net0";
+            }
+          }",
+          name="chrysopolis-3",
+      )
+      third.start()
+      try:
+          wait_console(third, r"Eshell", 300)
+          load_test_modules(third)
+          offset = len(third.get_console_log())
+          third.send_console("chryso_ctl:stat(fb_nomap, ${ethChild}).\r")
+          wait_console_since(third, r"CTL_STAT\|FB_NOMAP\|error=", offset, 60)
+          assert "CTL_STAT|FB_NOMAP|error=enodev" in third.get_console_log()[offset:]
+          for count in range(1, ${driverRestartBudget} + 1):
+              third.send_console("chryso_test:fault_pd(eth).\r")
+              wait_console(third, r"ROOT\|restart\|child=${ethChild}\|count=" + str(count) + r"\b", 120)
+          third.send_console("chryso_test:fault_pd(eth).\r")
+          wait_console(third, r"ROOT\|giveup\|child=${ethChild}\|reason=budget-exhausted", 120)
+          log = third.get_console_log()
+          assert "ROOT|status|" not in log, "publication ran without a status page"
+          assert "ROOT|spec|" not in log, "spec consumer ran without a spec page"
+      finally:
+          power_off(third)
     '';
   };
 

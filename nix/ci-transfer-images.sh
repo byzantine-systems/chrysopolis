@@ -23,6 +23,8 @@ attrs=(
   .#lifecycle-failure-image
   .#spec-commit-image
   .#command-image
+  .#fallback-image
+  .#fallback-nomap-image
 )
 
 case "$mode" in

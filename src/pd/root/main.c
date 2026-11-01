@@ -61,6 +61,7 @@
  *     logged nor evented, and a token bucket bounds accepted work.
  */
 #include "command.h"
+#include "restart_plan.h"
 #include "root_policy.h"
 #include "spec.h"
 #include "status.h"
@@ -252,6 +253,13 @@ static_assert((ROOT_GONE_CH_BLK < ROOT_DEBUG_CH_SERIAL ||
 static_assert(ROOT_GONE_CH_BLK < MICROKIT_MAX_CHANNELS &&
                   ROOT_GONE_CH_NONE >= MICROKIT_MAX_CHANNELS,
               "the give-up channel must be valid and its sentinel must not");
+static_assert((ROOT_GONE_CH_BEAM < ROOT_DEBUG_CH_SERIAL ||
+               ROOT_GONE_CH_BEAM > ROOT_DEBUG_CH_MAX) &&
+                  (ROOT_GONE_CH_BEAM < ROOT_FAULT_CH_SERIAL ||
+                   ROOT_GONE_CH_BEAM > ROOT_FAULT_CH_MAX) &&
+                  ROOT_GONE_CH_BEAM != ROOT_GONE_CH_BLK &&
+                  ROOT_GONE_CH_BEAM < MICROKIT_MAX_CHANNELS,
+              "the BEAM give-up channel must be a distinct valid channel");
 
 /* Driver-class index -> child id, for both channel groups. Built from the ABI
  * constants checked above rather than through root_child_from_raw. */
@@ -295,15 +303,18 @@ static const root_child
  * 0, which is a perfectly valid channel id, and signalling an unwired one is a
  * cap fault in the PD that is supposed to be handling faults.
  *
- * beam_server is deliberately absent. Nothing in the system depends on it the
- * way fatfs depends on blk, so there is no dependent to inform; when root gives
- * up on beam_server the giveup log line is the system's obituary, because the
- * component that would have reported anything is the one that just stopped.
+ * beam_server has a channel, but no production image wires a dependent to
+ * it: nothing depends on the BEAM the way fatfs depends on blk, so there the
+ * giveup log line is the obituary. Only the fallback test image declares it,
+ * for the peer that checks driver recovery with the BEAM gone. root_giveup
+ * signals a channel only when the image declares it.
  */
 static root_channel root_gone_channel(root_child child) {
   switch (child.value) {
   case ROOT_CHILD_BLK:
     return (root_channel){.value = ROOT_GONE_CH_BLK};
+  case ROOT_CHILD_BEAM:
+    return (root_channel){.value = ROOT_GONE_CH_BEAM};
   default:
     return (root_channel){.value = ROOT_GONE_CH_NONE};
   }
@@ -411,24 +422,31 @@ static uint64_t root_status_ticks(void) {
   return root_clock_state.available ? root_now_ticks() : 0;
 }
 
-/* The compiled budget, or the applied spec's, capped at the hard maximum. */
-static unsigned int root_effective_budget(root_child child) {
-  return root_spec_budget(&spec_state, child.value, root_restart_budget(child),
-                          chryso_control_hard_budget_max);
+/* What restart_plan decides with for this child. The clock fields are
+ * sampled by the caller. */
+static root_restart_inputs root_restart_inputs_for(root_child child) {
+  return (root_restart_inputs){
+      .child = child.value,
+      .compiled = root_restart_budget(child),
+      .hard_max = chryso_control_hard_budget_max,
+      .entry = root_restart_entry(child),
+#ifdef ROOT_TEST_BUDGET
+      .timed =
+          {
+              .enabled = true,
+              .policy = root_test_budget,
+              .lifetime_limit = root_test_lifetime_limit,
+          },
+#endif
+      .clock_available = root_clock_state.available,
+      .now_ticks = root_clock_state.last_ticks,
+  };
 }
 
 /* The lifetime ceiling root_restart_child applies to this child. */
 static unsigned int root_status_budget(root_child child) {
-  unsigned int budget = root_effective_budget(child);
-#ifdef ROOT_TEST_BUDGET
-  const unsigned int test_limit = root_test_budget.capacity != 0
-                                      ? root_test_budget.lifetime_limit
-                                      : root_test_lifetime_limit;
-  if (budget > test_limit) {
-    budget = test_limit;
-  }
-#endif
-  return budget;
+  const root_restart_inputs in = root_restart_inputs_for(child);
+  return root_restart_ceiling(&spec_state, &in);
 }
 
 /* The per-child budgets and desired states status rows publish. Children
@@ -687,7 +705,7 @@ static void root_giveup(root_child child, const char *reason) {
                         root_clock_state.available);
 
   const root_channel gone = root_gone_channel(child);
-  if (gone.value != ROOT_GONE_CH_NONE) {
+  if (root_channel_wired(microkit_notifications, gone)) {
     microkit_notify(gone.value);
   }
 
@@ -740,47 +758,19 @@ static root_restart_action root_restart_child(root_child child,
                                               root_spec_result *spec) {
   *spec = root_spec_refresh();
   root_child_record *record = &child_records[child.value];
-  const seL4_Word entry = root_restart_entry(child);
-  const unsigned int legacy_budget = root_effective_budget(child);
   if (root_clock_state.available &&
       root_clock_observe(&root_clock_state, root_now_ticks()) !=
           root_clock_ok) {
     microkit_dbg_puts("ROOT|clock|unavailable\n");
   }
-  root_restart_action action;
-  bool timed_charge = false;
-#ifdef ROOT_TEST_BUDGET
-  if (root_clock_state.available && root_test_budget.capacity != 0) {
-    /* The spec may lower the lifetime ceiling, never raise it. */
-    root_budget_policy policy = root_test_budget;
-    if (policy.lifetime_limit > legacy_budget) {
-      policy.lifetime_limit = legacy_budget;
-    }
-    const root_timed_decision decision = root_restart_decide_at(
-        record, &policy, entry, root_clock_state.last_ticks);
-    if (decision.error == root_timed_valid) {
-      action = decision.action;
-      if (action == root_restart_resume) {
-        *record = decision.next;
-        timed_charge = true;
-      }
-    } else {
-      root_clock_state.available = false;
-      microkit_dbg_puts("ROOT|policy|invalid\n");
-      action = root_restart_giveup_budget_exhausted;
-    }
-  } else {
-    /* A clock unavailable at boot or lost later selects a lifetime-only
-     * ceiling. It cannot grant a time-based refill. Keep the smaller of the
-     * current image budget and this test policy's lifetime ceiling. */
-    const unsigned int ceiling = legacy_budget < root_test_lifetime_limit
-                                     ? legacy_budget
-                                     : root_test_lifetime_limit;
-    action = root_restart_decide(record, ceiling, entry);
+  const root_restart_inputs in = root_restart_inputs_for(child);
+  const root_restart_plan_result plan =
+      root_restart_plan(&spec_state, record, &in);
+  if (plan.policy_invalid) {
+    root_clock_state.available = false;
+    microkit_dbg_puts("ROOT|policy|invalid\n");
   }
-#else
-  action = root_restart_decide(record, legacy_budget, entry);
-#endif
+  const root_restart_action action = plan.action;
   switch (action) {
   case root_restart_ignore_gone:
     root_log_ignored(child, request);
@@ -795,14 +785,12 @@ static root_restart_action root_restart_child(root_child child,
     break;
   }
 
-  /* Budget remains: spend one and restart. The count is incremented BEFORE the
-   * restart so that the child cannot run and fault again (the crasher PD
-   * does exactly this inside init()) before the next serialized fault()
-   * observes the already-charged count. */
-  if (!timed_charge) {
-    root_record_charge(record);
-  }
-  microkit_pd_restart(child.value, entry);
+  /* Budget remains: commit the charged record and restart. It is committed
+   * BEFORE the restart so that the child cannot run and fault again (the
+   * crasher PD does exactly this inside init()) before the next serialized
+   * fault() observes the already-charged count. */
+  *record = plan.next;
+  microkit_pd_restart(child.value, in.entry);
   root_status_note_restart(&status_state, child.value, root_status_ticks(),
                            root_clock_state.available,
                            child.value == ROOT_CHILD_BEAM);

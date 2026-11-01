@@ -5,21 +5,22 @@ import subprocess
 import sys
 
 IMAGES = {
-    "boot-shell-tcp": "test-image",
-    "beam-restart-smoke": "test-image",
-    "orch-status-smoke": "test-image",
-    "orch-spec-smoke": "spec-commit-image",
-    "orch-command-smoke": "command-image",
-    "rng-smoke": "test-image",
-    "socket-smoke": "default",
-    "serial-recovery": "restart-image",
-    "timer-recovery": "restart-image",
-    "blk-recovery": "restart-image",
-    "net-recovery": "restart-image",
-    "blk-giveup-smoke": "restart-image",
-    "budget-decay-smoke": "budget-decay-image",
-    "cothread-smoke": "cothread-probe-image",
-    "lifecycle-config-failure-smoke": "lifecycle-failure-image",
+    "boot-shell-tcp": ("test-image",),
+    "beam-restart-smoke": ("test-image",),
+    "orch-status-smoke": ("test-image",),
+    "orch-spec-smoke": ("spec-commit-image",),
+    "orch-command-smoke": ("command-image",),
+    "orch-fallback-smoke": ("fallback-image", "fallback-nomap-image"),
+    "rng-smoke": ("test-image",),
+    "socket-smoke": ("default",),
+    "serial-recovery": ("restart-image",),
+    "timer-recovery": ("restart-image",),
+    "blk-recovery": ("restart-image",),
+    "net-recovery": ("restart-image",),
+    "blk-giveup-smoke": ("restart-image",),
+    "budget-decay-smoke": ("budget-decay-image",),
+    "cothread-smoke": ("cothread-probe-image",),
+    "lifecycle-config-failure-smoke": ("lifecycle-failure-image",),
 }
 
 if len(sys.argv) != 2:
@@ -31,7 +32,7 @@ if check == "restart-topology":
 else:
     if check not in IMAGES:
         raise SystemExit(f"unknown QEMU check: {check}")
-    names = ["disk", IMAGES[check]]
+    names = ["disk", *IMAGES[check]]
 
 name_list = "[ " + " ".join(json.dumps(name) for name in names) + " ]"
 expression = (

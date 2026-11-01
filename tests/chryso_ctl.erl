@@ -12,7 +12,7 @@ probes reading the wrong bytes. Each step prints
 
 -include("orchestrator_abi.hrl").
 
--export([stat/2, stat_errors/1, ctl_script/2]).
+-export([stat/2, stat_errors/1, ctl_script/2, reconcile/5, latency/3]).
 
 -define(STAT, "/dev/chrysostat").
 -define(CTL, "/dev/chrysoctl").
@@ -119,6 +119,197 @@ ctl_script(Tag, Child) ->
     ok = file:close(G),
     done(Prefix, [U1, U2, U3, U4, U5, U6, U7, U8, U9, U10]).
 
+-doc """
+After a BEAM restart, check that the new BEAM observes Root before it
+commands: the incarnation advanced past `OldIncarnation`, the applied spec
+generation is `SpecGen` (the committed spec survived the restart rather than
+reading as absent), a restart carrying the previous BEAM's `OldSeq` is
+`stale`, and one built from a fresh observation succeeds.
+""".
+-spec reconcile(atom(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ->
+    ok.
+reconcile(Tag, Child, OldIncarnation, OldSeq, SpecGen) ->
+    Prefix = "CTL_RECONCILE|" ++ chryso_test:tag(Tag),
+    {ok, Page} = read_page(),
+    #{generation := Gen, incarnation := I, count := Count} = observe(Page, Child),
+    U1 = step(Prefix, incarnation_advanced, true, I > OldIncarnation),
+    U2 = step(
+        Prefix,
+        applied_spec,
+        SpecGen,
+        field(Page, ?CHRYSO_ROOT_STATUS_HEADER_APPLIED_SPEC_GENERATION_OFFSET, 64)
+    ),
+    {ok, F} = file:open(?CTL, [read, write, raw, binary]),
+    U3 = step(
+        Prefix,
+        old_seq,
+        ?CHRYSO_CTL_RESULT_STALE,
+        result(call(F, command(?CHRYSO_PP_OPCODE_RESTART_CHILD, [Child, Gen, OldSeq, Count])))
+    ),
+    {ok, Fresh} = read_page(),
+    #{seq := Seq, count := Count1} = observe(Fresh, Child),
+    U4 = step(
+        Prefix,
+        fresh,
+        {?CHRYSO_CTL_RESULT_OK, Count1 + 1},
+        case call(F, command(?CHRYSO_PP_OPCODE_RESTART_CHILD, [Child, Gen, Seq, Count1])) of
+            {ok, Result, [_, _, Lifetime, _]} -> {Result, Lifetime};
+            Other -> Other
+        end
+    ),
+    ok = file:close(F),
+    done(Prefix, [U1, U2, U3, U4]).
+
+-doc """
+Fault each `{Class, Child}` driver once through `/dev/pd-restart` and read
+Root's own timestamps for it from the status page: the injection, the
+fault's arrival in `fault()`, the restart decision and the publication.
+Prints one `LAT|<TAG>|<n>|...` line per sample, in counter ticks with the
+counter frequency, then `LAT|<TAG>|done|samples=N|missing=M`.
+
+With `Mode = flood`, a second process keeps `/dev/chrysoctl` busy with SYNC
+commands for the whole run (most come back `rate_limited`), so every fault
+lands while the BEAM is issuing PPCs as fast as it can.
+""".
+-spec latency(atom(), baseline | flood, [{atom(), non_neg_integer()}]) -> ok.
+latency(Tag, Mode, Samples) ->
+    Name = chryso_test:tag(Tag),
+    Flood = start_flood(Mode),
+    Missing = lists:sum([
+        sample(Name, N, Class, Child)
+     || {N, {Class, Child}} <- lists:enumerate(Samples)
+    ]),
+    stop_flood(Name, Flood),
+    io:format("LAT|~s|done|samples=~b|missing=~b~n", [Name, length(Samples), Missing]).
+
+%% One fault and its four timestamps; 1 when Root's events never showed it.
+-spec sample(string(), pos_integer(), atom(), non_neg_integer()) -> 0 | 1.
+sample(Name, N, Class, Child) ->
+    {ok, Before} = read_page(),
+    Head = field(Before, ?CHRYSO_ROOT_STATUS_HEADER_EVENT_HEAD_OFFSET, 64),
+    ok = chryso_test:fault_pd(Class),
+    case await_restart(Child, Head, 200) of
+        {ok, Page, #{inject := T0, fault := T1, decided := T2}} ->
+            io:format(
+                "LAT|~s|~b|child=~b|inject=~b|fault=~b|decided=~b|published=~b|cntfrq=~b~n",
+                [
+                    Name,
+                    N,
+                    Child,
+                    T0,
+                    T1,
+                    T2,
+                    field(Page, ?CHRYSO_ROOT_STATUS_HEADER_NOW_TICKS_OFFSET, 64),
+                    field(Page, ?CHRYSO_ROOT_STATUS_HEADER_CNTFRQ_OFFSET, 64)
+                ]
+            ),
+            %% Let the restarted driver settle before the next fault.
+            timer:sleep(200),
+            0;
+        {error, Reason} ->
+            io:format("LAT|~s|~b|child=~b|missing=~p~n", [Name, N, Child, Reason]),
+            1
+    end.
+
+%% Polls the page until Root's restart of Child after event Head appears.
+-spec await_restart(non_neg_integer(), non_neg_integer(), non_neg_integer()) ->
+    {ok, page(), #{atom() => non_neg_integer()}} | {error, term()}.
+await_restart(_Child, _Head, 0) ->
+    {error, timeout};
+await_restart(Child, Head, Tries) ->
+    case read_page() of
+        {ok, Page} ->
+            case stamps(Page, Child, Head) of
+                {ok, Stamps} ->
+                    {ok, Page, Stamps};
+                none ->
+                    timer:sleep(10),
+                    await_restart(Child, Head, Tries - 1)
+            end;
+        {error, _} ->
+            timer:sleep(10),
+            await_restart(Child, Head, Tries - 1)
+    end.
+
+%% The injection, fault and restart events for Child since Head, in order.
+-spec stamps(page(), non_neg_integer(), non_neg_integer()) ->
+    {ok, #{atom() => non_neg_integer()}} | none.
+stamps(Page, Child, Head) ->
+    Now = field(Page, ?CHRYSO_ROOT_STATUS_HEADER_EVENT_HEAD_OFFSET, 64),
+    Events = [event(Page, I) || I <- lists:seq(max(Head, Now - ?CHRYSO_EVENT_COUNT), Now - 1)],
+    Mine = [E || #{child := C} = E <- Events, C =:= Child],
+    Inject = [
+        T
+     || #{
+            kind := ?CHRYSO_ROOT_EVENT_KIND_CONTROL,
+            detail := ?CHRYSO_ROOT_CONTROL_KIND_FAULT_INJECT,
+            ticks := T
+        } <- Mine
+    ],
+    Fault = [T || #{kind := ?CHRYSO_ROOT_EVENT_KIND_FAULT, ticks := T} <- Mine],
+    Restart = [T || #{kind := ?CHRYSO_ROOT_EVENT_KIND_RESTART, ticks := T} <- Mine],
+    case {Inject, Fault, Restart} of
+        {[T0 | _], [T1 | _], [T2 | _]} -> {ok, #{inject => T0, fault => T1, decided => T2}};
+        _ -> none
+    end.
+
+-spec event(page(), non_neg_integer()) -> #{atom() => non_neg_integer()}.
+event(Page, Index) ->
+    Base =
+        ?CHRYSO_ROOT_STATUS_PAGE_EVENTS_OFFSET +
+            (Index rem ?CHRYSO_EVENT_COUNT) * ?CHRYSO_ROOT_EVENT_SIZE,
+    #{
+        ticks => field(Page, Base + ?CHRYSO_ROOT_EVENT_TICKS_OFFSET, 64),
+        kind => field(Page, Base + ?CHRYSO_ROOT_EVENT_KIND_OFFSET, 8),
+        child => field(Page, Base + ?CHRYSO_ROOT_EVENT_CHILD_OFFSET, 8),
+        detail => field(Page, Base + ?CHRYSO_ROOT_EVENT_DETAIL_OFFSET, 32)
+    }.
+
+%% The flooding process for Mode = flood, or none.
+-spec start_flood(baseline | flood) -> none | {pid(), reference()}.
+start_flood(baseline) ->
+    none;
+start_flood(flood) ->
+    Parent = self(),
+    Ref = make_ref(),
+    Pid = spawn_link(fun() ->
+        {ok, F} = file:open(?CTL, [read, write, raw, binary]),
+        Parent ! {flooding, Ref},
+        flood(F, Ref, Parent, 0, 0)
+    end),
+    receive
+        {flooding, Ref} -> {Pid, Ref}
+    after 5000 -> error(flood_did_not_start)
+    end.
+
+-spec flood(file:io_device(), reference(), pid(), non_neg_integer(), non_neg_integer()) -> ok.
+flood(F, Ref, Parent, Calls, Limited) ->
+    receive
+        {stop, Ref} ->
+            ok = file:close(F),
+            Parent ! {flooded, Ref, Calls, Limited},
+            ok
+    after 0 ->
+        Got = result(call(F, command(?CHRYSO_PP_OPCODE_SYNC, [0, 0, 0, 0]))),
+        Limited1 =
+            case Got of
+                ?CHRYSO_CTL_RESULT_RATE_LIMITED -> Limited + 1;
+                _ -> Limited
+            end,
+        flood(F, Ref, Parent, Calls + 1, Limited1)
+    end.
+
+-spec stop_flood(string(), none | {pid(), reference()}) -> ok.
+stop_flood(_Name, none) ->
+    ok;
+stop_flood(Name, {Pid, Ref}) ->
+    Pid ! {stop, Ref},
+    receive
+        {flooded, Ref, Calls, Limited} ->
+            io:format("LAT|~s|flood|calls=~b|rate_limited=~b~n", [Name, Calls, Limited])
+    after 5000 -> error(flood_did_not_stop)
+    end.
+
 %% Print one step's verdict; 1 when it was unexpected, for done/2.
 -spec step(string(), atom(), term(), term()) -> 0 | 1.
 step(Prefix, Name, Expected, Got) ->
@@ -143,9 +334,17 @@ read_page() ->
 read_page(0) ->
     {error, eagain};
 read_page(Tries) ->
-    {ok, F} = file:open(?STAT, [read, raw, binary]),
-    Result = file:read(F, ?PAGE),
-    ok = file:close(F),
+    case file:open(?STAT, [read, raw, binary]) of
+        {ok, F} ->
+            Result = file:read(F, ?PAGE),
+            ok = file:close(F),
+            classify_page(Result, Tries);
+        {error, _} = Error ->
+            Error
+    end.
+
+-spec classify_page(term(), non_neg_integer()) -> {ok, page()} | {error, term()}.
+classify_page(Result, Tries) ->
     case Result of
         {ok, <<Magic:8/binary, _/binary>> = Page} when
             Magic =:= ?CHRYSO_MAGIC_STATUS, byte_size(Page) =:= ?PAGE
