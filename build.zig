@@ -636,6 +636,7 @@ pub fn build(b: *std.Build) void {
             "io/console/runtime_console.c",
             "compat/fd/runtime_fd.c",
             "compat/fd/runtime_fd_pair.c",
+            "compat/fd/runtime_wake_pipe.c",
             "compat/fd/runtime_sys_fd.c",
             "compat/poll/runtime_sys_poll.c",
             "compat/poll/runtime_epoll_table.c",

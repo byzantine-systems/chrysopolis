@@ -3,6 +3,7 @@
 
 #include <lions/posix/fd.h>
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <sys/types.h>
 
@@ -28,6 +29,9 @@ ssize_t runtime_fd_empty_read(void *data, size_t count, int fd);
  * accepts. The libc table itself holds MAX_FDS entries.
  */
 static constexpr int runtime_fd_limit = 1024;
+
+/* True when fd is a pipe2 read end with unread bytes or a closed writer. */
+[[__nodiscard__]] bool runtime_pipe_fd_ready(int fd);
 
 /* Return the descriptor to the libc table. */
 int runtime_fd_close(int fd);
