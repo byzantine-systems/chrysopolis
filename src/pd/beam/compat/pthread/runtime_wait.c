@@ -9,6 +9,7 @@
 #include "runtime_wait.h"
 #include "runtime_cothread.h"
 #include "runtime_cothread_state.h"
+#include "runtime_trace.h"
 
 #include <sel4/sel4.h>
 
@@ -43,7 +44,12 @@ void thread_io_wait(void) {
   const uint64_t generation =
       atomic_load_explicit(&io_wake_generation, memory_order_acquire);
   do {
+    runtime_trace(runtime_trace_park, (int64_t)generation, 0);
     microkit_cothread_semaphore_wait(&io_wakeup_sem);
+    runtime_trace(runtime_trace_resume,
+                  (int64_t)atomic_load_explicit(&io_wake_generation,
+                                                memory_order_acquire),
+                  0);
   } while (generation ==
            atomic_load_explicit(&io_wake_generation, memory_order_acquire));
 

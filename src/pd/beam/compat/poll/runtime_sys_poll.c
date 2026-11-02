@@ -29,6 +29,7 @@
 #include "runtime_network.h"
 #include "runtime_syscall_handlers.h"
 #include "runtime_timer.h"
+#include "runtime_trace.h"
 #include "runtime_wait.h"
 
 #include <lions/posix/fd.h>
@@ -233,6 +234,7 @@ long runtime_sys_epoll_pwait(va_list ap) {
     return -EBADF;
   }
 
+  runtime_trace(runtime_trace_epoll_enter, epfd, timeout);
   beam_net_pump();
 
   int n = epoll_scan(epoll_table, events, maxevents);
@@ -247,6 +249,7 @@ long runtime_sys_epoll_pwait(va_list ap) {
 
   /* The dirty-IO scheduler cothread performs the deferred console read for
    * the prim_tty NIF, so it needs a turn after every poll. */
+  runtime_trace(runtime_trace_epoll_exit, epfd, n);
   microkit_cothread_yield();
   return n;
 }

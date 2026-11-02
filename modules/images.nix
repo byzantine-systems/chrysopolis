@@ -748,6 +748,13 @@
           commandFixture = true;
         }) [ "orch-command-smoke" ];
 
+        # The ERTS test topology with the wake-path trace built in. For
+        # debugging the cothread and poll paths; see runtime_trace.h.
+        trace-image = mkSel4Image {
+          imgName = "sel4-beam-trace-image";
+          beamElf = "${config.packages.beam-zig-trace}/bin/beam_test.elf";
+        };
+
         # Diagnostic C pthread probe on the bring-up topology. The probe code
         # is compiled only by beam-zig-diagnostic and is absent from shipped
         # beam_server and ERTS-linked images.

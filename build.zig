@@ -410,6 +410,8 @@ pub fn build(b: *std.Build) void {
     const first_party_optimize: std.builtin.OptimizeMode = if (diagnostic) .ReleaseSafe else .ReleaseFast;
     const first_party_flags = cflags.firstParty(diagnostic);
     const runtime_flags = cflags.runtime(diagnostic);
+    // The trace is beam_server-only, so only the glue sees CHRYSO_TRACE.
+    const glue_flags = if (opts.trace) cflags.withDefine(b, runtime_flags, "-DCHRYSO_TRACE=1") else runtime_flags;
     const runtime_abi = abi_schema.load(b.allocator, "interfaces/generated/system-abi.json") catch |err| {
         std.debug.panic("invalid interfaces/generated/system-abi.json: {s}", .{@errorName(err)});
     };
@@ -628,6 +630,8 @@ pub fn build(b: *std.Build) void {
             "config/runtime_lifecycle.c",
             "config/runtime_status.c",
             "config/runtime_config.c",
+            "config/runtime_trace.c",
+            "config/runtime_trace_ring.c",
             "io/timer/runtime_timer.c",
             "io/filesystem/runtime_fs.c",
             "io/network/runtime_network.c",
@@ -663,10 +667,10 @@ pub fn build(b: *std.Build) void {
             "restart/restart.c",
             "restart/beam_snapshot_codec.c",
         },
-        .flags = runtime_flags,
+        .flags = glue_flags,
     });
     // Root's status reader, shared with tests/host, backs /dev/chrysostat.
-    glue.root_module.addCSourceFile(.{ .file = b.path("src/lib/abi/root_status_reader.c"), .flags = runtime_flags });
+    glue.root_module.addCSourceFile(.{ .file = b.path("src/lib/abi/root_status_reader.c"), .flags = glue_flags });
 
     if (diagnostic) {
         glue.root_module.addCSourceFile(.{

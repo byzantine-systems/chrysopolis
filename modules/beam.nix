@@ -34,9 +34,18 @@
         ../tools/abi
       ];
       mkBeamZig =
-        diagnostic:
+        {
+          diagnostic ? false,
+          trace ? false,
+        }:
         pkgs.stdenvNoCC.mkDerivation {
-          name = if diagnostic then "beam-zig-diagnostic" else "beam-zig";
+          name =
+            if diagnostic then
+              "beam-zig-diagnostic"
+            else if trace then
+              "beam-zig-trace"
+            else
+              "beam-zig";
           # Built only after the committed system JSON matches its generator.
           abiFresh = config.checks.abi-stale;
           src = pkgs.lib.fileset.toSource {
@@ -122,6 +131,7 @@
             mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
             ln -s ${beamZigDeps} "$ZIG_GLOBAL_CACHE_DIR"/p
             zig build --prefix $out ${pkgs.lib.optionalString diagnostic "-Ddiagnostic=true"} \
+              ${pkgs.lib.optionalString trace "-Dtrace=true"} \
               -Dboard-dir=${chryso.boardDir} \
               -Dboard=${chryso.microkitBoard} \
               -Dsddf=${config.packages.lionsos-src}/dep/sddf \
@@ -276,8 +286,11 @@
         # beam_test.elf, the same glue with the static ERTS archive linked in:
         # bin/beam_server.elf boots in bring-up mode (console + clock + heap),
         # bin/beam_test.elf hands off to erl_start.
-        beam-zig = mkBeamZig false;
-        beam-zig-diagnostic = mkBeamZig true;
+        beam-zig = mkBeamZig { };
+        beam-zig-diagnostic = mkBeamZig { diagnostic = true; };
+        # The wake-path trace and /dev/chrysotrace (runtime_trace.h); never
+        # shipped, built in CI so the hooks cannot rot.
+        beam-zig-trace = mkBeamZig { trace = true; };
 
         # Aliases kept so existing `nix build .#<attr>` invocations resolve.
         elf = config.packages.beam-zig;

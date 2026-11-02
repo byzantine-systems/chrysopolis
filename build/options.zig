@@ -18,6 +18,7 @@ pub const Options = struct {
     with_crasher: bool,
     tcp_debug: bool,
     diagnostic: bool,
+    trace: bool,
 
     pub fn init(b: *std.Build) Options {
         return .{
@@ -38,6 +39,7 @@ pub const Options = struct {
             .with_crasher = b.option(bool, "with-crasher", "build crasher.elf (test-only faulting child of root)") orelse false,
             .tcp_debug = b.option(bool, "tcp-debug", "trace socket state transitions in tcp.c (TCP_DEBUG)") orelse false,
             .diagnostic = b.option(bool, "diagnostic", "build first-party C with ReleaseSafe and warnings as errors") orelse false,
+            .trace = b.option(bool, "trace", "build the beam_server wake-path trace and /dev/chrysotrace (CHRYSO_TRACE)") orelse false,
         };
     }
 };

@@ -21,6 +21,7 @@
 #include "runtime_fd.h"
 #include "runtime_pd_restart.h"
 #include "runtime_syscall_handlers.h"
+#include "runtime_trace.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -83,6 +84,12 @@ long runtime_sys_openat(va_list ap) {
   if (path != nullptr && is_rng_device_path(path)) {
     va_end(copy);
     return runtime_fd_alloc(urandom_read, nullptr, urandom_fstat, O_RDONLY);
+  }
+
+  /* False for every path unless built with -Dtrace=true. */
+  if (runtime_trace_handles_path(path)) {
+    va_end(copy);
+    return runtime_trace_open(flags);
   }
 
   if (path != nullptr && runtime_control_dev_handles_path(path)) {

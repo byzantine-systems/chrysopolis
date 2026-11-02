@@ -13,6 +13,7 @@
 #include "runtime_restart.h"
 #include "runtime_syscalls.h"
 #include "runtime_timer.h"
+#include "runtime_trace.h"
 #include "runtime_wait.h"
 
 #include <lions/posix/posix.h>
@@ -39,6 +40,7 @@ extern void command_fixture_run(void) __attribute__((weak));
 /* Leftover ready cothreads resume on the next timer tick. */
 static void drain_cothreads(void) {
   if (thread_drain()) {
+    runtime_trace(runtime_trace_drain_rearm, 0, 0);
     beam_timer_arm(sddf_timer_time_now(timer_config.driver_id));
   }
 }
@@ -116,6 +118,7 @@ runtime_status_t runtime_lifecycle_start(void) {
 }
 
 void runtime_lifecycle_notified(microkit_channel ch) {
+  runtime_trace(runtime_trace_notified, (int64_t)ch, 0);
   runtime_timer_notified(ch);
   runtime_network_notified(ch);
   thread_notified(ch);

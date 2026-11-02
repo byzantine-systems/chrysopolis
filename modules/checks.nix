@@ -531,6 +531,23 @@
         {
           c23-diagnostic = config.packages.beam-zig-diagnostic;
 
+          # The trace is built and linked here so its hooks cannot rot, and
+          # shipped ELFs must carry none of its storage. The traced ELF is the
+          # control that proves the symbol test can see it.
+          trace-build = config.packages.trace-image;
+          trace-absent = pkgs.runCommand "chrysopolis-trace-absent" { } ''
+            nm=${chryso.llvm.libllvm}/bin/llvm-nm
+            $nm ${config.packages.beam-zig-trace}/bin/beam_test.elf | grep ' trace_records$' >/dev/null ||
+              { echo "trace-absent: control ELF has no trace_records" >&2; exit 1; }
+            for elf in ${config.packages.beam-zig}/bin/beam_server.elf ${config.packages.beam-zig}/bin/beam_test.elf; do
+              if $nm "$elf" | grep ' trace_records$' >/dev/null; then
+                echo "trace-absent: $elf carries trace storage" >&2
+                exit 1
+              fi
+            done
+            touch $out
+          '';
+
           # Root's restart topology as the Microkit tool actually built it:
           # which PDs fault to Root, their entry and priority, Root's TCB caps
           # and the notification caps between Root and its peers, read from

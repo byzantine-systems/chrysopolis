@@ -21,6 +21,7 @@
 #include "runtime_futex_cmd.h"
 #include "runtime_syscall_handlers.h"
 #include "runtime_timer.h"
+#include "runtime_trace.h"
 #include "runtime_wait.h"
 
 #include <sddf/timer/client.h>
@@ -36,6 +37,7 @@ long runtime_sys_futex(va_list ap) {
   const runtime_futex_cmd cmd = runtime_futex_classify(op);
 
   if (cmd == runtime_futex_wake) {
+    runtime_trace(runtime_trace_futex_wake, (int64_t)(uintptr_t)uaddr, 0);
     thread_io_wake();
     return 0;
   }
@@ -52,6 +54,9 @@ long runtime_sys_futex(va_list ap) {
   if (__atomic_load_n(uaddr, __ATOMIC_ACQUIRE) != val) {
     return -EAGAIN;
   }
+  runtime_trace(runtime_trace_futex_wait, (int64_t)(uintptr_t)uaddr,
+                timeout != nullptr ? (int64_t)runtime_timespec_ns(timeout)
+                                   : -1);
   if (timeout != nullptr) {
     const unsigned ch = timer_config.driver_id;
     const uint64_t target = runtime_futex_deadline(
@@ -59,6 +64,8 @@ long runtime_sys_futex(va_list ap) {
         RNG_REALTIME_BASE_EPOCH + rng_realtime_offset_sec);
     while (__atomic_load_n(uaddr, __ATOMIC_ACQUIRE) == val) {
       if (sddf_timer_time_now(ch) >= target) {
+        runtime_trace(runtime_trace_futex_timeout, (int64_t)(uintptr_t)uaddr,
+                      0);
         return -ETIMEDOUT;
       }
       beam_timer_arm(target);
