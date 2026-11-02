@@ -1,7 +1,8 @@
-/* runtime_token_counter.h and runtime_tls_row.h: thread identity and
- * thread-specific data teardown. */
+/* runtime_token_counter.h, runtime_tls_row.h and runtime_drain.h: thread
+ * identity, thread-specific data teardown and the root drain decision. */
 #include "check.h"
 
+#include "runtime_drain.h"
 #include "runtime_tls_row.h"
 #include "runtime_token_counter.h"
 
@@ -135,7 +136,33 @@ static void test_key_deleted_during_teardown(void) {
   CHECK(row_is_clear(row));
 }
 
+/* Each table row, and the loop it drives: at most `limit` yields. */
+static void test_drain_table(void) {
+  CHECK(runtime_drain_next(false, 0, 4) == runtime_drain_idle);
+  CHECK(runtime_drain_next(false, 4, 4) == runtime_drain_idle);
+  CHECK(runtime_drain_next(false, UINT32_MAX, 4) == runtime_drain_idle);
+  CHECK(runtime_drain_next(true, 0, 4) == runtime_drain_run);
+  CHECK(runtime_drain_next(true, 3, 4) == runtime_drain_run);
+  CHECK(runtime_drain_next(true, 4, 4) == runtime_drain_rearm);
+  CHECK(runtime_drain_next(true, 0, 0) == runtime_drain_rearm);
+
+  for (uint32_t limit = 0; limit < 8; limit++) {
+    for (uint32_t busy = 0; busy < 12; busy++) {
+      /* A queue that empties after `busy` rounds. */
+      uint32_t yields = 0;
+      runtime_drain_step step = runtime_drain_run;
+      for (uint32_t rounds = 0; step == runtime_drain_run; rounds++) {
+        step = runtime_drain_next(rounds < busy, rounds, limit);
+        yields += step == runtime_drain_run;
+      }
+      CHECK_EQ_U64(yields, busy < limit ? busy : limit);
+      CHECK(step == (busy <= limit ? runtime_drain_idle : runtime_drain_rearm));
+    }
+  }
+}
+
 int main(void) {
+  test_drain_table();
   test_tokens_never_repeat();
   test_token_exhaustion();
   test_destructor_rules();
