@@ -52,7 +52,7 @@ const suites = [_]Suite{
     .{ .name = "fd_pair", .source = "beam/compat/fd/suite_fd_pair.c", .unit_dir = "../../src/pd/beam/compat/fd", .units = &.{"runtime_fd_pair.c"} },
     .{ .name = "wake_pipe", .source = "beam/compat/fd/suite_wake_pipe.c", .unit_dir = "../../src/pd/beam/compat/fd", .sources = &.{"prop.c"}, .units = &.{"runtime_wake_pipe.c"} },
     .{ .name = "epoll", .source = "beam/compat/poll/suite_epoll.c", .unit_dir = "../../src/pd/beam/compat/poll", .units = &.{"runtime_epoll_table.c"} },
-    .{ .name = "status", .source = "beam/config/suite_status.c", .unit_dir = "../../src/pd/beam/config", .extra_include_dirs = &.{"../../src/pd/beam/compat/syscall"}, .units = &.{"runtime_status.c"} },
+    .{ .name = "status", .source = "beam/config/suite_status.c", .unit_dir = "../../src/pd/beam/config", .extra_include_dirs = &.{ "../../src/pd/beam/compat/syscall", "../../src/pd/beam/compat/time" }, .units = &.{"runtime_status.c"} },
     .{ .name = "pd_restart", .source = "beam/restart/suite_pd_restart.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{"runtime_pd_restart_parse.c"} },
     .{ .name = "pthread", .source = "beam/compat/pthread/suite_pthread.c", .unit_dir = "../../src/pd/beam/compat/pthread", .units = &.{"runtime_tls_row.c"} },
     .{ .name = "root_policy", .source = "root/suite_root_policy.c", .unit_dir = "../../src/pd/root/policy", .units = &.{} },

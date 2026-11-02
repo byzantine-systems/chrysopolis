@@ -5,21 +5,21 @@
  * epoll. Its fallback pollset thread and the schedulers use ppoll, and a few
  * shell paths use select. Two sources of readiness exist: stdin (fd 0) is
  * readable when the serial RX queue has data, and a socket descriptor reports
- * the state tcp.c keeps for it. Every other descriptor never becomes ready.
+ * the state tcp.c keeps for it, and a pipe2 read end is readable while it
+ * holds unread bytes. Every other descriptor never becomes ready.
  *
  * All three wait the same way. They pump lwIP, scan, and if nothing is ready
  * and the timeout is nonzero they arm the timer multiplexer for a finite
  * timeout, park for ONE pulse, rescan and return. The call can return 0 before
- * its deadline. ERTS updates its pollset and timeout between calls and
- * announces a change by writing its wakeup pipe, which pulses the waiters
- * (runtime_fd_discard_write). Looping here until the original deadline would
- * miss, for example, a shorter timer set after the park. ERTS treats a 0 return
- * as a timeout and re-evaluates. The PD blocks in seL4_Recv while parked, so
- * QEMU's main loop runs freely and slirp's hostfwd SYNs arrive.
+ * its deadline. ERTS interrupts a wait by writing its wakeup pipe, and it
+ * leaves an infinite wait only when that pipe reads as ready: a 0 return just
+ * re-enters the wait. The PD blocks in seL4_Recv while parked, so QEMU's main
+ * loop runs freely and slirp's hostfwd SYNs arrive.
  *
- * There is one epoll table shared by every epoll instance. ERTS creates one.
- * Closing a descriptor leaves its epoll entry in place. A later ADD or MOD for
- * the reused descriptor number overwrites that entry.
+ * Each epoll instance has its own table: ERTS runs one pollset per poller,
+ * and each must see only its own wakeup pipe. Closing a watched descriptor
+ * leaves its entry in place; a later ADD or MOD for the reused number
+ * overwrites it. Closing the epoll descriptor frees its table.
  */
 #include "runtime_config.h"
 #include "runtime_console.h"
@@ -61,8 +61,40 @@ static_assert(EPOLLONESHOT == runtime_epoll_oneshot);
 static_assert(sizeof(epoll_data_t) == sizeof(uint64_t));
 
 static constexpr size_t epoll_max_fds = 64;
+static constexpr size_t epoll_instances = 4;
 
-static runtime_epoll_entry epoll_table[epoll_max_fds];
+typedef struct {
+  int epfd; /* -1 when free */
+  runtime_epoll_entry table[epoll_max_fds];
+} epoll_instance;
+
+static epoll_instance epolls[epoll_instances] = {
+    {.epfd = -1}, {.epfd = -1}, {.epfd = -1}, {.epfd = -1}};
+
+static runtime_epoll_entry *epoll_table_of(int epfd) {
+  for (size_t i = 0; i < epoll_instances; i++) {
+    if (epolls[i].epfd == epfd && epfd >= 0) {
+      return epolls[i].table;
+    }
+  }
+  return nullptr;
+}
+
+static int epoll_close(int fd) {
+  for (size_t i = 0; i < epoll_instances; i++) {
+    if (epolls[i].epfd == fd) {
+      epolls[i] = (epoll_instance){.epfd = -1};
+    }
+  }
+  return runtime_fd_close(fd);
+}
+
+/* A duplicate would be a second name the instance table cannot resolve. */
+static int epoll_dup3(int oldfd, int newfd) {
+  (void)oldfd;
+  (void)runtime_fd_close(newfd);
+  return -EBUSY;
+}
 
 /* True when fd is an open descriptor whose fstat reports S_IFSOCK. Safe for
  * any fd value. socket_index_of_fd indexes its table without a bounds check
@@ -102,15 +134,36 @@ static void arm_timeout(uint64_t timeout_ns) {
 
 long runtime_sys_epoll_create1(va_list ap) {
   (void)ap;
-  return runtime_fd_alloc(runtime_fd_eof_read, runtime_fd_discard_write,
-                          nullptr, O_RDWR);
+  epoll_instance *slot = nullptr;
+  for (size_t i = 0; slot == nullptr && i < epoll_instances; i++) {
+    if (epolls[i].epfd < 0) {
+      slot = &epolls[i];
+    }
+  }
+  if (slot == nullptr) {
+    return -EMFILE;
+  }
+  const int fd = runtime_fd_alloc_ops(
+      &(const runtime_fd_ops){.read = runtime_fd_eof_read,
+                              .write = runtime_fd_discard_write,
+                              .close = epoll_close,
+                              .dup3 = epoll_dup3},
+      O_RDWR);
+  if (fd >= 0) {
+    *slot = (epoll_instance){.epfd = fd};
+  }
+  return fd;
 }
 
 long runtime_sys_epoll_ctl(va_list ap) {
-  (void)va_arg(ap, long); /* epfd */
+  const int epfd = runtime_sys_arg_int(va_arg(ap, long));
   const int op = runtime_sys_arg_int(va_arg(ap, long));
   const int fd = runtime_sys_arg_int(va_arg(ap, long));
   const struct epoll_event *event = runtime_sys_arg_pointer(va_arg(ap, long));
+  runtime_epoll_entry *epoll_table = epoll_table_of(epfd);
+  if (epoll_table == nullptr) {
+    return -EBADF;
+  }
 
   if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) {
     if (event == nullptr) {
@@ -141,7 +194,10 @@ static uint32_t epoll_readiness(void *context,
   if (entry->is_sock) {
     return socket_revents(entry->sock_handle);
   }
-  return entry->fd == 0 && runtime_console_readable() ? EPOLLIN : 0;
+  if (entry->fd == 0) {
+    return runtime_console_readable() ? EPOLLIN : 0;
+  }
+  return runtime_pipe_fd_ready(entry->fd) ? EPOLLIN : 0;
 }
 
 static void epoll_report(void *context, size_t index, uint32_t events,
@@ -151,7 +207,8 @@ static void epoll_report(void *context, size_t index, uint32_t events,
 }
 
 /* events must hold maxevents entries, and maxevents must be positive. */
-static int epoll_scan(struct epoll_event *events, int maxevents) {
+static int epoll_scan(runtime_epoll_entry *epoll_table,
+                      struct epoll_event *events, int maxevents) {
   const runtime_epoll_scan_ops ops = {
       .readiness = epoll_readiness,
       .report = epoll_report,
@@ -163,7 +220,7 @@ static int epoll_scan(struct epoll_event *events, int maxevents) {
 }
 
 long runtime_sys_epoll_pwait(va_list ap) {
-  (void)va_arg(ap, long); /* epfd */
+  const int epfd = runtime_sys_arg_int(va_arg(ap, long));
   struct epoll_event *events = runtime_sys_arg_pointer(va_arg(ap, long));
   const int maxevents = runtime_sys_arg_int(va_arg(ap, long));
   const int timeout = runtime_sys_arg_int(va_arg(ap, long));
@@ -171,17 +228,21 @@ long runtime_sys_epoll_pwait(va_list ap) {
   if (events == nullptr || maxevents <= 0) {
     return -EINVAL;
   }
+  runtime_epoll_entry *epoll_table = epoll_table_of(epfd);
+  if (epoll_table == nullptr) {
+    return -EBADF;
+  }
 
   beam_net_pump();
 
-  int n = epoll_scan(events, maxevents);
+  int n = epoll_scan(epoll_table, events, maxevents);
   if (n == 0 && timeout != 0) {
     if (timeout > 0) {
       arm_timeout(runtime_timeout_ms_ns(timeout));
     }
     thread_io_wait();
     beam_net_pump();
-    n = epoll_scan(events, maxevents);
+    n = epoll_scan(epoll_table, events, maxevents);
   }
 
   /* The dirty-IO scheduler cothread performs the deferred console read for
@@ -209,6 +270,8 @@ static int poll_scan(struct pollfd *fds, nfds_t nfds) {
       const uint32_t wanted = runtime_poll_wanted_mask((uint32_t)p->events);
       /* The mask holds only the four low poll bits, so it fits in short. */
       p->revents = (short)(socket_revents(socket_index_of_fd(p->fd)) & wanted);
+    } else if ((p->events & POLLIN) && runtime_pipe_fd_ready(p->fd)) {
+      p->revents = POLLIN;
     }
     if (p->revents != 0) {
       ready++;
@@ -307,6 +370,8 @@ static int select_scan(int nfds, const select_request *req, fd_set *readfds,
     } else if (fd_is_socket(fd)) {
       state =
           runtime_select_from_revents(socket_revents(socket_index_of_fd(fd)));
+    } else if (runtime_pipe_fd_ready(fd)) {
+      state.read = true;
     } else {
       continue;
     }

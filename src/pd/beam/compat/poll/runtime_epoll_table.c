@@ -1,5 +1,5 @@
 /*
- * One table serves every epoll instance, since ERTS creates one. Closing a
+ * One table per epoll instance; the adapter keeps one per epfd. Closing a
  * descriptor leaves its entry in place; a later set for the reused number
  * overwrites it.
  */

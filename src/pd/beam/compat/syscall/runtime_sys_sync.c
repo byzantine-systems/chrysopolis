@@ -10,22 +10,23 @@
  * spuriously too. They re-compare and park again, so the PD idles at ~0% CPU
  * here.
  *
- * A timed FUTEX_WAIT keeps a bounded yield loop. Its deadline must be honoured,
- * and mapping arbitrary futex timeouts onto the sDDF timer would cost more
- * than it saves: timed waits happen during active work, and the idle path is
- * the untimed wait.
+ * A timed FUTEX_WAIT parks too, with its deadline on the timer multiplexer,
+ * and returns -ETIMEDOUT when it passes. Spinning on yields instead stalled
+ * the waiter until an unrelated notification (each Erlang file op took
+ * ~1 s).
  */
+#include "rng.h"
+#include "runtime_config.h"
 #include "runtime_deadline.h"
 #include "runtime_futex_cmd.h"
 #include "runtime_syscall_handlers.h"
+#include "runtime_timer.h"
 #include "runtime_wait.h"
 
-#include <libmicrokitco.h>
+#include <sddf/timer/client.h>
 
 #include <errno.h>
 #include <time.h>
-
-static constexpr int timed_wait_yields = 4096;
 
 long runtime_sys_futex(va_list ap) {
   int *uaddr = runtime_sys_arg_pointer(va_arg(ap, long));
@@ -52,13 +53,16 @@ long runtime_sys_futex(va_list ap) {
     return -EAGAIN;
   }
   if (timeout != nullptr) {
-    /* Return spuriously after a bounded number of yields. ERTS re-checks its
-     * condition and re-arms the wait. */
-    for (int i = 0; i < timed_wait_yields; i++) {
-      microkit_cothread_yield();
-      if (__atomic_load_n(uaddr, __ATOMIC_ACQUIRE) != val) {
-        return 0;
+    const unsigned ch = timer_config.driver_id;
+    const uint64_t target = runtime_futex_deadline(
+        op, runtime_timespec_ns(timeout), sddf_timer_time_now(ch),
+        RNG_REALTIME_BASE_EPOCH + rng_realtime_offset_sec);
+    while (__atomic_load_n(uaddr, __ATOMIC_ACQUIRE) == val) {
+      if (sddf_timer_time_now(ch) >= target) {
+        return -ETIMEDOUT;
       }
+      beam_timer_arm(target);
+      thread_io_wait();
     }
     return 0;
   }
