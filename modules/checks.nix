@@ -40,6 +40,12 @@
         inherit (pkgs) fetchgit fetchFromGitHub;
         builder = pkgs.beamPackages.buildRebar3;
       };
+      # apps/chryso_core's test deps (PropEr, Snabbkaffe), locked the same way.
+      chrysoCoreDeps = import ../apps/chryso_core/rebar-deps.nix {
+        inherit (pkgs.beamPackages) fetchHex;
+        inherit (pkgs) fetchgit fetchFromGitHub;
+        builder = pkgs.beamPackages.buildRebar3;
+      };
       individualVmNames = [
         "boot-smoke"
         "shell-smoke"
@@ -328,6 +334,60 @@
               ok = file:write_file("rebar.config", [io_lib:format("~tp.~n", [T]) || T <- Kept]),
               halt().'
             rebar3 eunit
+            touch $out
+            runHook postBuild
+          '';
+        };
+
+        # The orchestrator's pure semantics (apps/chryso_core): compile with
+        # every warning as an error, Dialyzer and xref, then every PropEr law,
+        # including the differential law against the C units' traces.
+        # Runs PropEr directly, so neither rebar3 nor its plugins reach the
+        # network in the sandbox.
+        core-erlang = pkgs.stdenvNoCC.mkDerivation {
+          name = "chrysopolis-core-erlang";
+          src = pkgs.lib.fileset.toSource {
+            root = ../apps/chryso_core;
+            fileset = pkgs.lib.fileset.unions [
+              ../apps/chryso_core/src
+              ../apps/chryso_core/test
+            ];
+          };
+          nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+          dontConfigure = true;
+          dontInstall = true;
+          buildPhase = ''
+            runHook preBuild
+            export HOME=$TMPDIR
+            export ERL_LIBS=${chrysoCoreDeps.proper}/lib/erlang/lib:${chrysoCoreDeps.snabbkaffe}/lib/erlang/lib
+            export CHRYSO_ROOT_TRACES=${config.packages.root-traces}
+            mkdir ebin
+            erlc -o ebin +debug_info +warnings_as_errors +warn_missing_spec +warn_missing_doc src/*.erl
+            erlc -o ebin +debug_info +warnings_as_errors -pa ebin test/prop_*.erl
+            # Status 2 means warnings inside OTP's own apps; the PLT is still built.
+            dialyzer --build_plt --apps erts kernel stdlib --output_plt core.plt >/dev/null || [ $? -eq 2 ]
+            dialyzer --plt core.plt -Wunmatched_returns -Werror_handling ebin/chryso_root*.beam
+            erl -noshell -pa ebin -eval '
+              xref:start(s), xref:set_default(s, [{warnings, false}]),
+              ok = xref:set_library_path(s, code:get_path()),
+              {ok, _} = xref:add_directory(s, "ebin"),
+              Bad = [{A, R} || A <- [undefined_function_calls, locals_not_used, deprecated_function_calls],
+                               {ok, R} <- [xref:analyze(s, A)], R =/= []],
+              case Bad of [] -> ok; _ -> io:format("xref: ~p~n", [Bad]), halt(1) end,
+              Mods = [prop_root_policy, prop_root_spec, prop_root_bucket,
+                      prop_root_command, prop_root, prop_root_traces],
+              Failed = [{M, R} || M <- Mods, R <- [proper:module(M, [{numtests, 300}])], R =/= []],
+              io:format("~nproperty failures: ~p~n", [Failed]),
+              halt(case Failed of [] -> 0; _ -> 1 end).'
+            # The cross-node fence law: a peer node hosts the simulated Root.
+            # Distribution stays on loopback; EPMD starts with the node.
+            erlc -o ebin +debug_info +warnings_as_errors -DTEST -pa ebin \
+              test/chryso_sim_root.erl test/chryso_core_cluster_SUITE.erl
+            mkdir ct_logs
+            ct_run -noshell -name ct@127.0.0.1 -setcookie chryso_core_ct -pa ebin \
+              -dir test -suite chryso_core_cluster_SUITE -logdir ct_logs > ct.out 2>&1 || true
+            grep -q "TEST COMPLETE, 1 ok, 0 failed" ct.out || { cat ct.out; exit 1; }
+            epmd -kill >/dev/null 2>&1 || true
             touch $out
             runHook postBuild
           '';

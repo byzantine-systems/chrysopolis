@@ -1,0 +1,10 @@
+%% Library application: the orchestrator's pure semantics. No processes; the
+%% modules are Mealy machines and lattices with their laws in -doc.
+{application, chryso_core, [
+    {description, "Chrysopolis orchestration semantics"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {env, []},
+    {licenses, ["Apache-2.0"]}
+]}.

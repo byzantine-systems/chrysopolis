@@ -102,6 +102,14 @@
           CHRYSO_ABI_GENERATED="$generated" exec rebar3 "$@"
         '';
 
+        # apps/chryso_core with the C units' traces for prop_root_traces.
+        scripts.chryso-core-rebar3.exec = ''
+          set -e
+          traces=$(nix build --no-link --print-out-paths "$DEVENV_ROOT#root-traces")
+          cd "$DEVENV_ROOT/apps/chryso_core"
+          CHRYSO_ROOT_TRACES="$traces" exec rebar3 "$@"
+        '';
+
         enterShell = ''
           echo "========================================================="
           echo " Chrysopolis: BEAM on seL4 Microkit ${chryso.microkitVersion}"
