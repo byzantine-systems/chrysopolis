@@ -241,6 +241,24 @@
         # Microkit, sDDF or LionsOS input, so it runs on every platform in
         # seconds. The derivation succeeds only if every suite passes in every
         # variant (see tests/host/build.zig).
+        # Root's differential traces from the fallback suite's harness, the
+        # input of apps/chryso_core's trace replay. Generated twice with
+        # separate Zig caches and compared, so nondeterminism fails here.
+        root-traces = config.packages.runtime-host-tests.overrideAttrs (_: {
+          name = "chrysopolis-root-traces";
+          buildPhase = ''
+            runHook preBuild
+            export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+            cd tests/host
+            zig build traces --prefix "$TMPDIR/first" --cache-dir "$TMPDIR/cache-first"
+            zig build traces --prefix "$TMPDIR/second" --cache-dir "$TMPDIR/cache-second"
+            diff -r "$TMPDIR/first" "$TMPDIR/second"
+            mkdir -p $out
+            cp -r "$TMPDIR/first/root-traces/." $out/
+            runHook postBuild
+          '';
+        });
+
         runtime-host-tests = pkgs.stdenvNoCC.mkDerivation {
           name = "chrysopolis-runtime-host-tests";
           abiFresh = config.checks.abi-stale;

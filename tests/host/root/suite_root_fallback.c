@@ -20,6 +20,9 @@
  *   P5           a refresh that applies nothing keeps the policy
  *   P7           only an accepted RESTART_CHILD acts; tokens stay within
  *                capacity; every command call is tallied once
+ *
+ * With --traces DIR it also writes generated runs as differential traces for
+ * apps/chryso_core, whose Erlang model of Root must reproduce every output.
  */
 #include "check.h"
 #include "command.h"
@@ -31,6 +34,7 @@
 #include "status.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Serial, timer, blk, eth and beam; the crasher (4) is absent. */
@@ -178,6 +182,115 @@ static void sut_init(sut *s, bool mapped) {
                    62500000, budget);
 }
 
+/* --- differential traces ----------------------------------------------- */
+
+/* Children a trace reports: the present set fits below this. */
+static constexpr unsigned int trace_children = 6;
+
+/* Set only by --traces; every hook below is a no-op otherwise. */
+static FILE *trace_out;
+
+static const char *const action_names[] = {
+    [root_restart_resume] = "resume",
+    [root_restart_giveup_budget_exhausted] = "giveup_budget",
+    [root_restart_giveup_window_exhausted] = "giveup_window",
+    [root_restart_giveup_lifetime_exhausted] = "giveup_lifetime",
+    [root_restart_giveup_no_entry] = "giveup_no_entry",
+    [root_restart_ignore_gone] = "ignore_gone",
+};
+
+static const char *const result_names[] = {
+    [chryso_ctl_result_unset] = "unset",
+    [chryso_ctl_result_ok] = "ok",
+    [chryso_ctl_result_refused] = "refused",
+    [chryso_ctl_result_ignored] = "ignored",
+    [chryso_ctl_result_rate_limited] = "rate_limited",
+    [chryso_ctl_result_bad_arg] = "bad_arg",
+    [chryso_ctl_result_bad_version] = "bad_version",
+    [chryso_ctl_result_internal_error] = "internal_error",
+    [chryso_ctl_result_already_done] = "already_done",
+    [chryso_ctl_result_stale] = "stale",
+};
+
+static const char *const outcome_names[] = {
+    [root_spec_absent] = "absent",
+    [root_spec_applied] = "applied",
+    [root_spec_unchanged] = "unchanged",
+    [root_spec_kept] = "kept",
+};
+
+/* The bank as the generated codec classifies it, before any comparison with
+ * the retained policy: the syntax the model takes as input. */
+static void trace_bank(const chryso_spec_page *page, size_t bank) {
+  const chryso_spec_bank *b = &page->banks[bank];
+  if (atomic_load(&b->bank_seq) == 0) {
+    fputs(" empty", trace_out);
+    return;
+  }
+  const chryso_abi_reject verdict =
+      chryso_check_spec_bank((const uint8_t *)page, sizeof(*page), bank);
+  if (verdict != chryso_abi_reject_ok) {
+    const char *reason = verdict == chryso_abi_reject_torn ? "bank_torn"
+                         : verdict == chryso_abi_reject_checksum
+                             ? "bank_checksum"
+                             : "bank_malformed";
+    fprintf(trace_out, " rej/%s/0", reason);
+    return;
+  }
+  if (b->generation == 0) {
+    fputs(" empty", trace_out);
+    return;
+  }
+  for (unsigned int c = 0; c < chryso_child_count; c++) {
+    if (!is_present(c) && (b->budget[c] != 0 || b->desired[c] != 0)) {
+      fprintf(trace_out, " rej/undeclared_child/%llu",
+              (unsigned long long)b->generation);
+      return;
+    }
+  }
+  fprintf(trace_out, " bank/%llu/", (unsigned long long)b->generation);
+  for (unsigned int c = 0; c < trace_children; c++) {
+    fprintf(trace_out, "%s%u", c ? "," : "", b->budget[c]);
+  }
+  fputc('/', trace_out);
+  for (unsigned int c = 0; c < trace_children; c++) {
+    fprintf(trace_out, "%s%u", c ? "," : "", b->desired[c]);
+  }
+}
+
+/* What the next refresh reads: no page, a zero header, a bad header, or the
+ * active bank and the other one. */
+static void trace_spec(const sut *s) {
+  if (trace_out == nullptr) {
+    return;
+  }
+  const uint8_t *bytes = (const uint8_t *)&spec_page;
+  bool zero = true;
+  for (size_t i = 0; i < sizeof(chryso_spec_header); i++) {
+    zero &= bytes[i] == 0;
+  }
+  if (!s->mapped || zero) {
+    fputs("spec absent\n", trace_out);
+    return;
+  }
+  if (chryso_check_spec_header(bytes, sizeof(spec_page)) !=
+      chryso_abi_reject_ok) {
+    fputs("spec header\n", trace_out);
+    return;
+  }
+  const uint32_t active = atomic_load(&spec_page.header.active_bank);
+  fprintf(trace_out, "spec bank%u", active);
+  trace_bank(&spec_page, active);
+  trace_bank(&spec_page, 1 - active);
+  fputc('\n', trace_out);
+}
+
+static void trace_words(const char *label, const uint64_t words[static 4]) {
+  fprintf(trace_out, " %s=%llu,%llu,%llu,%llu", label,
+          (unsigned long long)words[0], (unsigned long long)words[1],
+          (unsigned long long)words[2], (unsigned long long)words[3]);
+}
+
 /* The record checks that hold after every decision: P3 and P6. */
 static bool record_laws(const root_child_record *before,
                         const root_child_record *after,
@@ -198,6 +311,7 @@ static bool law_failed;
 /* main.c's root_restart_child plus the publish at the end of its callback. */
 static root_restart_action sut_decide(sut *s, unsigned int child) {
   const root_spec_policy kept = s->spec.retained;
+  trace_spec(s);
   const root_spec_result refreshed = root_spec_consume(
       &s->spec, s->mapped ? &spec_page : nullptr, &spec_scratch, present);
   if (refreshed.outcome == root_spec_applied) {
@@ -247,6 +361,20 @@ static root_restart_action sut_decide(sut *s, unsigned int child) {
     (void)root_status_publish(&s->status, &status_page, child, record, s->now,
                               true, &outcome, 1);
   }
+  if (trace_out != nullptr) {
+    fprintf(trace_out,
+            "decide child=%u action=%s state=%s lifetime=%u outcome=%s "
+            "reason=%u record=%d retained=%llu budgets=",
+            child, action_names[plan.action],
+            record->state == root_child_gone ? "gone" : "live",
+            record->lifetime_count, outcome_names[refreshed.outcome],
+            (unsigned)refreshed.reason, refreshed.record,
+            (unsigned long long)s->spec.retained.generation);
+    for (unsigned int c = 0; c < trace_children; c++) {
+      fprintf(trace_out, "%s%u", c ? "," : "", s->spec.retained.budget[c]);
+    }
+    fprintf(trace_out, " seq=%llu\n", (unsigned long long)s->status.seq);
+  }
   return plan.action;
 }
 
@@ -255,10 +383,20 @@ static void sut_command(sut *s, uint16_t opcode, uint64_t count,
                         const uint64_t args[static root_command_words],
                         step_out *out) {
   s->calls++;
+  if (trace_out != nullptr) {
+    fprintf(trace_out, "cmd op=%u count=%llu now=%llu", opcode,
+            (unsigned long long)count, (unsigned long long)s->now);
+    trace_words("args", args);
+    fputc('\n', trace_out);
+  }
   const chryso_ctl_result framed =
       root_command_frame(&s->cmd, pp, pp, opcode, count);
   if (framed != chryso_ctl_result_ok) {
     out->result = framed;
+    if (trace_out != nullptr) {
+      fprintf(trace_out, "reply result=%s values=0,0,0,0\n",
+              result_names[framed]);
+    }
     return;
   }
   const root_command_view view = {
@@ -314,6 +452,11 @@ static void sut_command(sut *s, uint16_t opcode, uint64_t count,
       d.values[3] = s->status.seq;
       root_command_complete(&s->cmd, &d);
     }
+  }
+  if (trace_out != nullptr) {
+    fprintf(trace_out, "reply result=%s", result_names[d.result]);
+    trace_words("values", d.values);
+    fprintf(trace_out, " tokens=%u\n", s->cmd.tokens);
   }
   if (s->cmd.tokens > tokens) {
     law_failed = true; /* P7 */
@@ -371,6 +514,10 @@ static void sut_spec_corrupt(void) {
 
 static step_out sut_step(sut *s, const event *e) {
   step_out out = {};
+  if (trace_out != nullptr && (e->kind == ev_fault || e->kind == ev_direct)) {
+    fprintf(trace_out, "fault child=%u now=%llu\n", e->child,
+            (unsigned long long)s->now);
+  }
   switch (e->kind) {
   case ev_fault:
     out.child = e->child;
@@ -865,7 +1012,77 @@ static void test_timed_selector(void) {
   CHECK(r.next.state == root_child_gone);
 }
 
-int main(void) {
+/* One trace per seed: the constants, then each step's inputs and outputs.
+ * Writes DIR/trace_NNN.txt and DIR/manifest.txt; returns false on I/O
+ * failure. */
+static bool emit_traces(const char *dir) {
+  static event events[max_events];
+  static constexpr unsigned int trace_count = 64;
+  char path[512] = {};
+  for (unsigned int t = 0; t < trace_count; t++) {
+    const int n = snprintf(path, sizeof path, "%s/trace_%03u.txt", dir, t);
+    if (n < 0 || (size_t)n >= sizeof path) {
+      return false;
+    }
+    trace_out = fopen(path, "w");
+    if (trace_out == nullptr) {
+      return false;
+    }
+    const bool mapped = t % 4 != 3;
+    prop_rng rng = prop_seed(UINT64_C(0x9e3779b97f4a7c15) + t);
+    const size_t count = generate(&rng, events, (unsigned int)(t % 4), false);
+    sut s = {};
+    sut_init(&s, mapped);
+    fprintf(trace_out,
+            "init mapped=%d now=%llu tokens=%u refill=%llu hard_max=%u "
+            "entry=%llu pp=%u beam=%u present=%llu drivers=%llu "
+            "compiled=",
+            mapped, (unsigned long long)s.now, tokens,
+            (unsigned long long)refill_ticks, hard_max,
+            (unsigned long long)entry, pp, beam, (unsigned long long)present,
+            (unsigned long long)drivers);
+    for (unsigned int c = 0; c < trace_children; c++) {
+      fprintf(trace_out, "%s%u", c ? "," : "", compiled_of(c));
+    }
+    fprintf(trace_out,
+            " generation=%llu incarnation=%llu seq=%llu abi=%u cntfrq=%llu\n",
+            (unsigned long long)s.status.root_generation,
+            (unsigned long long)s.status.beam_incarnation,
+            (unsigned long long)s.status.seq, (unsigned)chryso_abi_version,
+            (unsigned long long)s.status.frequency);
+    for (size_t i = 0; i < count; i++) {
+      if (events[i].kind == ev_tick) {
+        fprintf(trace_out, "tick %u\n", events[i].value);
+      }
+      (void)sut_step(&s, &events[i]);
+    }
+    fputs("end\n", trace_out);
+    if (fclose(trace_out) != 0) {
+      trace_out = nullptr;
+      return false;
+    }
+    trace_out = nullptr;
+  }
+  const int n = snprintf(path, sizeof path, "%s/manifest.txt", dir);
+  if (n < 0 || (size_t)n >= sizeof path) {
+    return false;
+  }
+  FILE *manifest = fopen(path, "w");
+  if (manifest == nullptr) {
+    return false;
+  }
+  fprintf(manifest, "root-traces 1\ncount %u\n", trace_count);
+  return fclose(manifest) == 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 3 && strcmp(argv[1], "--traces") == 0) {
+    if (!emit_traces(argv[2])) {
+      fprintf(stderr, "root_fallback: cannot write traces to %s\n", argv[2]);
+      return 1;
+    }
+    return 0;
+  }
   test_cap();
   test_unmapped_identity();
   test_timed_selector();
