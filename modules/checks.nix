@@ -279,7 +279,7 @@
           cp -r ${config.packages.orchestrator-abi} tree
           chmod -R u+w tree
           ${sameTree "${config.packages.orchestrator-abi}" "tree"}
-          bin=$(find tree/vectors -name '*.bin' | sort | head -n 1)
+          bin=$(find tree/vectors -name '*.bin' | sort | sed -n 1p)
           ${pkgs.python3}/bin/python -c 'import sys; p = sys.argv[1]; b = bytearray(open(p, "rb").read()); b[0] ^= 1; open(p, "wb").write(b)' "$bin"
           if ${sameTree "${config.packages.orchestrator-abi}" "tree"} >/dev/null; then
             echo "abi-negative: a changed generated tree passed" >&2

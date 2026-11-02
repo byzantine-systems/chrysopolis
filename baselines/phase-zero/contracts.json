@@ -47,6 +47,15 @@
       "BEAM_MARK_AFTER|absent"
     ]
   },
+  "core-erlang": {
+    "kind": "host-test",
+    "protects": [
+      "apps/chryso_core compiles with warnings, specs and docs as errors and passes Dialyzer and xref",
+      "every PropEr law of Root's model holds: policy absorption and monotonicity, spec rejection identity and generation monotonicity, fenced idempotence, bucket bounds and rate, composed noninterference",
+      "the Erlang model of Root reproduces every decision and reply in the C units' differential traces",
+      "a fenced intent sent across Erlang distribution has exactly one effect under lost replies and dropped connections"
+    ]
+  },
   "orch-status-smoke": {
     "kind": "qemu",
     "protects": [
@@ -296,7 +305,8 @@
       "fault endpoints, priorities, entries, badges, and notification caps match the SDF and ABI",
       "the BEAM PPC endpoint badge and slot match the ABI without adding a Root-held capability",
       "control regions have only the two mapped aliases with one writer each",
-      "each assembled production or restart image independently passes the topology report gate"
+      "each assembled production or restart image independently passes the topology report gate",
+      "the spec, command, fallback-peer and no-control-page images are checked in their own modes"
     ]
   },
   "restart-topology-negative": {
@@ -304,7 +314,9 @@
     "protects": [
       "a passing production control report and SDF are followed by independently rejected badge and missing-cap mutations",
       "a signaling or PPC cap in Root's CNode and a second PPC caller are rejected",
-      "map-right, cache-attribute, and control-window address mutations are rejected"
+      "map-right, cache-attribute, and control-window address mutations are rejected",
+      "fallback controls pass, then a peer write map, a peer PPC cap, and a timer inject end left on beam_server are rejected",
+      "a nomap control passes, then a surviving control map is rejected"
     ]
   },
   "rng-smoke": {
@@ -325,7 +337,8 @@
     "protects": [
       "pure runtime policies pass in Debug with UBSan trap mode",
       "pure runtime policies pass in ReleaseFast",
-      "generated C checkers reach every shared golden vector's verdict at even and odd addresses"
+      "generated C checkers reach every shared golden vector's verdict at even and odd addresses",
+      "the wake pipe, trace ring and drain decisions match their transition tables and counter models"
     ]
   },
   "serial-recovery": {
@@ -381,6 +394,18 @@
       "ROOT|fault|child=1",
       "ROOT|restart|child=1|count=2",
       "SLEPT_FAULT_AFTER|"
+    ]
+  },
+  "trace-absent": {
+    "kind": "generated-artifact",
+    "protects": [
+      "shipped beam_server and beam_test ELFs carry no trace storage, checked against a traced control ELF"
+    ]
+  },
+  "trace-build": {
+    "kind": "generated-artifact",
+    "protects": [
+      "the build-gated wake-path trace and /dev/chrysotrace compile and link into the ERTS test image"
     ]
   },
   "treefmt": {
