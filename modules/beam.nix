@@ -236,6 +236,31 @@
           beamDeps = [ ];
         };
 
+        # apps/chryso_core's pure modules as guest bytecode, for the in-situ
+        # audit in tests/chryso_ctl.erl. Built with the same Erlang as the
+        # probes and the disk's OTP libraries; no deps, no rebar3.
+        core-modules = pkgs.stdenvNoCC.mkDerivation {
+          name = "chryso-core-modules";
+          src = pkgs.lib.fileset.toSource {
+            root = ../apps/chryso_core;
+            fileset = ../apps/chryso_core/src;
+          };
+          nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+          dontConfigure = true;
+          buildPhase = ''
+            runHook preBuild
+            mkdir ebin
+            erlc -o ebin +deterministic +warnings_as_errors src/*.erl
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            cp -r ebin $out/
+            runHook postInstall
+          '';
+        };
+
         # Host tests for the pure runtime units (tests/host). Native build with
         # the same Zig, and therefore the same clang, as the cross build; no
         # Microkit, sDDF or LionsOS input, so it runs on every platform in

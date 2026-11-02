@@ -678,6 +678,11 @@
                 ${config.packages.test-modules}/lib/erlang/lib/chryso_test-*/ebin/* \
                 ::/lib/chryso_test/ebin/
 
+              # apps/chryso_core's pure model, for the probes' in-situ audit.
+              # Inert for the same reason: only the test loader asks for it.
+              mmd -i $part ::/lib/chryso_core ::/lib/chryso_core/ebin
+              mcopy -i $part ${config.packages.core-modules}/ebin/*.beam ::/lib/chryso_core/ebin/
+
               # A large inert read target for blk-fault-smoke. Small BEAM files
               # can cross the virtio block path before the coordinated fault
               # worker gets scheduled, leaving no driver request to reconcile.
