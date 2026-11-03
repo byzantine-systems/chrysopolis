@@ -1,10 +1,12 @@
-/* runtime_status.h and runtime_futex_cmd.h: failure policy and op decoding. */
+/* runtime_status.h and runtime_futex_cmd.h: failure policy, op decoding and
+ * timed-wait deadlines. */
 #include "check.h"
 
 #include "runtime_futex_cmd.h"
 #include "runtime_status.h"
 
 #include <limits.h>
+#include <stdint.h>
 #include <string.h>
 
 static const runtime_status_t all_statuses[] = {
@@ -99,10 +101,34 @@ static void test_futex_classify(void) {
   CHECK(runtime_futex_classify(INT_MIN) == runtime_futex_wait);
 }
 
+/* Relative WAIT, absolute BITSET, realtime BITSET shifted by the epoch. */
+static void test_futex_deadline(void) {
+  static constexpr int private_flag = 128;
+  static constexpr int clock_realtime = 256;
+  static constexpr uint64_t epoch = 1000;
+  static constexpr uint64_t sec = 1'000'000'000u;
+
+  CHECK_EQ_U64(runtime_futex_deadline(0, 5, 100, epoch), 105);
+  CHECK_EQ_U64(runtime_futex_deadline(0 | private_flag, 5, 100, epoch), 105);
+  CHECK_EQ_U64(runtime_futex_deadline(0 | clock_realtime, 5, 100, epoch), 105);
+  CHECK_EQ_U64(runtime_futex_deadline(9, 5, 100, epoch), 5);
+  CHECK_EQ_U64(runtime_futex_deadline(9 | private_flag, 5, 100, epoch), 5);
+  CHECK_EQ_U64(
+      runtime_futex_deadline(9 | clock_realtime, epoch * sec + 7, 100, epoch),
+      7);
+  /* A realtime deadline before the epoch is already due. */
+  CHECK_EQ_U64(runtime_futex_deadline(9 | clock_realtime, 3, 100, epoch), 0);
+  /* A relative timeout saturates instead of wrapping. */
+  CHECK_EQ_U64(
+      runtime_futex_deadline(0, runtime_timeout_max_ns, UINT64_MAX - 1, epoch),
+      UINT64_MAX);
+}
+
 int main(void) {
   test_config_failure_policy();
   test_every_status_has_text();
   test_format_code();
   test_futex_classify();
+  test_futex_deadline();
   return check_finish("status");
 }

@@ -66,6 +66,7 @@ jobs:
           .#checks.x86_64-linux.abi-stale
           .#checks.x86_64-linux.abi-negative
           .#checks.x86_64-linux.abi-erlang
+          .#checks.x86_64-linux.core-erlang
 
   image:
     name: "[Nix] Build images + disk"

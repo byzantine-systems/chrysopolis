@@ -90,12 +90,15 @@ let
   # libc registers no getdents64 (see the openat handler in src/pd/beam/compat/syscall/runtime_sys_devices.c),
   # so file:list_dir/1 cannot work there. For the same reason nothing may pass
   # `cache` to code:add_patha/2, which lists the directory it is given.
+  #
+  # apps/chryso_core's modules ride along: chryso_ctl's audit calls them.
+  erlModules =
+    dir:
+    map (pkgs.lib.removeSuffix ".erl") (
+      pkgs.lib.filter (pkgs.lib.hasSuffix ".erl") (builtins.attrNames (builtins.readDir dir))
+    );
   testModules = pkgs.lib.concatStringsSep "," (
-    pkgs.lib.filter (m: m != "chryso_test") (
-      map (pkgs.lib.removeSuffix ".erl") (
-        pkgs.lib.filter (pkgs.lib.hasSuffix ".erl") (builtins.attrNames (builtins.readDir ./tests))
-      )
-    )
+    pkgs.lib.filter (m: m != "chryso_test") (erlModules ./tests) ++ erlModules ./apps/chryso_core/src
   );
 
   # Disk on virtio-mmio bus.1, NIC on bus.0: the buses are pinned in
@@ -349,6 +352,7 @@ let
           offset = len(machine.get_console_log())
           machine.send_console(
               'code:add_patha("/lib/chryso_test/ebin"), '
+              'code:add_patha("/lib/chryso_core/ebin"), '
               "{module,chryso_test}=code:load_file(chryso_test), "
               "chryso_test:loaded([${testModules}]).\r"
           )
@@ -383,6 +387,20 @@ let
           assert not bad and not missing, \
               f"{prefix}: unexpected={bad} missing={missing}"
           assert re.search(done, log).group(1) == "0", lines
+
+      def assert_audit(log, tag):
+          """Assert chryso_ctl's in-situ audit agreed with Root.
+
+          Rows: the chryso_core model, stepped by the probe's own faults and
+          accepted restarts, equals Root's rows. Tallies: Root's command
+          counters moved exactly by the probe's PPCs, class by class.
+          """
+          line = re.search(r"AUDIT\|" + tag + r"\|(rows=[^\r\n]*|error=[^\r\n]*)", log)
+          assert line, f"no AUDIT|{tag} line"
+          print(line.group(0))
+          rows = re.findall(r"AUDIT\|" + tag + r"\|row\|[^\r\n]*", log)
+          assert re.match(r"rows=match\|.*\|tallies=match\|gap=\d+$", line.group(1)), \
+              (line.group(0), rows)
 
       chryso = create_machine(
           "${startCommand { inherit image netdev; }}",
@@ -513,7 +531,8 @@ in
   #   1. fallback-image, quiet: 21 driver faults (serial, blk, eth in turn)
   #      timed from Root's own status-page ticks, as the baseline.
   #   2. fallback-image, flood: the same 21 faults while a BEAM process keeps
-  #      /dev/chrysoctl busy with SYNC commands. The worst published - inject
+  #      /dev/chrysoctl busy with SYNC commands, which must reach
+  #      rate_limited. The worst published - inject
   #      must stay within baselines/fallback/latency.json's bound. Then the BEAM
   #      halts (the spec fixture's generation 1 is applied), the restarted BEAM
   #      reconciles against Root before commanding (its committed spec
@@ -543,6 +562,7 @@ in
           log = machine.get_console_log()[offset:]
           count, missing = re.search(done, log).groups()
           assert count == "21" and missing == "0", f"{prefix}: {count} samples, {missing} missing"
+          assert_audit(log, tag.upper())
           rows = []
           pattern = (re.escape(prefix) + r"\|\d+\|child=(\d+)\|inject=(\d+)\|fault=(\d+)"
                      r"\|decided=(\d+)\|published=(\d+)\|cntfrq=(\d+)")
@@ -593,6 +613,12 @@ in
           load_test_modules(second)
           flood = latency(second, "fb_flood", "flood")
           report("flood", flood)
+          # The flood must saturate Root's bucket, or it is not a flood.
+          calls, limited = map(int, re.search(
+              r"LAT\|FB_FLOOD\|flood\|calls=(\d+)\|rate_limited=(\d+)",
+              second.get_console_log()).groups())
+          print(f"flood: calls={calls} rate_limited={limited}")
+          assert limited > 0, f"flood never reached rate_limited ({calls} calls)"
           offset = len(second.get_console_log())
           second.send_console("chryso_ctl:stat(fb_pre, ${ethChild}).\r")
           wait_console_since(second, r"CTL_STAT\|FB_PRE\|incarnation=", offset, 60)
@@ -704,6 +730,7 @@ in
                   ],
               )
           log = chryso.get_console_log()
+          assert_audit(log, "CMD")
           restarts = re.findall(r"ROOT\|ctl-restart\|child=(\d+)\|count=(\d+)", log)
           assert restarts == [("${timerChild}", "1"), ("${timerChild}", "2")], restarts
           assert not re.search(r"ROOT\|(fault|giveup|restart)\|child=${timerChild}", log)

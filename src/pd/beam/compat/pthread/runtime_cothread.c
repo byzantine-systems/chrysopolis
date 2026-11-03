@@ -9,6 +9,7 @@
  */
 #include "runtime_cothread.h"
 #include "runtime_cothread_state.h"
+#include "runtime_drain.h"
 #include "runtime_wait.h"
 
 #include <microkit.h>
@@ -87,5 +88,28 @@ runtime_status_t thread_init(void) {
 void thread_notified(microkit_channel ch) {
   if (runtime_co_ready() && ch < MICROKIT_MAX_CHANNELS) {
     microkit_cothread_recv_ntfn(ch);
+  }
+}
+
+/* Rounds per callback before the root returns to Microkit regardless. */
+static constexpr uint32_t drain_round_limit = 64;
+/* libmicrokitco's root handle; its name is private to libmicrokitco.c. */
+static constexpr microkit_cothread_ref_t root_thread = 0;
+
+bool thread_drain(void) {
+  if (!runtime_co_ready() || microkit_cothread_my_handle() != root_thread) {
+    return false;
+  }
+  for (uint32_t rounds = 0;; rounds++) {
+    switch (runtime_drain_next(co_controller.scheduling_queue.items != 0,
+                               rounds, drain_round_limit)) {
+    case runtime_drain_idle:
+      return false;
+    case runtime_drain_run:
+      microkit_cothread_yield();
+      break;
+    case runtime_drain_rearm:
+      return true;
+    }
   }
 }

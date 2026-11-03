@@ -41,6 +41,9 @@ const Suite = struct {
     sources: []const []const u8 = &.{},
     // Passes the golden vector directory from tools/abi as argv[1].
     vectors: bool = false,
+    // The ReleaseFast build also emits differential traces (`--traces DIR`)
+    // for the `traces` step.
+    traces: bool = false,
     // Pure unit sources from the owning directory. Header-only units need no entry.
     units: []const []const u8,
 };
@@ -50,9 +53,11 @@ const suites = [_]Suite{
     .{ .name = "stack", .source = "beam/compat/pthread/suite_stack.c", .unit_dir = "../../src/pd/beam/compat/pthread", .units = &.{"runtime_stack.c"} },
     .{ .name = "timer_slot", .source = "beam/io/timer/suite_timer_slot.c", .unit_dir = "../../src/pd/beam/io/timer", .units = &.{} },
     .{ .name = "fd_pair", .source = "beam/compat/fd/suite_fd_pair.c", .unit_dir = "../../src/pd/beam/compat/fd", .units = &.{"runtime_fd_pair.c"} },
+    .{ .name = "wake_pipe", .source = "beam/compat/fd/suite_wake_pipe.c", .unit_dir = "../../src/pd/beam/compat/fd", .sources = &.{"prop.c"}, .units = &.{"runtime_wake_pipe.c"} },
     .{ .name = "epoll", .source = "beam/compat/poll/suite_epoll.c", .unit_dir = "../../src/pd/beam/compat/poll", .units = &.{"runtime_epoll_table.c"} },
-    .{ .name = "status", .source = "beam/config/suite_status.c", .unit_dir = "../../src/pd/beam/config", .extra_include_dirs = &.{"../../src/pd/beam/compat/syscall"}, .units = &.{"runtime_status.c"} },
+    .{ .name = "status", .source = "beam/config/suite_status.c", .unit_dir = "../../src/pd/beam/config", .extra_include_dirs = &.{ "../../src/pd/beam/compat/syscall", "../../src/pd/beam/compat/time" }, .units = &.{"runtime_status.c"} },
     .{ .name = "pd_restart", .source = "beam/restart/suite_pd_restart.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{"runtime_pd_restart_parse.c"} },
+    .{ .name = "trace_ring", .source = "beam/config/suite_trace_ring.c", .unit_dir = "../../src/pd/beam/config", .units = &.{"runtime_trace_ring.c"} },
     .{ .name = "pthread", .source = "beam/compat/pthread/suite_pthread.c", .unit_dir = "../../src/pd/beam/compat/pthread", .units = &.{"runtime_tls_row.c"} },
     .{ .name = "root_policy", .source = "root/suite_root_policy.c", .unit_dir = "../../src/pd/root/policy", .units = &.{} },
     // root_control builds the shared BEAM reader with the suite's stricter flags.
@@ -60,7 +65,7 @@ const suites = [_]Suite{
     // spec.c and spec_writer.c build as sources so they also meet the conversion warnings.
     .{ .name = "root_spec", .source = "root/suite_root_spec.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{ "../../src/pd/root/policy", "../../src/lib/abi" }, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{ "../../src/pd/root/spec.c", "../../src/lib/abi/spec_writer.c" }, .units = &.{} },
     // The composition main.c performs, built from every pure Root unit it uses.
-    .{ .name = "root_fallback", .source = "root/suite_root_fallback.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{ "../../src/pd/root/policy", "../../src/lib/abi" }, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{ "prop.c", "../../src/pd/root/restart_plan.c", "../../src/pd/root/spec.c", "../../src/pd/root/command.c", "../../src/pd/root/status.c", "../../src/lib/abi/spec_writer.c" }, .units = &.{} },
+    .{ .name = "root_fallback", .traces = true, .source = "root/suite_root_fallback.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{ "../../src/pd/root/policy", "../../src/lib/abi" }, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{ "prop.c", "../../src/pd/root/restart_plan.c", "../../src/pd/root/spec.c", "../../src/pd/root/command.c", "../../src/pd/root/status.c", "../../src/lib/abi/spec_writer.c" }, .units = &.{} },
     .{ .name = "root_command", .source = "root/suite_root_command.c", .unit_dir = "../../src/pd/root", .extra_include_dirs = &.{"../../src/pd/root/policy"}, .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{"../../src/pd/root/command.c"}, .units = &.{} },
     // Built as a source so the owner machine also meets the conversion warnings.
     .{ .name = "ctl_device", .source = "beam/control/suite_ctl_device.c", .unit_dir = "../../src/pd/beam/control", .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{ "prop.c", "../../src/pd/beam/control/runtime_ctl_device.c" }, .units = &.{} },
@@ -96,6 +101,7 @@ pub fn build(b: *std.Build) void {
         .default_target = if (linux) .{ .abi = .musl } else .{},
     });
     const test_step = b.step("test", "Run every runtime host suite in every variant");
+    const traces_step = b.step("traces", "Install Root's differential traces to <prefix>/root-traces");
     // tools/abi as a path dependency: generated headers plus the Zig reference checks.
     const abi = b.dependency("abi", .{ .target = target });
     const generated_abi = abi.namedLazyPath("orchestrator-abi");
@@ -136,6 +142,19 @@ pub fn build(b: *std.Build) void {
             if (suite.vectors) run.addDirectoryArg(golden_vectors);
             run.expectExitCode(0);
             test_step.dependOn(&run.step);
+
+            if (suite.traces and variant.optimize == .ReleaseFast) {
+                const emit = b.addRunArtifact(exe);
+                emit.addArg("--traces");
+                const dir = emit.addOutputDirectoryArg("root-traces");
+                emit.expectExitCode(0);
+                const install = b.addInstallDirectory(.{
+                    .source_dir = dir,
+                    .install_dir = .prefix,
+                    .install_subdir = "root-traces",
+                });
+                traces_step.dependOn(&install.step);
+            }
         }
 
         // Generated C checkers against the Zig reference verdicts.

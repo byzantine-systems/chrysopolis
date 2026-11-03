@@ -22,9 +22,16 @@
 void thread_notified(microkit_channel ch);
 
 /*
- * Hand execution from the root thread to ready cothreads. It returns when all
- * cothreads are parked and the root context must return to Microkit.
+ * Hand execution to cothreads at boot. Yielded cothreads may still be ready on
+ * return, so follow it with thread_drain().
  */
 void thread_run_cothreads(void);
+
+/*
+ * Run ready cothreads from the root thread for a bounded number of rounds
+ * (runtime_drain.h). True when some are still ready: the caller must arm an
+ * immediate timeout. False off the root thread or before thread_init.
+ */
+[[nodiscard]] bool thread_drain(void);
 
 #endif

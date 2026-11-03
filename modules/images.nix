@@ -678,6 +678,11 @@
                 ${config.packages.test-modules}/lib/erlang/lib/chryso_test-*/ebin/* \
                 ::/lib/chryso_test/ebin/
 
+              # apps/chryso_core's pure model, for the probes' in-situ audit.
+              # Inert for the same reason: only the test loader asks for it.
+              mmd -i $part ::/lib/chryso_core ::/lib/chryso_core/ebin
+              mcopy -i $part ${config.packages.core-modules}/ebin/*.beam ::/lib/chryso_core/ebin/
+
               # A large inert read target for blk-fault-smoke. Small BEAM files
               # can cross the virtio block path before the coordinated fault
               # worker gets scheduled, leaving no driver request to reconcile.
@@ -747,6 +752,13 @@
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
           commandFixture = true;
         }) [ "orch-command-smoke" ];
+
+        # The ERTS test topology with the wake-path trace built in. For
+        # debugging the cothread and poll paths; see runtime_trace.h.
+        trace-image = mkSel4Image {
+          imgName = "sel4-beam-trace-image";
+          beamElf = "${config.packages.beam-zig-trace}/bin/beam_test.elf";
+        };
 
         # Diagnostic C pthread probe on the bring-up topology. The probe code
         # is compiled only by beam-zig-diagnostic and is absent from shipped

@@ -32,10 +32,11 @@ Two properties of the serial console shape every API here.
    first value and badmatched. Function-local variables have no such
    problem, so both workarounds are gone.
 
-Everything in tests/ may call kernel and stdlib and nothing else. The FAT
-disk carries only those two applications plus the Gleam app, and ERTS boots
--mode embedded, so an unresolvable remote call is a plain undef with no
-autoload to rescue it.
+Everything in tests/ may call kernel, stdlib and the pure modules of
+apps/chryso_core, and nothing else. The FAT disk carries only those, the
+probes and the Gleam app, and ERTS boots -mode embedded, so an unresolvable
+remote call is a plain undef with no autoload to rescue it. The loader below
+loads chryso_core's modules with the probes.
 """.
 
 %% Loader, used once per boot by the tests.nix preamble.
@@ -43,10 +44,12 @@ autoload to rescue it.
 %% Tag plumbing, shared with the sibling chryso_* modules.
 -export([emit/2, tag/1]).
 %% Assertions.
--export([eval_check/0, alive/1, restart_pd/1, fault_pd/1]).
+-export([eval_check/0, alive/1, restart_pd/1, fault_pd/1, settle_driver/0]).
 -export([serial_before/0, serial_after/0, serial_rx/0]).
 
 -define(EBIN, "/lib/chryso_test/ebin").
+%% apps/chryso_core, the model chryso_ctl's audit folds Root's inputs through.
+-define(CORE_EBIN, "/lib/chryso_core/ebin").
 
 -doc """
 Load the sibling test modules and report in ONE line whether they all made
@@ -99,7 +102,13 @@ load(M) ->
 %% code:add_patha/2 or code:set_path/2 either, both of those list the directory.
 -spec load_binary(module()) -> binary | error.
 load_binary(M) ->
-    Path = ?EBIN ++ "/" ++ atom_to_list(M) ++ ".beam",
+    load_binary(M, [?EBIN, ?CORE_EBIN]).
+
+-spec load_binary(module(), [string()]) -> binary | error.
+load_binary(_M, []) ->
+    error;
+load_binary(M, [Dir | Dirs]) ->
+    Path = Dir ++ "/" ++ atom_to_list(M) ++ ".beam",
     case file:read_file(Path) of
         {ok, Bin} ->
             case code:load_binary(M, Path, Bin) of
@@ -107,7 +116,7 @@ load_binary(M) ->
                 {error, _} -> error
             end;
         {error, _} ->
-            error
+            load_binary(M, Dirs)
     end.
 
 -doc """
@@ -177,7 +186,19 @@ fault_pd(Class) ->
 request_pd(Request) ->
     {ok, F} = file:open("/dev/pd-restart", [write, raw]),
     ok = file:write(F, Request),
-    ok = file:close(F).
+    ok = file:close(F),
+    settle_driver().
+
+-doc """
+Wait for a just-restarted driver to finish its boot lines. Drivers print
+through the kernel debug console under their own budget (eth: 100 us per
+400 us), so a line can span several periods; console output written in
+between lands inside it and breaks both lines' patterns. 100 ms is about
+250 eth periods.
+""".
+-spec settle_driver() -> ok.
+settle_driver() ->
+    timer:sleep(100).
 
 -doc """
 serial-restart-smoke, in order: console output works before the restart,

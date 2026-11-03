@@ -13,12 +13,14 @@
 #include "runtime_restart.h"
 #include "runtime_syscalls.h"
 #include "runtime_timer.h"
+#include "runtime_trace.h"
 #include "runtime_wait.h"
 
 #include <lions/posix/posix.h>
 
 #include <libmicrokitco.h>
 #include <microkit.h>
+#include <sddf/timer/client.h>
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -34,6 +36,14 @@ extern void root_status_probe(void) __attribute__((weak));
 extern void spec_fixture_run(void) __attribute__((weak));
 /* Also test-image only: drives Root's PPC commands before ERTS starts. */
 extern void command_fixture_run(void) __attribute__((weak));
+
+/* Leftover ready cothreads resume on the next timer tick. */
+static void drain_cothreads(void) {
+  if (thread_drain()) {
+    runtime_trace(runtime_trace_drain_rearm, 0, 0);
+    beam_timer_arm(sddf_timer_time_now(timer_config.driver_id));
+  }
+}
 
 static void runtime_libc_init(bool network_enabled) {
   libc_socket_config_t *config = NULL;
@@ -101,19 +111,21 @@ runtime_status_t runtime_lifecycle_start(void) {
   if (status != RUNTIME_STATUS_OK) {
     return status;
   }
+  drain_cothreads();
 
   printf("Chrysopolis: init() returned; Microkit event loop live.\n");
   return RUNTIME_STATUS_OK;
 }
 
 void runtime_lifecycle_notified(microkit_channel ch) {
+  runtime_trace(runtime_trace_notified, (int64_t)ch, 0);
   runtime_timer_notified(ch);
   runtime_network_notified(ch);
   thread_notified(ch);
   thread_io_wake();
   runtime_network_flush();
   runtime_payload_external_event(ch);
-  microkit_cothread_yield();
+  drain_cothreads();
 }
 
 void runtime_lifecycle_fail(runtime_status_t status) {

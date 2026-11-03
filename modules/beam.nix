@@ -34,9 +34,18 @@
         ../tools/abi
       ];
       mkBeamZig =
-        diagnostic:
+        {
+          diagnostic ? false,
+          trace ? false,
+        }:
         pkgs.stdenvNoCC.mkDerivation {
-          name = if diagnostic then "beam-zig-diagnostic" else "beam-zig";
+          name =
+            if diagnostic then
+              "beam-zig-diagnostic"
+            else if trace then
+              "beam-zig-trace"
+            else
+              "beam-zig";
           # Built only after the committed system JSON matches its generator.
           abiFresh = config.checks.abi-stale;
           src = pkgs.lib.fileset.toSource {
@@ -122,6 +131,7 @@
             mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
             ln -s ${beamZigDeps} "$ZIG_GLOBAL_CACHE_DIR"/p
             zig build --prefix $out ${pkgs.lib.optionalString diagnostic "-Ddiagnostic=true"} \
+              ${pkgs.lib.optionalString trace "-Dtrace=true"} \
               -Dboard-dir=${chryso.boardDir} \
               -Dboard=${chryso.microkitBoard} \
               -Dsddf=${config.packages.lionsos-src}/dep/sddf \
@@ -226,11 +236,54 @@
           beamDeps = [ ];
         };
 
+        # apps/chryso_core's pure modules as guest bytecode, for the in-situ
+        # audit in tests/chryso_ctl.erl. Built with the same Erlang as the
+        # probes and the disk's OTP libraries; no deps, no rebar3.
+        core-modules = pkgs.stdenvNoCC.mkDerivation {
+          name = "chryso-core-modules";
+          src = pkgs.lib.fileset.toSource {
+            root = ../apps/chryso_core;
+            fileset = ../apps/chryso_core/src;
+          };
+          nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+          dontConfigure = true;
+          buildPhase = ''
+            runHook preBuild
+            mkdir ebin
+            erlc -o ebin +deterministic +warnings_as_errors src/*.erl
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            cp -r ebin $out/
+            runHook postInstall
+          '';
+        };
+
         # Host tests for the pure runtime units (tests/host). Native build with
         # the same Zig, and therefore the same clang, as the cross build; no
         # Microkit, sDDF or LionsOS input, so it runs on every platform in
         # seconds. The derivation succeeds only if every suite passes in every
         # variant (see tests/host/build.zig).
+        # Root's differential traces from the fallback suite's harness, the
+        # input of apps/chryso_core's trace replay. Generated twice with
+        # separate Zig caches and compared, so nondeterminism fails here.
+        root-traces = config.packages.runtime-host-tests.overrideAttrs (_: {
+          name = "chrysopolis-root-traces";
+          buildPhase = ''
+            runHook preBuild
+            export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+            cd tests/host
+            zig build traces --prefix "$TMPDIR/first" --cache-dir "$TMPDIR/cache-first"
+            zig build traces --prefix "$TMPDIR/second" --cache-dir "$TMPDIR/cache-second"
+            diff -r "$TMPDIR/first" "$TMPDIR/second"
+            mkdir -p $out
+            cp -r "$TMPDIR/first/root-traces/." $out/
+            runHook postBuild
+          '';
+        });
+
         runtime-host-tests = pkgs.stdenvNoCC.mkDerivation {
           name = "chrysopolis-runtime-host-tests";
           abiFresh = config.checks.abi-stale;
@@ -276,8 +329,11 @@
         # beam_test.elf, the same glue with the static ERTS archive linked in:
         # bin/beam_server.elf boots in bring-up mode (console + clock + heap),
         # bin/beam_test.elf hands off to erl_start.
-        beam-zig = mkBeamZig false;
-        beam-zig-diagnostic = mkBeamZig true;
+        beam-zig = mkBeamZig { };
+        beam-zig-diagnostic = mkBeamZig { diagnostic = true; };
+        # The wake-path trace and /dev/chrysotrace (runtime_trace.h); never
+        # shipped, built in CI so the hooks cannot rot.
+        beam-zig-trace = mkBeamZig { trace = true; };
 
         # Aliases kept so existing `nix build .#<attr>` invocations resolve.
         elf = config.packages.beam-zig;

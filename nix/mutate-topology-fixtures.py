@@ -3,6 +3,9 @@
 
 Usage: mutate-topology-fixtures.py <report.txt> <system.sdf> <out-dir>
          --ppc-slot N --ppc-badge 0x... --fault-badge 0x...
+         [--mode production|fallback|nomap] [--base-notify N --abi system-abi.json]
+
+The mode picks the case set; each matches the checker mode of the same name.
 
 Writes <out-dir>/control with verbatim copies, and one <out-dir>/fail-<name>
 directory per planted difference. Every edit asserts it changed exactly one
@@ -13,6 +16,7 @@ producing a vacuous fixture the checker would pass.
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import sys
 
@@ -72,6 +76,30 @@ def set_object(lines: list[str], start: int, stop: int, new: str) -> None:
     raise SystemExit("fixture: slot has no Object line")
 
 
+def insert_slot(lines: list[str], start: int, end: int, slot: int, obj: str, badge: str) -> None:
+    """Add one signaling cap to a CNode block, keeping slots in order."""
+    entry = [
+        f"\t\t* Slot: {slot}\n",
+        f"\t\t\t-> Object: {obj}\n",
+        "\t\t\t-> Rights: Read, Write\n",
+        f"\t\t\t-> Badge: {badge}\n",
+    ]
+    at = end
+    for index in range(start, end):
+        if lines[index].startswith("\t\t* Slot: "):
+            existing = int(lines[index].split(": ")[1])
+            if existing == slot:
+                raise SystemExit(f"fixture: slot {slot} is already occupied")
+            if existing > slot:
+                at = index
+                break
+    else:
+        # Appending: keep the block's trailing blank line after the new slot.
+        while at > start and lines[at - 1].strip() == "":
+            at -= 1
+    lines[at:at] = entry
+
+
 def sdf_line(lines: list[str], *needles: str) -> int:
     hits = [i for i, line in enumerate(lines) if all(n in line for n in needles)]
     if len(hits) != 1:
@@ -79,15 +107,83 @@ def sdf_line(lines: list[str], *needles: str) -> int:
     return hits[0]
 
 
+def pd_line(lines: list[str], pd: str, *needles: str) -> int:
+    """The one line inside a PD's own element (not a child's) matching needles."""
+    start = sdf_line(lines, f'<protection_domain name="{pd}"')
+    depth = 0
+    hits = []
+    for index in range(start, len(lines)):
+        line = lines[index]
+        if "<protection_domain " in line:
+            depth += 1
+        elif depth == 1 and all(n in line for n in needles):
+            hits.append(index)
+        if "</protection_domain>" in line:
+            depth -= 1
+            if depth == 0:
+                break
+    if len(hits) != 1:
+        raise SystemExit(f"fixture: expected one {pd} line matching {needles}, found {len(hits)}")
+    return hits[0]
+
+
+def fallback_cases(out: pathlib.Path, args: argparse.Namespace, report: list[str], sdf: list[str]) -> None:
+    abi = json.loads(pathlib.Path(args.abi).read_text(encoding="utf-8"))
+    timer = next(d for d in abi["drivers"] if d["name"] == "timer")
+    beam_start, beam_end = cnode_block(report, "cnode_beam_server")
+    peer_start, peer_end = cnode_block(report, "cnode_fallback_peer")
+
+    # The peer may write the status page it only observes.
+    case = read(args.sdf)
+    index = pd_line(case, "fallback_peer", '<map mr="root_status"')
+    case[index] = case[index].replace('perms="r"', 'perms="rw"')
+    assert case[index] != sdf[index], "fixture: peer map edit did not apply"
+    write_case(out, "fail-peer-write-map", report, case)
+
+    # The peer gains a PPC endpoint to Root next to its fault-inject cap.
+    case = read(args.report)
+    insert_slot(case, peer_start, peer_end, 5, "'ep_root'", args.ppc_badge)
+    write_case(out, "fail-peer-ppc", case, sdf)
+
+    # beam_server keeps the timer fault-inject end the peer was given.
+    case = read(args.report)
+    insert_slot(
+        case,
+        beam_start,
+        beam_end,
+        args.base_notify + timer["beam_fault_channel"],
+        "'ntfn_root'",
+        hex(1 << timer["root_fault_channel"]),
+    )
+    write_case(out, "fail-timer-inject-on-beam", case, sdf)
+
+
+def nomap_cases(out: pathlib.Path, report: list[str], sdf: list[str]) -> None:
+    # A control map survives in the topology that must have none.
+    case = list(sdf)
+    index = pd_line(case, "beam_server", "<program_image ")
+    indent = case[index][: len(case[index]) - len(case[index].lstrip())]
+    case.insert(
+        index + 1,
+        f'{indent}<map mr="root_status" vaddr="0x32000000" perms="r" setvar_vaddr="root_status_view" />\n',
+    )
+    write_case(out, "fail-nomap-control-map", report, case)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("report")
     parser.add_argument("sdf")
     parser.add_argument("out")
+    parser.add_argument("--mode", choices=("production", "fallback", "nomap"), default="production")
     parser.add_argument("--ppc-slot", type=int, required=True)
     parser.add_argument("--ppc-badge", required=True)
     parser.add_argument("--fault-badge", required=True)
+    parser.add_argument("--base-notify", type=int)
+    parser.add_argument("--abi")
     args = parser.parse_args()
+    if args.mode == "fallback" and (args.base_notify is None or args.abi is None):
+        parser.error("fallback mode needs --base-notify and --abi")
 
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -95,6 +191,19 @@ def main() -> int:
     sdf = read(args.sdf)
     write_case(out, "control", report, sdf)
 
+    if args.mode == "fallback":
+        fallback_cases(out, args, report, sdf)
+    elif args.mode == "nomap":
+        nomap_cases(out, report, sdf)
+    else:
+        production_cases(out, args, report, sdf)
+
+    names = sorted(p.name for p in out.iterdir() if p.is_dir())
+    print(f"fixtures: {', '.join(names)}", file=sys.stderr)
+    return 0
+
+
+def production_cases(out: pathlib.Path, args: argparse.Namespace, report: list[str], sdf: list[str]) -> None:
     beam_start, beam_end = cnode_block(report, "cnode_beam_server")
     root_start, root_end = cnode_block(report, "cnode_root")
     virt_start, virt_end = cnode_block(report, "cnode_serial_virt_tx")
@@ -169,10 +278,6 @@ def main() -> int:
     case[index] = old.replace(f'vaddr="{vaddr}"', f'vaddr="{moved}"')
     assert case[index] != old, "fixture: vaddr edit did not apply"
     write_case(out, "fail-vaddr", report, case)
-
-    names = sorted(p.name for p in out.iterdir() if p.is_dir())
-    print(f"fixtures: {', '.join(names)}", file=sys.stderr)
-    return 0
 
 
 if __name__ == "__main__":

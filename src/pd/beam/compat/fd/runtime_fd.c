@@ -3,13 +3,9 @@
  *
  * ERTS creates pipes, timerfds and socketpairs for its own coordination. None
  * of them carries data here, so their descriptors are callback-backed entries
- * in the libc table: writes are discarded and reads see EOF or an always-empty
- * queue.
- *
- * A discarded write still wakes idle waiters. ERTS wakes its pollset by
- * writing a byte to its self-pipe, and the poller parked in epoll_pwait or
- * ppoll must return so ERTS re-evaluates its pollset and timeout. On Linux the
- * pipe becoming readable does that. Here the thread_io_wake pulse does.
+ * in the libc table. Pipes count unread bytes (runtime_sys_fd.c); the rest
+ * discard writes and read as EOF or an always-empty queue. A discarded write
+ * still pulses idle waiters.
  */
 #include "runtime_fd.h"
 #include "runtime_wait.h"

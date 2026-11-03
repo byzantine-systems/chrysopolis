@@ -1,7 +1,12 @@
 # Verify Root's restart topology in a synthesised image.
 #
 # Usage: check-restart-topology <report.txt> <system.sdf> <microkit.h> \
-#          <system-abi.json> production|restart
+#          <system-abi.json> production|restart|fallback|nomap
+#
+# restart adds the crasher and the beam_server -> root debug channels;
+# fallback swaps the crasher for the fallback peer, which takes the timer
+# fault-injection end and Root's BEAM give-up notification; nomap is restart
+# without the crasher or the two control pages.
 #
 # The generated SDF says what we asked for; the Microkit tool's report.txt says
 # what it built. This checks the second against system-abi.json and the first:
@@ -18,7 +23,7 @@
 # vacuously. Cap slot bases come from the SDK's own microkit.h.
 
 usage() {
-  echo "usage: check-restart-topology <report.txt> <system.sdf> <microkit.h> <system-abi.json> production|restart" >&2
+  echo "usage: check-restart-topology <report.txt> <system.sdf> <microkit.h> <system-abi.json> production|restart|fallback|nomap" >&2
   exit 2
 }
 
@@ -29,7 +34,10 @@ header=$3
 abi=$4
 mode=$5
 case $mode in
-production | restart) ;;
+production) with_crasher=0 debug=0 peer=0 maps=1 ;;
+restart) with_crasher=1 debug=1 peer=0 maps=1 ;;
+fallback) with_crasher=0 debug=1 peer=1 maps=1 ;;
+nomap) with_crasher=0 debug=1 peer=0 maps=0 ;;
 *) usage ;;
 esac
 
@@ -180,13 +188,13 @@ map_attr() {
 }
 
 # Root's children, by PD name, from system-abi.json. The crasher exists only
-# in the restart image.
+# in the restart image; the fallback peer is not a child.
 declare -A children=()
 while read -r name id; do
   children[$name]=$id
 done < <(jq -r '.drivers[] | "\(.name)_driver \(.child)"' "$abi")
 children[beam_server]=$(jq -r '.children.beam' "$abi")
-if [ "$mode" = restart ]; then
+if [ "$with_crasher" -eq 1 ]; then
   children[crasher]=$(jq -r '.children.crasher' "$abi")
 fi
 entry=$(jq -r '.restart.entry_fallback' "$abi")
@@ -265,6 +273,37 @@ read -r object _ <<<"$(cnode_slot cnode_root $((base_notify + gone_channel)))"
 [ "${object:-}" = ntfn_blk_virt ] ||
   fail "cnode_root slot $((base_notify + gone_channel)) holds '${object:-nothing}', not ntfn_blk_virt"
 
+# The fallback peer: Root signals it on the BEAM give-up channel, it signals
+# Root only on the timer's fault-injection channel, and it never calls Root.
+beam_gone_channel=$(jq -r '.giveup.root_beam_channel' "$abi")
+timer_root_fault=$(jq -r '.drivers[] | select(.name == "timer") | .root_fault_channel' "$abi")
+timer_beam_fault=$(jq -r '.drivers[] | select(.name == "timer") | .beam_fault_channel' "$abi")
+read -r object _ <<<"$(cnode_slot cnode_root $((base_notify + beam_gone_channel)))"
+if [ "$peer" -eq 1 ]; then
+  [ "${object:-}" = ntfn_fallback_peer ] ||
+    fail "cnode_root slot $((base_notify + beam_gone_channel)) holds '${object:-nothing}', not ntfn_fallback_peer"
+  peer_priority=$(tcb_field tcb_fallback_peer Priority) || layout_changed "tcb_fallback_peer has no Priority"
+  beam_priority=$(tcb_field tcb_beam_server Priority) || layout_changed "tcb_beam_server has no Priority"
+  ((peer_priority < beam_priority)) ||
+    fail "fallback_peer priority $peer_priority is not below beam_server's $beam_priority"
+  peer_slot=$((base_notify + $(jq -r '.fallback_peer.timer_fault_channel' "$abi")))
+  peer_caps=$(cnode_table cnode_fallback_peer | awk '$1 > 4 && $2 ~ /^(ntfn|ep)_/')
+  [ "$(wc -l <<<"$peer_caps")" -eq 1 ] ||
+    fail "fallback_peer holds $(wc -l <<<"$peer_caps") signaling caps, expected only the timer fault channel"
+  read -r pslot pobject pbadge <<<"$peer_caps"
+  [ "$pslot" = "$peer_slot" ] && [ "$pobject" = ntfn_root ] ||
+    fail "fallback_peer slot $pslot holds $pobject, not ntfn_root at $peer_slot"
+  ((pbadge == 1 << timer_root_fault)) ||
+    fail "fallback_peer signals root with badge $pbadge, not channel $timer_root_fault"
+  [ "$(pd_maps fallback_peer | wc -l)" -eq 1 ] && [ "$(map_attr fallback_peer root_status perms)" = r ] ||
+    fail "fallback_peer must map only root_status, read-only"
+else
+  [ -z "${object:-}" ] ||
+    fail "cnode_root slot $((base_notify + beam_gone_channel)) holds '$object' without a fallback peer"
+  ! grep -qF '<protection_domain name="fallback_peer"' "$sdf" ||
+    fail "the SDF declares fallback_peer in $mode mode"
+fi
+
 # --- Root control plane -----------------------------------------------------
 # The transport is asymmetric by design: one PPC channel (beam_server calls,
 # Root serves on the ep_root it already owns) and two one-writer memory
@@ -328,6 +367,10 @@ while read -r slot object _; do
     3) expected_object=pud_root ;;
     4) expected_object=reply_root ;;
     "$((base_notify + gone_channel))") expected_object=ntfn_blk_virt ;;
+    "$((base_notify + beam_gone_channel))")
+      expected_object=
+      [ "$peer" -eq 1 ] && expected_object=ntfn_fallback_peer
+      ;;
     *)
       expected_object=
       for name in "${!children[@]}"; do
@@ -363,6 +406,7 @@ check_control_map() {
   fi
 }
 
+if [ "$maps" -eq 1 ]; then
 status_root_vaddr=$(printf '0x%x' "$(jq -r '.control.status.root_vaddr' "$abi")")
 status_beam_vaddr=$(printf '0x%x' "$(jq -r '.control.status.beam_vaddr' "$abi")")
 spec_root_vaddr=$(printf '0x%x' "$(jq -r '.control.spec.root_vaddr' "$abi")")
@@ -374,9 +418,11 @@ check_control_map root orchestrator_spec r "$spec_root_vaddr" "$(jq -r '.control
 for mr in root_status orchestrator_spec; do
   [ "$(grep -Fc "<memory_region name=\"$mr\" " "$sdf")" -eq 1 ] ||
     fail "the SDF must declare exactly one $mr memory region"
-  [ "$(grep -Fc "<map mr=\"$mr\" " "$sdf")" -eq 2 ] ||
-    fail "$mr must have exactly the Root and BEAM mappings"
 done
+[ "$(grep -Fc '<map mr="root_status" ' "$sdf")" -eq $((2 + peer)) ] ||
+  fail "root_status must have exactly the Root, BEAM and peer mappings"
+[ "$(grep -Fc '<map mr="orchestrator_spec" ' "$sdf")" -eq 2 ] ||
+  fail "orchestrator_spec must have exactly the Root and BEAM mappings"
 
 status_size_hex=$(printf '0x%x' "$status_size")
 spec_size_hex=$(printf '0x%x' "$spec_size")
@@ -384,6 +430,10 @@ spec_size_hex=$(printf '0x%x' "$spec_size")
   fail "root_status is $(mr_size root_status) bytes in the SDF, expected $status_size_hex"
 [ "$(mr_size orchestrator_spec)" = "$spec_size_hex" ] ||
   fail "orchestrator_spec is $(mr_size orchestrator_spec) bytes in the SDF, expected $spec_size_hex"
+else
+  ! grep -Eq '<(memory_region name|map mr)="(root_status|orchestrator_spec)"' "$sdf" ||
+    fail "nomap SDF still declares or maps a control page"
+fi
 
 # The PPC channel itself: both ends pinned from the ABI, pp on the beam end
 # only, and notify off on both ends.
@@ -419,11 +469,16 @@ awk -v id="$pp_root" '
 # beam_server -> root restart channels: every one in the restart image, none
 # in production.
 root_caps=$(cnode_table cnode_beam_server | awk '$2 == "ntfn_root"')
-if [ "$mode" = production ]; then
+if [ "$debug" -eq 0 ]; then
   [ -z "$root_caps" ] || fail "production beam_server holds notification caps to root"
 else
   expected=0
   while read -r from to; do
+    if [ "$peer" -eq 1 ] && [ "$from" = "$timer_beam_fault" ]; then
+      [ -z "$(cnode_slot cnode_beam_server $((base_notify + from)))" ] ||
+        fail "beam_server still holds the timer fault channel the peer owns"
+      continue
+    fi
     slot=$((base_notify + from))
     read -r object badge <<<"$(cnode_slot cnode_beam_server "$slot")"
     [ "${object:-}" = ntfn_root ] ||
