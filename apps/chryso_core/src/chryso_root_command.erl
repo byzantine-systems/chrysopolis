@@ -18,7 +18,7 @@ Laws, observed through the reply and the restart action:
 - **tallies add up**: every framed call adds exactly one to `accepted`,
   `rate_limited` or `rejected`.
 
-Non-law: an *unfenced* restart is not idempotent; HELLO and SYNC are
+Non-law: an *unfenced* restart is not idempotent. HELLO and SYNC are
 idempotent only as reads.
 """.
 
@@ -80,7 +80,7 @@ new(Bucket) ->
 
 -doc """
 Transport checks before any word is read: the PPC channel, a declared
-nonzero opcode and exactly four words. `ok` to proceed; otherwise the reply
+nonzero opcode and exactly four words. `ok` to proceed. Otherwise the reply
 result, counted as rejected, with no token spent.
 """.
 -spec frame(state(), non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ->
@@ -95,7 +95,7 @@ frame(#{rejected := R} = State, _Channel, _PpChannel, Label, Count) ->
 
 -doc """
 Decide a framed command at clock sample `Now`. `Args` holds exactly the four
-words `frame/5` admitted; a different length is a caller bug.
+words `frame/5` admitted. A different length is a caller bug.
 """.
 -spec decide(state(), view(), non_neg_integer(), [non_neg_integer()], non_neg_integer(), boolean()) ->
     {decision(), state()}.

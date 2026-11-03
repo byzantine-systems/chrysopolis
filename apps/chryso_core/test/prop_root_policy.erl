@@ -11,7 +11,7 @@ the record `step/3` returns.
     prop_budget_identity_and_cap/0,
     prop_exactly_budget_restarts/0
 ]).
-%% PropEr calls these by name; specs would only restate the generators.
+%% PropEr calls these by name. Specs would only restate the generators.
 -compile([nowarn_missing_spec, nowarn_missing_doc]).
 
 -define(HARD_MAX, 64).
@@ -43,7 +43,7 @@ prop_monotone() ->
         end
     ).
 
-%% No spec is the identity; a spec entry of 0 means compiled; otherwise
+%% No spec is the identity. A spec entry of 0 means compiled. Otherwise
 %% min(spec, hard_max), which may exceed the compiled budget.
 prop_budget_identity_and_cap() ->
     ?FORALL(

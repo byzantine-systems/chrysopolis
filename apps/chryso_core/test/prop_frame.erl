@@ -7,6 +7,7 @@ Damage comes from declarative splice plans, so failures shrink to a small
 plan. Noise never holds `@`, since no other console writer prints one.
 """.
 -include_lib("proper/include/proper.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -export([
     prop_round_trip/0,
@@ -36,7 +37,7 @@ prop_round_trip() ->
             Events = chryso_frame:collect(encode(Run, Recs, U)),
             Expected = expected(Run, Recs, U),
             ?WHENFAIL(
-                io:format("events=~tp~nexpected=~tp~n", [Events, Expected]),
+                ?LOG_ERROR("events=~tp~nexpected=~tp", [Events, Expected]),
                 aggregate([label(Recs =:= [], empty_run, nonempty_run)], Events =:= Expected)
             )
         end
@@ -120,7 +121,7 @@ prop_shuffle() ->
                     false -> [syntax, length]
                 end,
             ?WHENFAIL(
-                io:format("plan=~tp~nlog=~tp~nevents=~tp~n", [Plan, Log, Events]),
+                ?LOG_ERROR("plan=~tp~nlog=~tp~nevents=~tp", [Plan, Log, Events]),
                 aggregate(
                     [label(has_line_break(Segment), crlf_splice, printable_splice) | Reasons],
                     lists:all(fun(F) -> lists:member(F, Good) end, Accepted) andalso
@@ -148,7 +149,7 @@ prop_length() ->
             Start = Field + byte_size(<<"|name=">>),
             Log = splice_at(Clean, Start + At rem (length(Value) + 1), list_to_binary(Segment)),
             ?WHENFAIL(
-                io:format("log=~tp~n", [Log]),
+                ?LOG_ERROR("log=~tp", [Log]),
                 chryso_frame:observe(Log, ?RUN) =:= {fail, {damaged, ?RUN, length}}
             )
         end
@@ -164,7 +165,7 @@ prop_prefix() ->
             Short = chryso_frame:observe(P, ?RUN),
             Long = chryso_frame:observe(Log, ?RUN),
             ?WHENFAIL(
-                io:format("prefix=~tp~nshort=~tp~nlong=~tp~n", [P, Short, Long]),
+                ?LOG_ERROR("prefix=~tp~nshort=~tp~nlong=~tp", [P, Short, Long]),
                 aggregate(
                     [label(Short =:= pending, pending_tail, decided)],
                     Short =:= pending orelse Short =:= Long
@@ -235,7 +236,7 @@ prop_coverage() ->
             vector(400, sample_class()),
             begin
                 Missing = classes() -- lists:usort(lists:append(Samples)),
-                ?WHENFAIL(io:format("classes never generated: ~p~n", [Missing]), Missing =:= [])
+                ?WHENFAIL(?LOG_ERROR("classes never generated: ~p", [Missing]), Missing =:= [])
             end
         )
     ).

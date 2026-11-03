@@ -4,10 +4,11 @@ Laws of the composed `chryso_root`.
 
 Inputs are generated as a plan and resolved against the model while they
 run (command words depend on the current `seq` and counts). The spec page is
-a persistent store changed by `write` events; every refresh reads the page
+a persistent store changed by `write` events. Every refresh reads the page
 as it stands, as Root reads the shared page.
 """.
 -include_lib("proper/include/proper.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -export([prop_noninterference/0, prop_lifetime_within_hard_max/0]).
 -compile([nowarn_missing_spec, nowarn_missing_doc]).
@@ -30,7 +31,7 @@ prop_noninterference() ->
                 decisions(Full) =:= decisions(Plain) andalso
                     final(Full) =:= final(Plain),
             ?WHENFAIL(
-                io:format("full=~p~nplain=~p~n", [decisions(Full), decisions(Plain)]),
+                ?LOG_ERROR("full=~p~nplain=~p", [decisions(Full), decisions(Plain)]),
                 aggregate(command_kinds(Full), Same)
             )
         end
@@ -77,7 +78,7 @@ config(Mapped) ->
         cntfrq => 62500000
     }.
 
-%% Runs every step; records each decision and, per step, whether a command
+%% Runs every step. Records each decision and, per step, whether a command
 %% was an accepted restart and of which child.
 run(Mapped, Plan) ->
     Init = #{
@@ -144,7 +145,7 @@ fresh_words(Child, Root) ->
     #{lifetime := L} = maps:get(Child, Records),
     [Child, 1, Seq, L].
 
-%% Accepted restarts become direct restarts; other commands vanish.
+%% Accepted restarts become direct restarts. Other commands vanish.
 substitute(Plan, #{accepted := Accepted}) ->
     Index = maps:from_list(Accepted),
     lists:filtermap(

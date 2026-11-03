@@ -1,14 +1,14 @@
 -module(chryso_core_cluster_SUITE).
 -moduledoc """
 The fence law across nodes. A `peer` node hosts a simulated Root
-(`chryso_sim_root`); this node sends fenced restart intents to it over
+(`chryso_sim_root`). This node sends fenced restart intents to it over
 distribution. Replies may be lost (the effect happens, the reply does not
 arrive) and the connection may drop between attempts. A caller retries the
 same words until it gets a reply.
 
 Law, observed through Snabbkaffe's trace of `sim_effect` and the replies:
 every intent to a live driver has exactly one effect, and its final reply is
-`ok` or `already_done`; an intent to a gone child has no effect and is
+`ok` or `already_done`. An intent to a gone child has no effect and is
 refused.
 """.
 -include_lib("proper/include/proper.hrl").

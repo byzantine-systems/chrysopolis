@@ -3,7 +3,7 @@
 Root's per-child fault policy as a Mealy machine: `step/3` takes a child's
 record and the budget that applies, and returns the action and the next
 record. The same decision as `root_restart_plan` with the lifetime selector
-(`src/pd/root/restart_plan.c`); production Root has no timed window, so the
+(`src/pd/root/restart_plan.c`). Production Root has no timed window, so the
 test-only `ROOT_TEST_BUDGET` window is not modelled.
 
 Laws, observed through the action and the record:
@@ -12,7 +12,7 @@ Laws, observed through the action and the record:
 - **monotone**: the lifetime count never decreases, and grows only on
   `resume`.
 - **identity**: with no spec, `budget/3` is the compiled budget.
-- **cap**: with a spec, the budget is `min(spec, hard_max)`; a spec entry of
+- **cap**: with a spec, the budget is `min(spec, hard_max)`. A spec entry of
   0 means the compiled budget.
 
 Non-law: a spec may *raise* a budget, up to `hard_max`.
@@ -50,7 +50,7 @@ budget(SpecBudget, _Compiled, HardMax) ->
 
 -doc """
 Decide one restart request. Checks run in Root's order: gone, then the
-budget, then the entry. `Entry` is the restart entry address; 0 means the
+budget, then the entry. `Entry` is the restart entry address. 0 means the
 image carries none.
 """.
 -spec step(record(), non_neg_integer(), non_neg_integer()) -> {action(), record()}.
