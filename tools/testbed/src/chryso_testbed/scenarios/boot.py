@@ -6,6 +6,8 @@ import asyncio
 import re
 
 from chryso_testbed import probes
+from chryso_testbed.console import Hit
+from chryso_testbed.machine import Machine
 from chryso_testbed.scenario import BEAM_FAULTS_EXPECTED, Context, registry
 
 GROUP = "boot"
@@ -17,6 +19,61 @@ MILESTONES = (
 )
 
 
+# --- steps, shared with the isolated scenarios ------------------------------------
+
+
+def milestones(m: Machine) -> None:
+    for milestone in MILESTONES:
+        probes.require_present(m, milestone, "missing boot milestone")
+
+
+async def shell(ctx: Context, m: Machine, banner: Hit) -> None:
+    """The probes load and the shell evaluates, printing a bare 2 as well."""
+    await probes.load_test_modules(m, ctx.settings.test_modules, banner)
+    await probes.call(m, "chryso_test:eval_check().", r"SHELL_EVAL\|2")
+    await m.console.wait(r"^2\r?$")
+
+
+async def frame_check(m: Machine) -> None:
+    """A control run is accepted and the same run with a changed CRC is refused."""
+    mark = m.console.mark()
+    await m.console.send("chryso_test:frame_check('fcheck').")
+    control = await m.console.await_run("FCHECK.CONTROL", since=mark)
+    if control.frames[0].get("text") != "a|b@c":
+        raise m.console.fail(f"control run read back as {control.frames!r}")
+    try:
+        await m.console.await_run("FCHECK.PLANTED", since=mark)
+    except AssertionError as refused:
+        if "damaged FCHECK.PLANTED crc" not in str(refused):
+            raise
+    else:
+        raise m.console.fail("a planted CRC change was accepted")
+
+
+async def tcp_host_to_guest(m: Machine, forward: int) -> bytes:
+    await m.console.wait(r"SOCKET_SMOKE\|DHCP:")
+    await probes.call(m, "chryso_net:echo_server(5555).", "LISTENER_UP")
+    echoed = await probes.echo(forward, b"CHRYSO_ECHO")
+    if echoed != b"CHRYSO_ECHO":
+        raise m.console.fail(f"echo returned {echoed!r}")
+    await m.console.wait("ECHOED")
+    return echoed
+
+
+async def tcp_guest_to_host(ctx: Context, m: Machine) -> bytes:
+    async with probes.Listener(ctx.ports.take(), len(b"CHRYSO_PING")) as listener:
+        mark = m.console.mark()
+        await m.console.send(f"chryso_net:ping('chryso_ping', {listener.port}).")
+        got = await listener.received()
+    if got != b"CHRYSO_PING":
+        raise m.console.fail(f"host listener received {got!r}")
+    await m.console.wait(r"NET_OK\|CHRYSO_PING", since=mark)
+    return got
+
+
+# --- scenarios ---------------------------------------------------------------------
+
+
 @registry.scenario("boot-shell-tcp", group=GROUP, timeout=900)
 async def boot_shell_tcp(ctx: Context) -> None:
     """Boot milestones, a working shell, frames, and TCP in both directions."""
@@ -24,47 +81,18 @@ async def boot_shell_tcp(ctx: Context) -> None:
     async with ctx.boot("test-image", hostfwd=((forward, 5555),)) as m:
         async with ctx.step("boot"), asyncio.timeout(300):
             banner = await m.console.wait("Eshell")
-        for milestone in MILESTONES:
-            probes.require_present(m, milestone, "missing boot milestone")
+        milestones(m)
         ctx.record("boot-smoke", milestone_count=len(MILESTONES))
-
         async with ctx.step("shell"), asyncio.timeout(240):
-            await probes.load_test_modules(m, ctx.settings.test_modules, banner)
-            await probes.call(m, "chryso_test:eval_check().", r"SHELL_EVAL\|2")
-            await m.console.wait(r"^2\r?$")
+            await shell(ctx, m, banner)
         ctx.record("shell-smoke", result=2)
-
         async with ctx.step("frames"), asyncio.timeout(60):
-            mark = m.console.mark()
-            await m.console.send("chryso_test:frame_check('fcheck').")
-            control = await m.console.await_run("FCHECK.CONTROL", since=mark)
-            if control.frames[0].get("text") != "a|b@c":
-                raise m.console.fail(f"control run read back as {control.frames!r}")
-            try:
-                await m.console.await_run("FCHECK.PLANTED", since=mark)
-            except AssertionError as refused:
-                if "damaged FCHECK.PLANTED crc" not in str(refused):
-                    raise
-            else:
-                raise m.console.fail("a planted CRC change was accepted")
-
+            await frame_check(m)
         async with ctx.step("tcp host to guest"), asyncio.timeout(300):
-            await m.console.wait(r"SOCKET_SMOKE\|DHCP:")
-            await probes.call(m, "chryso_net:echo_server(5555).", "LISTENER_UP")
-            echoed = await probes.echo(forward, b"CHRYSO_ECHO")
-            if echoed != b"CHRYSO_ECHO":
-                raise m.console.fail(f"echo returned {echoed!r}")
-            await m.console.wait("ECHOED")
+            echoed = await tcp_host_to_guest(m, forward)
         ctx.record("tcp-smoke-host-to-guest", payload=echoed.decode())
-
         async with ctx.step("tcp guest to host"), asyncio.timeout(180):
-            async with probes.Listener(ctx.ports.take(), len(b"CHRYSO_PING")) as listener:
-                mark = m.console.mark()
-                await m.console.send(f"chryso_net:ping('chryso_ping', {listener.port}).")
-                got = await listener.received()
-            if got != b"CHRYSO_PING":
-                raise m.console.fail(f"host listener received {got!r}")
-            await m.console.wait(r"NET_OK\|CHRYSO_PING", since=mark)
+            got = await tcp_guest_to_host(ctx, m)
         ctx.record("tcp-smoke-guest-to-host", payload=got.decode())
 
 
