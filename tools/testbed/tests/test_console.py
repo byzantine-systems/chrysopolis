@@ -207,3 +207,19 @@ def test_frames_survive_colour_around_every_byte() -> None:
         return len(result.frames)
 
     assert asyncio.run(scenario()) == 1
+
+
+def test_a_crashed_probe_fails_the_wait_at_once() -> None:
+    from chryso_testbed.abi import Abi
+    from chryso_testbed.scenario import default_failures
+
+    abi = Abi(drivers={}, beam=5, crasher=4, driver_budget=8, exit_fault_base=0)
+
+    async def scenario() -> None:
+        console = Console(default_failures(abi))
+        feeder = asyncio.create_task(later(console, b"** exception error: {reserved_key,n}\r\n"))
+        await console.await_run("LAT.FB_BASE", since=Mark(0, 0))
+        await feeder
+
+    with pytest.raises(ScenarioFailure, match=r"failure '\*\* exception "):
+        asyncio.run(asyncio.wait_for(scenario(), 5))

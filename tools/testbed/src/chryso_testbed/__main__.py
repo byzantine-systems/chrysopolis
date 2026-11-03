@@ -45,6 +45,7 @@ def load(manifest: Path, out: Path, jobs: int) -> Settings:
         out=out,
         jobs=jobs,
         test_modules=tuple(raw["test_modules"]),
+        fallback_bound_us=int(raw["fallback_bound_us"]),
     )
 
 

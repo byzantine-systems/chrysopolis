@@ -11,6 +11,7 @@ import contextlib
 from collections.abc import Sequence
 from typing import Final
 
+from chryso_testbed import frames
 from chryso_testbed.console import Hit, Mark
 from chryso_testbed.machine import Machine
 
@@ -184,3 +185,43 @@ async def postmortem(machine: Machine, tag: str, port: int) -> None:
             mark = machine.console.mark()
             await machine.console.send(f"chryso_net:ping('{again}', {port + 100}).")
             await machine.console.wait(rf"NET_(?:OK|ERR)\|{again.upper()}", since=mark)
+
+
+# --- framed probe runs -----------------------------------------------------------
+
+
+async def run(machine: Machine, expression: str, run_name: str) -> frames.Pass:
+    """Type a probe call and read back its framed run."""
+    mark = machine.console.mark()
+    await machine.console.send(expression)
+    return await machine.console.await_run(run_name, since=mark)
+
+
+def records(result: frames.Pass, kind: str) -> list[frames.Frame]:
+    return [f for f in result.frames if f.kind == kind]
+
+
+async def run_probe(
+    machine: Machine, expression: str, run_name: str, steps: Sequence[str]
+) -> frames.Pass:
+    """A step probe: every named step must report ok and none unexpected."""
+    result = await run(machine, expression, run_name)
+    seen = {f.get("name"): f.get("verdict") for f in records(result, "step")}
+    bad = {name: verdict for name, verdict in seen.items() if verdict != "ok"}
+    missing = [step for step in steps if step not in seen]
+    if bad or missing or result.unexpected:
+        raise machine.console.fail(f"{run_name}: unexpected={bad} missing={missing}")
+    return result
+
+
+def assert_audit(machine: Machine, result: frames.Pass) -> frames.Frame:
+    """The in-situ audit agreed with Root: rows and tallies both match."""
+    audits = records(result, "audit")
+    if len(audits) != 1:
+        raise machine.console.fail(f"expected one audit record, got {audits!r}")
+    audit = audits[0]
+    fields = dict(audit.fields)
+    if fields.get("rows") != "match" or fields.get("tallies") != "match":
+        rows = [dict(r.fields) for r in records(result, "row")]
+        raise machine.console.fail(f"audit disagreed with Root: {fields} rows={rows}")
+    return audit

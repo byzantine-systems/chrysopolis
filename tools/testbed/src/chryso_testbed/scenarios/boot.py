@@ -6,7 +6,7 @@ import asyncio
 import re
 
 from chryso_testbed import probes
-from chryso_testbed.scenario import Context, registry
+from chryso_testbed.scenario import BEAM_FAULTS_EXPECTED, Context, registry
 
 GROUP = "boot"
 MILESTONES = (
@@ -101,7 +101,7 @@ async def beam_restart(ctx: Context) -> None:
     """An ERTS exit restarts beam_server clean, and the exit code reaches Root."""
     beam = ctx.abi.beam
     # BEAM faults are the point here, so only a monitor-caught fault fails waits.
-    async with ctx.boot("test-image", failures=[r"MON\|ERROR"]) as m:
+    async with ctx.boot("test-image", failures=BEAM_FAULTS_EXPECTED) as m:
         modules = ctx.settings.test_modules
         async with ctx.step("mark"), asyncio.timeout(400):
             banner = await m.console.wait("Eshell")

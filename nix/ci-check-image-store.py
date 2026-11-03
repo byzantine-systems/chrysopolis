@@ -28,6 +28,13 @@ IMAGES = {
         "lifecycle-failure-image",
     ),
     "testbed-restart": ("restart-image", "budget-decay-image"),
+    "testbed-orch": (
+        "test-image",
+        "spec-commit-image",
+        "command-image",
+        "fallback-image",
+        "fallback-nomap-image",
+    ),
 }
 
 if len(sys.argv) != 2:

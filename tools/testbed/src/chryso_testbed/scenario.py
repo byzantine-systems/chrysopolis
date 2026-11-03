@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Final
 
 from chryso_testbed.abi import Abi
 from chryso_testbed.machine import Machine, Profile, Tools
@@ -73,6 +73,7 @@ class Settings:
     out: Path
     jobs: int
     test_modules: tuple[str, ...] = ()
+    fallback_bound_us: int = 0
 
 
 @dataclass(slots=True)
@@ -82,9 +83,18 @@ class Step:
     passed: bool
 
 
+MON_FAULT: Final = r"MON\|ERROR"
+# A probe that crashed prints this instead of its result, so waiting on is futile.
+SHELL_EXCEPTION: Final = r"^\*\* exception "
+
+
 def default_failures(abi: Abi) -> list[str]:
-    """A monitor-caught PD fault, or a fault of the BEAM itself."""
-    return [r"MON\|ERROR", rf"ROOT\|fault\|child={abi.beam}(?:\||\r|$)"]
+    """A monitor-caught PD fault, a fault of the BEAM itself, or a crashed probe."""
+    return [MON_FAULT, rf"ROOT\|fault\|child={abi.beam}(?:\||\r|$)", SHELL_EXCEPTION]
+
+
+#: For scenarios whose subject is a BEAM fault.
+BEAM_FAULTS_EXPECTED: Final = (MON_FAULT, SHELL_EXCEPTION)
 
 
 @dataclass(slots=True)

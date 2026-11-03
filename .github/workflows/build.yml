@@ -140,6 +140,7 @@ jobs:
           - lifecycle-config-failure-smoke
           - testbed-boot
           - testbed-restart
+          - testbed-orch
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix

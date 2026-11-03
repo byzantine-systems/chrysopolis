@@ -38,6 +38,8 @@
           qemu = "${pkgs.qemu}/bin/qemu-system-aarch64";
           qemu_img = "${pkgs.qemu}/bin/qemu-img";
           test_modules = testModules;
+          fallback_bound_us =
+            (builtins.fromJSON (builtins.readFile ../baselines/fallback/latency.json)).bound_us;
         }
       );
 
@@ -113,6 +115,7 @@
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
         testbed-boot = group "boot";
         testbed-restart = group "restart";
+        testbed-orch = group "orch";
       };
 
       packages.testbed = python.pkgs.buildPythonPackage {
