@@ -341,7 +341,8 @@
 
         # The orchestrator's pure semantics (apps/chryso_core): compile with
         # every warning as an error, Dialyzer and xref, then every PropEr law,
-        # including the differential law against the C units' traces.
+        # including the differential law against the C units' traces and the
+        # console frame codec's laws.
         # Runs PropEr directly, so neither rebar3 nor its plugins reach the
         # network in the sandbox.
         core-erlang = pkgs.stdenvNoCC.mkDerivation {
@@ -366,7 +367,7 @@
             erlc -o ebin +debug_info +warnings_as_errors -pa ebin test/prop_*.erl
             # Status 2 means warnings inside OTP's own apps; the PLT is still built.
             dialyzer --build_plt --apps erts kernel stdlib --output_plt core.plt >/dev/null || [ $? -eq 2 ]
-            dialyzer --plt core.plt -Wunmatched_returns -Werror_handling ebin/chryso_root*.beam
+            dialyzer --plt core.plt -Wunmatched_returns -Werror_handling ebin/chryso_root*.beam ebin/chryso_frame.beam
             erl -noshell -pa ebin -eval '
               xref:start(s), xref:set_default(s, [{warnings, false}]),
               ok = xref:set_library_path(s, code:get_path()),
@@ -375,7 +376,7 @@
                                {ok, R} <- [xref:analyze(s, A)], R =/= []],
               case Bad of [] -> ok; _ -> io:format("xref: ~p~n", [Bad]), halt(1) end,
               Mods = [prop_root_policy, prop_root_spec, prop_root_bucket,
-                      prop_root_command, prop_root, prop_root_traces],
+                      prop_root_command, prop_root, prop_root_traces, prop_frame],
               Failed = [{M, R} || M <- Mods, R <- [proper:module(M, [{numtests, 300}])], R =/= []],
               io:format("~nproperty failures: ~p~n", [Failed]),
               halt(case Failed of [] -> 0; _ -> 1 end).'
