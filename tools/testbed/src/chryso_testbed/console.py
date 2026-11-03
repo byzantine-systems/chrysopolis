@@ -4,8 +4,14 @@ A pump task appends what QEMU prints and wakes every waiter, so a wait ends
 as soon as its line arrives. Every wait also watches the failure patterns,
 so a fault ends the scenario at once instead of at its timeout.
 
-Patterns match within one line. Each scan resumes at the start of the last
-incomplete line, so a wake costs only the new bytes.
+Patterns match complete lines only, so a greedy pattern never captures a
+line that is still arriving. The shell prompt, which ends no line, is the
+one partial match. Each scan resumes where the last one stopped, so a wake
+costs only the new bytes.
+
+The serial virtualiser wraps BEAM output in ANSI colour sequences, down to
+single echoed characters. Waits and frames read the log with those stripped.
+The raw bytes are kept for the saved console.
 
 The console echoes typed lines, so a pattern must never match text the
 scenario sends.
@@ -24,6 +30,10 @@ from chryso_testbed import frames
 
 TAIL: Final = 4000
 CHUNK: Final = 4096
+CSI: Final = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
+# An escape sequence cut off at the end of a chunk. Longer tails are not CSI.
+CSI_OPEN: Final = re.compile(rb"\x1b(?:\[[0-?]*[ -/]*)?\Z")
+CSI_LONGEST: Final = 32
 
 
 class ScenarioFailure(AssertionError):
@@ -63,23 +73,31 @@ def compile_pattern(pattern: str) -> re.Pattern[bytes]:
 class Scan:
     """Incremental search for one pattern over a growing log."""
 
-    __slots__ = ("_pos", "_regex", "hits")
+    __slots__ = ("_partial", "_pos", "_regex", "hits")
 
-    def __init__(self, pattern: str, start: int) -> None:
+    def __init__(self, pattern: str, start: int, *, partial: bool = False) -> None:
         self._regex = compile_pattern(pattern)
         self._pos = start
+        self._partial = partial
         self.hits: list[Hit] = []
 
     def advance(self, log: bytearray) -> list[Hit]:
-        """Every hit so far. Hits on the incomplete last line are found again next time."""
-        del self.hits[bisect_left(self.hits, self._pos, key=_START) :]
-        self.hits.extend(Hit.of(m) for m in self._regex.finditer(log, self._pos))
-        self._pos = log.rfind(b"\n", self._pos) + 1 or self._pos
+        """Every hit so far, in complete lines unless the scan is partial."""
+        if self._partial:
+            # Hits on the incomplete last line are found again next time.
+            del self.hits[bisect_left(self.hits, self._pos, key=_START) :]
+            self.hits.extend(Hit.of(m) for m in self._regex.finditer(log, self._pos))
+            self._pos = log.rfind(b"\n", self._pos) + 1 or self._pos
+        elif (end := log.rfind(b"\n", self._pos) + 1) > self._pos:
+            self.hits.extend(Hit.of(m) for m in self._regex.finditer(log, self._pos, end))
+            self._pos = end
         return self.hits
 
 
 class Console:
     def __init__(self, failures: Iterable[str] = ()) -> None:
+        self._raw = bytearray()
+        self._carry = b""
         self._log = bytearray()
         self._events: list[frames.Event] = []
         self._state: frames.State = frames.START
@@ -95,8 +113,18 @@ class Console:
 
     def append(self, chunk: bytes) -> None:
         """Add console bytes. Waiters see them at their next wake."""
-        self._log += chunk
-        events, self._state = frames.feed(chunk, self._state)
+        self._raw += chunk
+        data = self._carry + chunk
+        open_csi = CSI_OPEN.search(data)
+        cut = (
+            open_csi.start()
+            if open_csi and len(data) - open_csi.start() <= CSI_LONGEST
+            else len(data)
+        )
+        self._carry = data[cut:]
+        clean = CSI.sub(b"", data[:cut])
+        self._log += clean
+        events, self._state = frames.feed(clean, self._state)
         self._events += events
         if self._fault is None:
             found = (hits[0] for scan in self._failures if (hits := scan.advance(self._log)))
@@ -136,7 +164,16 @@ class Console:
     def mark(self) -> Mark:
         return Mark(len(self._log), len(self._events))
 
+    def at(self, offset: int) -> Mark:
+        """A mark at an earlier byte offset, such as the end of a hit."""
+        return Mark(offset, len(self._events))
+
     def raw(self) -> bytes:
+        """Every byte QEMU printed, colour sequences included."""
+        return bytes(self._raw)
+
+    def text(self) -> bytes:
+        """The log waits read: colour sequences stripped."""
         return bytes(self._log)
 
     def tail(self, size: int = TAIL) -> str:
@@ -171,9 +208,9 @@ class Console:
     # Callers bound waits with asyncio.timeout. `interrupted` keeps the wait a
     # deadline cut short, so the report can say what never appeared.
 
-    async def wait(self, pattern: str, *, since: Mark | None = None) -> Hit:
-        """The first match at or after `since`."""
-        scan = Scan(pattern, since.offset if since else 0)
+    async def wait(self, pattern: str, *, since: Mark | None = None, partial: bool = False) -> Hit:
+        """The first match at or after `since`, in a complete line unless `partial`."""
+        scan = Scan(pattern, since.offset if since else 0, partial=partial)
         hits = await self._until(lambda: scan.advance(self._log) or None, repr(pattern))
         return hits[0]
 

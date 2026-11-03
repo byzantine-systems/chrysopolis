@@ -10,7 +10,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from chryso_testbed.console import Console, Scan, ScenarioFailure
+from chryso_testbed.console import CSI, Console, Mark, Scan, ScenarioFailure
 
 LAW = settings(derandomize=True, database=None, deadline=None, max_examples=300)
 
@@ -123,16 +123,87 @@ LINES = st.lists(
 ).map(lambda ls: b"\r\n".join(ls))
 
 
-@LAW
-@given(LINES, st.lists(st.integers(0, 200)))
-def test_scan_equals_whole_search(log: bytes, cuts: list[int]) -> None:
-    """The incremental scan finds what one search over the whole log finds."""
-    scan = Scan(r"ab\d+", 0)
+def feed_scan(log: bytes, cuts: list[int], *, partial: bool) -> list[int]:
+    scan = Scan(r"ab\d+", 0, partial=partial)
     buffer = bytearray()
     start = 0
     for cut in [*sorted({c for c in cuts if c <= len(log)}), len(log)]:
         buffer += log[start:cut]
         start = cut
         scan.advance(buffer)
-    expected = [m.start() for m in re.finditer(rb"ab\d+", log)]
-    assert [h.start for h in scan.hits] == expected
+    return [h.start for h in scan.hits]
+
+
+@LAW
+@given(LINES, st.lists(st.integers(0, 200)))
+def test_scan_matches_complete_lines(log: bytes, cuts: list[int]) -> None:
+    """A scan finds exactly what one search over the complete lines finds."""
+    complete = log[: log.rfind(b"\n") + 1]
+    expected = [m.start() for m in re.finditer(rb"ab\d+", complete, re.MULTILINE)]
+    assert feed_scan(log, cuts, partial=False) == expected
+
+
+@LAW
+@given(LINES, st.lists(st.integers(0, 200)))
+def test_partial_scan_matches_everything(log: bytes, cuts: list[int]) -> None:
+    expected = [m.start() for m in re.finditer(rb"ab\d+", log, re.MULTILINE)]
+    assert feed_scan(log, cuts, partial=True) == expected
+
+
+def test_greedy_pattern_waits_for_the_whole_line() -> None:
+    async def scenario() -> str:
+        console = Console()
+        feeder = asyncio.create_task(
+            later(console, b"TEST_MODULES|", b"ok|mods=13", b"|via=load_file\r\n")
+        )
+        async with asyncio.timeout(5):
+            hit = await console.wait(r"TEST_MODULES\|[^\r\n]*")
+        await feeder
+        return hit.text
+
+    assert asyncio.run(scenario()) == "TEST_MODULES|ok|mods=13|via=load_file"
+
+
+def test_prompt_matches_a_partial_line() -> None:
+    async def scenario() -> None:
+        console = Console()
+        console.append(b"Eshell V16\r\n1> ")
+        async with asyncio.timeout(1):
+            await console.wait(r"\d+> ", partial=True)
+
+    asyncio.run(scenario())
+
+
+COLOURED = st.lists(
+    st.one_of(
+        st.sampled_from([b"\x1b[31m", b"\x1b[0m", b"\x1b[1;32m", b"\x1b[?25l"]),
+        st.binary(max_size=12).map(lambda b: b.replace(b"\x1b", b"")),
+    ),
+    max_size=20,
+).map(b"".join)
+
+
+@LAW
+@given(COLOURED, st.lists(st.integers(0, 400)))
+def test_colour_is_stripped_under_any_chunking(data: bytes, cuts: list[int]) -> None:
+    console = Console()
+    start = 0
+    for cut in [*sorted({c for c in cuts if c <= len(data)}), len(data)]:
+        console.append(data[start:cut])
+        start = cut
+    assert console.text() == CSI.sub(b"", data)
+    assert console.raw() == data
+
+
+def test_frames_survive_colour_around_every_byte() -> None:
+    run = frame("R", 0, "step", "x=1") + frame("R", 1, "verdict", "frames=1|unexpected=0")
+    coloured = b"".join(b"\x1b[31m" + bytes([c]) + b"\x1b[0m" for c in run)
+
+    async def scenario() -> int:
+        console = Console()
+        console.append(coloured)
+        async with asyncio.timeout(1):
+            result = await console.await_run("R", since=Mark(0, 0))
+        return len(result.frames)
+
+    assert asyncio.run(scenario()) == 1

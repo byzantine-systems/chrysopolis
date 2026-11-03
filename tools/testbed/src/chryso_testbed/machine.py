@@ -3,7 +3,8 @@
 The flags match the Microkit image's needs: the image is loaded at
 0x70000000, and the drivers expect the disk on virtio-mmio bus 1 and the NIC
 on bus 0. Writes go to a qcow2 overlay over the read-only FAT image, so a
-boot costs no copy.
+boot costs no copy. The overlay and QMP socket are scratch, removed on exit.
+Only the console logs and QEMU's stderr stay in the work directory.
 
 The testbed listens on the QMP socket and QEMU connects to it, so nothing
 polls for the socket. A SHUTDOWN, RESET or STOP event fails the console's
@@ -18,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shutil
 import signal
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +65,7 @@ def argv(tools: Tools, profile: Profile, disk: Path, qmp: Path) -> list[str]:
         "-device", "virtio-net-device,netdev=net0,bus=virtio-mmio-bus.0",
         "-netdev", netdev,
         "-chardev", f"socket,id=qmp,path={qmp}",
-        "-mon", "chardev=qmp,mode=control",
+        "-object", "monitor-qmp,id=qmp-monitor,chardev=qmp",
         "-serial", "stdio",
         "-display", "none",
         "-monitor", "none",
@@ -93,10 +96,13 @@ class Machine:
         self.qmp = QMPClient(name)
         self._proc: asyncio.subprocess.Process | None = None
         self._tasks: list[asyncio.Task[None]] = []
+        # Scratch lives in a short private directory: a unix socket path must
+        # fit in 108 bytes, which a Nix output path can exceed.
+        self._scratch = Path(tempfile.mkdtemp(prefix="tb-"))
 
     @property
     def qmp_socket(self) -> Path:
-        return self.workdir / "qmp.sock"
+        return self._scratch / "qmp.sock"
 
     async def __aenter__(self) -> Self:
         try:
@@ -116,7 +122,7 @@ class Machine:
 
     async def start(self) -> None:
         self.workdir.mkdir(parents=True, exist_ok=True)
-        disk = self.workdir / "disk.qcow2"
+        disk = self._scratch / "disk.qcow2"
         await run(
             self.tools.qemu_img, "create", "-q", "-f", "qcow2",
             "-b", str(self.profile.disk), "-F", "raw", str(disk),
@@ -158,4 +164,6 @@ class Machine:
         with contextlib.suppress(Exception):
             await self.qmp.disconnect()
         if self.workdir.is_dir():
-            (self.workdir / "console.log").write_bytes(self.console.raw())
+            (self.workdir / "console.log").write_bytes(self.console.text())
+            (self.workdir / "console.raw").write_bytes(self.console.raw())
+        shutil.rmtree(self._scratch, ignore_errors=True)
