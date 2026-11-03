@@ -72,6 +72,7 @@ class Settings:
     tools: Tools
     out: Path
     jobs: int
+    test_modules: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

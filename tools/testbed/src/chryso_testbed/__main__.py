@@ -44,6 +44,7 @@ def load(manifest: Path, out: Path, jobs: int) -> Settings:
         tools=Tools(raw["qemu"], raw["qemu_img"]),
         out=out,
         jobs=jobs,
+        test_modules=tuple(raw["test_modules"]),
     )
 
 

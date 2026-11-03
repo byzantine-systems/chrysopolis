@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 from typing import Final
 
-MODULES: Final[tuple[str, ...]] = ()
+MODULES: Final[tuple[str, ...]] = ("boot",)
 
 
 def load() -> None:

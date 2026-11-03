@@ -42,7 +42,9 @@ loads chryso_core's modules with the probes.
 %% Loader, used once per boot by the tests.nix preamble.
 -export([loaded/1]).
 %% Tag plumbing, shared with the sibling chryso_* modules.
--export([emit/2, tag/1]).
+-export([emit/2, tag/1, emit_run/3]).
+%% Console framing self-check.
+-export([frame_check/1]).
 %% Assertions.
 -export([eval_check/0, alive/1, restart_pd/1, fault_pd/1, settle_driver/0]).
 -export([serial_before/0, serial_after/0, serial_rx/0]).
@@ -130,6 +132,34 @@ emit(Tag, Value) ->
     io:format("~s|~p~n", [Tag, Value]).
 
 -doc """
+Print a probe run as frames, one I/O request for the whole run, so the
+testbed can tell a whole result from one another writer cut into.
+""".
+-spec emit_run(string(), [chryso_frame:record()], non_neg_integer()) -> ok.
+emit_run(Run, Records, Unexpected) ->
+    io:put_chars(iolist_to_binary(chryso_frame:encode_run(Run, Records, Unexpected))).
+
+-doc """
+Print a control run `<TAG>.CONTROL`, then `<TAG>.PLANTED` with one CRC digit
+changed. The testbed must accept the first and report the second as damaged,
+which proves framing survives the real console path.
+""".
+-spec frame_check(atom()) -> ok.
+frame_check(Tag) ->
+    Name = tag(Tag),
+    Records = [{check, [{value, 42}, {text, "a|b@c"}]}],
+    emit_run(Name ++ ".CONTROL", Records, 0),
+    Planted = iolist_to_binary(chryso_frame:encode_run(Name ++ ".PLANTED", Records, 0)),
+    {At, Len} = binary:match(Planted, <<"|crc=">>),
+    <<Pre:(At + Len)/binary, Digit, Post/binary>> = Planted,
+    Changed =
+        case Digit of
+            $0 -> $1;
+            _ -> $0
+        end,
+    io:put_chars(<<Pre/binary, Changed, Post/binary>>).
+
+-doc """
 Upper-case a lower-case tag atom. This is what keeps the typed line free of
 the string the driver waits for (see the header): the caller types `before`,
 the log gets `BEFORE`.
@@ -140,9 +170,9 @@ tag(Atom) ->
 
 -doc """
 shell-smoke: the Eshell evaluates real code. This is the one function that
-returns its value rather than ok, so the shell still prints a bare `2` and
-the original assertion holds unchanged; the tagged line is the stronger
-assertion layered on top, since a bare 2 could come from anywhere in the log.
+returns its value rather than ok, so the shell still prints a bare `2`. The
+tagged line is the stronger assertion, since a bare 2 could come from
+anywhere in the log.
 """.
 -spec eval_check() -> integer().
 eval_check() ->
@@ -192,9 +222,8 @@ request_pd(Request) ->
 -doc """
 Wait for a just-restarted driver to finish its boot lines. Drivers print
 through the kernel debug console under their own budget (eth: 100 us per
-400 us), so a line can span several periods; console output written in
-between lands inside it and breaks both lines' patterns. 100 ms is about
-250 eth periods.
+400 us), so a line can span several periods. Console output written in
+between lands inside it. 100 ms is about 250 eth periods.
 """.
 -spec settle_driver() -> ok.
 settle_driver() ->
