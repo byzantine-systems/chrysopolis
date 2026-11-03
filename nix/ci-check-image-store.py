@@ -21,6 +21,12 @@ IMAGES = {
     "budget-decay-smoke": ("budget-decay-image",),
     "cothread-smoke": ("cothread-probe-image",),
     "lifecycle-config-failure-smoke": ("lifecycle-failure-image",),
+    "testbed-boot": (
+        "test-image",
+        "default",
+        "cothread-probe-image",
+        "lifecycle-failure-image",
+    ),
 }
 
 if len(sys.argv) != 2:

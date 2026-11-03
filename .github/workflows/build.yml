@@ -138,6 +138,7 @@ jobs:
           - blk-giveup-smoke
           - cothread-smoke
           - lifecycle-config-failure-smoke
+          - testbed-boot
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix

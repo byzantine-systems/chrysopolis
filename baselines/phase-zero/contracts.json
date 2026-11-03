@@ -424,5 +424,62 @@
       "a planted CRC change or driver fragment in a frame is refused as damaged",
       "the fast frame reader equals the bytewise reference on generated logs"
     ]
+  },
+  "testbed-boot": {
+    "kind": "qemu",
+    "protects": [
+      "ERTS starts",
+      "FAT is detected",
+      "the sDDF monotonic clock works",
+      "the Erlang shell becomes ready",
+      "guest Erlang test modules load from FAT",
+      "interactive Eshell input and output work",
+      "guest gen_tcp accepts host connections",
+      "guest gen_tcp connects to a host listener",
+      "TCP payloads survive in both directions",
+      "lwIP receives a DHCP lease",
+      "native socket bind, listen, connect, and transfer work before ERTS",
+      "pthread compatibility runs over libmicrokitco",
+      "cothread slots and synchronization primitives remain usable",
+      "malformed injected configuration fails before partial initialization",
+      "persistent configuration errors do not consume restart budget",
+      "ERTS exits reach Root",
+      "beam_server restarts with fresh writable state",
+      "the Erlang shell becomes ready after each restart",
+      "RNG initialization succeeds",
+      "RNG fingerprints, rand bytes, references, and urandom bytes differ across boots",
+      "every boot-group scenario runs in one derivation, concurrently except rng-smoke",
+      "a framed probe run is accepted whole and a planted CRC change is refused as damaged"
+    ],
+    "required_markers": [
+      "beam_server up on the LionsOS reference stack.",
+      "monotonic clock via sDDF timer:",
+      "Handing off to ERTS core loop...",
+      "MBR partitioning detected",
+      "Eshell",
+      "TEST_MODULES|",
+      "SHELL_EVAL|2",
+      "LISTENER_UP",
+      "ECHOED",
+      "NET_OK|CHRYSO_PING",
+      "SOCKET_SMOKE|DHCP:",
+      "SOCKET_SMOKE|PASS",
+      "COTHREAD_PROBE|PASS",
+      "BEAM|lifecycle|FATAL|stage=config|status=config-serial|code=1",
+      "BEAM|exit|code=0|requesting-restart",
+      "ROOT|restart|child=5|count=1",
+      "BEAM|boot|generation=2|bss-counter=1",
+      "BEAM_MARK_AFTER|absent",
+      "RNG|source=",
+      "RNG_BYTES|",
+      "RNG_REF|",
+      "RNG_URANDOM|",
+      "@@CHRYSO|FCHECK.CONTROL"
+    ],
+    "forbidden_markers": [
+      "unexpected PD fault",
+      "unexpected beam_server fault",
+      "COTHREAD_PROBE|FAIL"
+    ]
   }
 }
