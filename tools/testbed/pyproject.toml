@@ -1,0 +1,44 @@
+# Runs scenarios against the Nix-built images under QEMU.
+# Dependencies come from the pinned nixpkgs (modules/testbed.nix).
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chryso-testbed"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = ["qemu.qmp>=0.0.6"]
+
+[project.optional-dependencies]
+test = ["pytest>=9", "hypothesis>=6.150"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+chryso_testbed = ["py.typed"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC", "PT"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unreachable = true
+warn_unused_ignores = true
+show_error_codes = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["hypothesis.*"]
+follow_untyped_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "-p", "no:cacheprovider"]
+xfail_strict = true

@@ -53,7 +53,8 @@
       "apps/chryso_core compiles with warnings, specs and docs as errors and passes Dialyzer and xref",
       "every PropEr law of Root's model holds: policy absorption and monotonicity, spec rejection identity and generation monotonicity, fenced idempotence, bucket bounds and rate, composed noninterference",
       "the Erlang model of Root reproduces every decision and reply in the C units' differential traces",
-      "a fenced intent sent across Erlang distribution has exactly one effect under lost replies and dropped connections"
+      "a fenced intent sent across Erlang distribution has exactly one effect under lost replies and dropped connections",
+      "the console frame codec keeps its laws: round trip, chunk invariance, soundness under a shuffle with other writers, prefix stability and completeness"
     ]
   },
   "orch-status-smoke": {
@@ -413,6 +414,15 @@
     "protects": [
       "Nix, Erlang, Gleam, C, and Zig formatting remains reproducible",
       "vendored tcp.c remains outside automatic formatting"
+    ]
+  },
+  "testbed-unit": {
+    "kind": "host-test",
+    "protects": [
+      "the testbed package passes ruff and strict mypy",
+      "the Python frame reader reproduces every Erlang golden vector, whole and at every split point",
+      "a planted CRC change or driver fragment in a frame is refused as damaged",
+      "the fast frame reader equals the bytewise reference on generated logs"
     ]
   }
 }

@@ -136,6 +136,7 @@
         ./modules/beam.nix
         ./modules/images.nix
         ./modules/checks.nix
+        ./modules/testbed.nix
         ./modules/devshell.nix
       ];
       systems = nixpkgs.lib.systems.flakeExposed;
