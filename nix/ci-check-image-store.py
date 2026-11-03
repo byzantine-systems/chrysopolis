@@ -49,7 +49,8 @@ evaluated = subprocess.run(
         expression,
     ],
     check=True,
-    capture_output=True,
+    # stderr stays on the job log, so a failed eval shows its cause.
+    stdout=subprocess.PIPE,
     text=True,
 )
 for item in json.loads(evaluated.stdout):
