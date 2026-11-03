@@ -19,6 +19,8 @@
         programs.clang-format.enable = true;
         programs.erlfmt.enable = true;
         programs.nixfmt.enable = true;
+        programs.ruff-check.enable = true;
+        programs.ruff-format.enable = true;
         programs.zig.enable = true;
       };
 

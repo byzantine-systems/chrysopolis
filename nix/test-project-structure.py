@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Negative fixtures for each phase-zero structure rule."""
 
 from __future__ import annotations
@@ -8,7 +7,6 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-
 
 SOURCE = Path(__file__).resolve().parent / "check-project-structure.py"
 SPEC = importlib.util.spec_from_file_location("project_structure", SOURCE)
@@ -41,11 +39,15 @@ class StructureFixtures(unittest.TestCase):
         self.reject("forbidden-include")
 
     def test_cross_pd_private_include(self) -> None:
-        self.append("src/pd/beam/restart/beam_restart_layout.h", '\n#include "root_policy.h"\n')
+        self.append(
+            "src/pd/beam/restart/beam_restart_layout.h", '\n#include "root_policy.h"\n'
+        )
         self.reject("cross-pd-include")
 
     def test_public_header_isolation(self) -> None:
-        (self.root / "include/chrysopolis/broken.h").write_text('#include "missing.h"\n')
+        (self.root / "include/chrysopolis/broken.h").write_text(
+            '#include "missing.h"\n'
+        )
         self.reject("public-header")
 
     def test_public_header_positive(self) -> None:
@@ -57,11 +59,15 @@ class StructureFixtures(unittest.TestCase):
         checker.check(self.root, "clang")
 
     def test_unlisted_source(self) -> None:
-        (self.root / "src/pd/beam/unlisted.c").write_text("int unlisted(void) { return 0; }\n")
+        (self.root / "src/pd/beam/unlisted.c").write_text(
+            "int unlisted(void) { return 0; }\n"
+        )
         self.reject("explicit-source")
 
     def test_unused_path_does_not_count_as_source(self) -> None:
-        (self.root / "src/pd/beam/unlisted.c").write_text("int unlisted(void) { return 0; }\n")
+        (self.root / "src/pd/beam/unlisted.c").write_text(
+            "int unlisted(void) { return 0; }\n"
+        )
         self.append("build.zig", '\nconst unused = b.path("src/pd/beam/unlisted.c");\n')
         self.reject("explicit-source")
 
@@ -102,7 +108,11 @@ class StructureFixtures(unittest.TestCase):
 
     def test_tcp_formatting_exclusion(self) -> None:
         path = self.root / "modules/devshell.nix"
-        path.write_text(path.read_text().replace('"src/pd/beam/io/tcp.c"', '"src/pd/beam/io/not-tcp.c"'))
+        path.write_text(
+            path.read_text().replace(
+                '"src/pd/beam/io/tcp.c"', '"src/pd/beam/io/not-tcp.c"'
+            )
+        )
         self.reject("tcp-exclusion")
 
 

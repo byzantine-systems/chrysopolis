@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Capture the behavior-preserving refactor baseline.
 
 The output is a deterministic JSON description of the generated topology,
@@ -22,7 +21,6 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
-
 
 REQUIRED_REPORT_HEADINGS = (
     "# IRQ Details",
@@ -109,7 +107,9 @@ def json_shape(value: Any) -> dict[str, Any]:
 
 
 def attrs(element: ET.Element) -> dict[str, Any]:
-    return {key: normalize_scalar(value) for key, value in sorted(element.attrib.items())}
+    return {
+        key: normalize_scalar(value) for key, value in sorted(element.attrib.items())
+    }
 
 
 def parse_sdf(sdf_dir: Path, id_count: int) -> dict[str, Any]:
@@ -185,7 +185,9 @@ def parse_sdf(sdf_dir: Path, id_count: int) -> dict[str, Any]:
     fixed_physical_bytes = 0
     for region in memory_regions:
         if "size" not in region:
-            fail(f"{sdf_path}: baseline requires an explicit size for {region.get('name')}")
+            fail(
+                f"{sdf_path}: baseline requires an explicit size for {region.get('name')}"
+            )
         size = int(str(region["size"]), 0)
         declared_bytes += size
         if "phys_addr" in region:
@@ -202,7 +204,9 @@ def parse_sdf(sdf_dir: Path, id_count: int) -> dict[str, Any]:
                 "name": data_path.name,
                 "bytes": data_path.stat().st_size,
                 "sha256": sha256_file(data_path),
-                "json_sha256": hashlib.sha256(canonical_json_bytes(json_value)).hexdigest(),
+                "json_sha256": hashlib.sha256(
+                    canonical_json_bytes(json_value)
+                ).hexdigest(),
                 "json_shape": json_shape(json_value),
             }
         )
@@ -239,14 +243,18 @@ def parse_sdf(sdf_dir: Path, id_count: int) -> dict[str, Any]:
                 "attributes": pd["attributes"],
                 "program_image": pd["program_image"],
                 "map_count": len(pd["maps"]),
-                "maps_sha256": hashlib.sha256(canonical_json_bytes(pd["maps"])).hexdigest(),
+                "maps_sha256": hashlib.sha256(
+                    canonical_json_bytes(pd["maps"])
+                ).hexdigest(),
                 "irqs": pd["irqs"],
                 "setvars": pd["setvars"],
             }
         )
     return {
         "system": {
-            "canonical_sha256": hashlib.sha256(canonical_json_bytes(complete_system)).hexdigest(),
+            "canonical_sha256": hashlib.sha256(
+                canonical_json_bytes(complete_system)
+            ).hexdigest(),
             "attributes": complete_system["attributes"],
             "memory_regions": memory_regions,
             "protection_domains": pd_summaries,
@@ -270,7 +278,11 @@ def report_blocks(lines: list[str], kind: str) -> list[tuple[str, list[str]]]:
         name = match.group(1)
         body: list[str] = []
         index += 1
-        while index < len(lines) and not lines[index].startswith("# ") and not any_block.match(lines[index]):
+        while (
+            index < len(lines)
+            and not lines[index].startswith("# ")
+            and not any_block.match(lines[index])
+        ):
             body.append(lines[index])
             index += 1
         blocks.append((name, body))
@@ -373,7 +385,9 @@ def parse_report(path: Path) -> dict[str, Any]:
         {
             "name": cnode["name"],
             "slot_count": len(cnode["slots"]),
-            "slots_sha256": hashlib.sha256(canonical_json_bytes(cnode["slots"])).hexdigest(),
+            "slots_sha256": hashlib.sha256(
+                canonical_json_bytes(cnode["slots"])
+            ).hexdigest(),
         }
         for cnode in complete["cnodes"]
     ]
@@ -391,8 +405,7 @@ def run_readelf(readelf: Path, flag: str, elf: Path) -> str:
         result = subprocess.run(
             [str(readelf), flag, str(elf)],
             check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as error:
@@ -407,7 +420,9 @@ def parse_elf(readelf: Path, path: Path) -> dict[str, Any]:
         match = re.search(rf"^\s*{re.escape(key)}:\s+(.+)$", header_text, re.MULTILINE)
         if not match:
             fail(f"{path}: ELF header lacks {key}")
-        output_key = "entry" if key == "Entry point address" else key.lower().replace(" ", "_")
+        output_key = (
+            "entry" if key == "Entry point address" else key.lower().replace(" ", "_")
+        )
         header[output_key] = normalize_scalar(match.group(1))
 
     segments = []
@@ -445,10 +460,15 @@ def parse_elf(readelf: Path, path: Path) -> dict[str, Any]:
         if not match:
             continue
         name, section_type, address, size, flags, alignment = match.groups()
-        important_section = (
-            name in {".text", ".init_array", ".data.rel.ro", ".got", ".data", ".bss", "ERTS_LOW_WRITE"}
-            or name.endswith("_config")
-        )
+        important_section = name in {
+            ".text",
+            ".init_array",
+            ".data.rel.ro",
+            ".got",
+            ".data",
+            ".bss",
+            "ERTS_LOW_WRITE",
+        } or name.endswith("_config")
         if "A" not in flags or not important_section:
             continue
         sections.append(
@@ -476,7 +496,12 @@ def parse_elf(readelf: Path, path: Path) -> dict[str, Any]:
     missing = sorted(set(wanted) - set(symbols))
     if missing:
         fail(f"{path}: required symbols missing: {', '.join(missing)}")
-    return {"header": header, "load_segments": segments, "allocated_sections": sections, "symbols": symbols}
+    return {
+        "header": header,
+        "load_segments": segments,
+        "allocated_sections": sections,
+        "symbols": symbols,
+    }
 
 
 def parse_host_tests(path: Path) -> dict[str, Any]:
@@ -507,7 +532,9 @@ def parse_host_tests(path: Path) -> dict[str, Any]:
     if not suites or not variants:
         fail(f"{path}: could not find host suite and variant declarations")
     if len(zig_tests) != text.count("b.addTest("):
-        fail(f"{path}: every b.addTest must be named b.fmt(\"<name>_{{s}}\", variant.suffix)")
+        fail(
+            f'{path}: every b.addTest must be named b.fmt("<name>_{{s}}", variant.suffix)'
+        )
     return {
         "suites": suites,
         "zig_tests": zig_tests,
@@ -551,7 +578,10 @@ def parse_contracts(contracts_path: Path, names_path: Path) -> dict[str, Any]:
     for name, contract in contracts.items():
         if not isinstance(contract, dict) or not contract.get("protects"):
             fail(f"check contract {name} has no protected behavior or artifact")
-    return {"count": len(actual), "contracts": {name: contracts[name] for name in actual}}
+    return {
+        "count": len(actual),
+        "contracts": {name: contracts[name] for name in actual},
+    }
 
 
 def file_fact(path: Path, *, include_hash: bool = True) -> dict[str, Any]:
@@ -633,7 +663,8 @@ def main() -> int:
             "host_tests": parse_host_tests(args.host_build),
             "generated": generated,
             "capacity": {
-                name: value["capacity"] for name, value in generated_with_capacity.items()
+                name: value["capacity"]
+                for name, value in generated_with_capacity.items()
             },
             "reports": {
                 "production": production_report,
@@ -654,7 +685,9 @@ def main() -> int:
                 "production": file_fact(
                     args.production_image / "sel4-beam.img", include_hash=False
                 ),
-                "test": file_fact(args.test_image / "sel4-beam.img", include_hash=False),
+                "test": file_fact(
+                    args.test_image / "sel4-beam.img", include_hash=False
+                ),
                 "restart": file_fact(
                     args.restart_image / "sel4-beam.img", include_hash=False
                 ),
@@ -684,7 +717,10 @@ def main() -> int:
         try:
             args.output.write_text(output, encoding="utf-8")
         except OSError as error:
-            print(f"phase-zero-baseline: cannot write {args.output}: {error}", file=sys.stderr)
+            print(
+                f"phase-zero-baseline: cannot write {args.output}: {error}",
+                file=sys.stderr,
+            )
             return 1
     return 0
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Build restart-topology fixtures with one planted failure each.
 
 Usage: mutate-topology-fixtures.py <report.txt> <system.sdf> <out-dir>
@@ -76,7 +75,9 @@ def set_object(lines: list[str], start: int, stop: int, new: str) -> None:
     raise SystemExit("fixture: slot has no Object line")
 
 
-def insert_slot(lines: list[str], start: int, end: int, slot: int, obj: str, badge: str) -> None:
+def insert_slot(
+    lines: list[str], start: int, end: int, slot: int, obj: str, badge: str
+) -> None:
     """Add one signaling cap to a CNode block, keeping slots in order."""
     entry = [
         f"\t\t* Slot: {slot}\n",
@@ -103,7 +104,9 @@ def insert_slot(lines: list[str], start: int, end: int, slot: int, obj: str, bad
 def sdf_line(lines: list[str], *needles: str) -> int:
     hits = [i for i, line in enumerate(lines) if all(n in line for n in needles)]
     if len(hits) != 1:
-        raise SystemExit(f"fixture: expected one SDF line matching {needles}, found {len(hits)}")
+        raise SystemExit(
+            f"fixture: expected one SDF line matching {needles}, found {len(hits)}"
+        )
     return hits[0]
 
 
@@ -123,11 +126,15 @@ def pd_line(lines: list[str], pd: str, *needles: str) -> int:
             if depth == 0:
                 break
     if len(hits) != 1:
-        raise SystemExit(f"fixture: expected one {pd} line matching {needles}, found {len(hits)}")
+        raise SystemExit(
+            f"fixture: expected one {pd} line matching {needles}, found {len(hits)}"
+        )
     return hits[0]
 
 
-def fallback_cases(out: pathlib.Path, args: argparse.Namespace, report: list[str], sdf: list[str]) -> None:
+def fallback_cases(
+    out: pathlib.Path, args: argparse.Namespace, report: list[str], sdf: list[str]
+) -> None:
     abi = json.loads(pathlib.Path(args.abi).read_text(encoding="utf-8"))
     timer = next(d for d in abi["drivers"] if d["name"] == "timer")
     beam_start, beam_end = cnode_block(report, "cnode_beam_server")
@@ -175,7 +182,9 @@ def main() -> int:
     parser.add_argument("report")
     parser.add_argument("sdf")
     parser.add_argument("out")
-    parser.add_argument("--mode", choices=("production", "fallback", "nomap"), default="production")
+    parser.add_argument(
+        "--mode", choices=("production", "fallback", "nomap"), default="production"
+    )
     parser.add_argument("--ppc-slot", type=int, required=True)
     parser.add_argument("--ppc-badge", required=True)
     parser.add_argument("--fault-badge", required=True)
@@ -203,7 +212,9 @@ def main() -> int:
     return 0
 
 
-def production_cases(out: pathlib.Path, args: argparse.Namespace, report: list[str], sdf: list[str]) -> None:
+def production_cases(
+    out: pathlib.Path, args: argparse.Namespace, report: list[str], sdf: list[str]
+) -> None:
     beam_start, beam_end = cnode_block(report, "cnode_beam_server")
     root_start, root_end = cnode_block(report, "cnode_root")
     virt_start, virt_end = cnode_block(report, "cnode_serial_virt_tx")
@@ -257,7 +268,9 @@ def production_cases(out: pathlib.Path, args: argparse.Namespace, report: list[s
 
     # One-writer rights drift: root may write the spec page.
     case = read(args.sdf)
-    index = sdf_line(case, '<map mr="orchestrator_spec"', 'setvar_vaddr="orchestrator_spec_view"')
+    index = sdf_line(
+        case, '<map mr="orchestrator_spec"', 'setvar_vaddr="orchestrator_spec_view"'
+    )
     case[index] = case[index].replace('perms="r"', 'perms="rw"')
     assert case[index] != sdf[index], "fixture: spec map edit did not apply"
     write_case(out, "fail-spec-write", report, case)
