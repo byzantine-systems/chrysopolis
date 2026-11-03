@@ -7,6 +7,7 @@ probe, so a wait never matches the echo of the line typed to start it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Sequence
 from typing import Final
 
@@ -117,3 +118,69 @@ class Listener:
 
     async def received(self) -> bytes:
         return await self._got
+
+
+# --- Root's fault path -----------------------------------------------------------
+
+
+def _first(machine: Machine, pattern: str, since: Mark | None) -> int:
+    hit = machine.console.search(pattern, since)
+    if hit is None:
+        raise machine.console.fail(f"missing {pattern!r}")
+    return hit.start
+
+
+def assert_fault_event(machine: Machine, child: int, count: int, since: Mark) -> None:
+    """An injected fault reached Root and caused restart `count`, in that order."""
+    inject = _first(machine, rf"ROOT\|fault-inject\|child={child}\b", since)
+    fault = _first(machine, rf"ROOT\|fault\|child={child}(?:\||\r?$)", since)
+    restart = _first(machine, rf"ROOT\|restart\|child={child}\|count={count}\b", since)
+    if not inject < fault < restart:
+        raise machine.console.fail(f"child {child}: injection, fault and restart out of order")
+
+
+def assert_fault_sequence(machine: Machine, child: int, count: int) -> None:
+    """The nth injection and the nth genuine fault both precede restart n."""
+    injections = machine.console.findall(rf"ROOT\|fault-inject\|child={child}\b")
+    faults = machine.console.findall(rf"ROOT\|fault\|child={child}(?:\||\r?$)")
+    restart = _first(machine, rf"ROOT\|restart\|child={child}\|count={count}\b", None)
+    if len(injections) < count or len(faults) < count:
+        raise machine.console.fail(
+            f"child {child}: {len(injections)} injections, {len(faults)} faults, want {count}"
+        )
+    if not injections[count - 1].start < faults[count - 1].start < restart:
+        raise machine.console.fail(f"child {child}: fault {count} out of order")
+
+
+# --- guest to host TCP -----------------------------------------------------------
+
+
+async def ping(machine: Machine, tag: str, port: int) -> None:
+    """The guest dials the host at `port` and both ends must see the tag."""
+    expected = tag.upper().encode()
+    try:
+        async with Listener(port, len(expected)) as listener:
+            mark = machine.console.mark()
+            await machine.console.send(f"chryso_net:ping('{tag}', {port}).")
+            got = await listener.received()
+        if got != expected:
+            raise machine.console.fail(f"{tag}: host received {got!r}")
+        await machine.console.wait(rf"NET_OK\|{tag.upper()}\b", since=mark)
+    except AssertionError:
+        await postmortem(machine, tag, port)
+        raise
+
+
+async def postmortem(machine: Machine, tag: str, port: int) -> None:
+    """Ask for a second, unrelated connection to see whether transmit still works.
+
+    A prompt refusal means a SYN went out and a RST came back, so only the
+    stuck connection was lost. Silence means the path itself is wedged. This
+    is a diagnostic and never raises.
+    """
+    again = f"{tag}_again"
+    with contextlib.suppress(AssertionError, TimeoutError, OSError):
+        async with asyncio.timeout(30):
+            mark = machine.console.mark()
+            await machine.console.send(f"chryso_net:ping('{again}', {port + 100}).")
+            await machine.console.wait(rf"NET_(?:OK|ERR)\|{again.upper()}", since=mark)

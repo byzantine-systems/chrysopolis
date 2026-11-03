@@ -112,6 +112,7 @@
       }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
         testbed-boot = group "boot";
+        testbed-restart = group "restart";
       };
 
       packages.testbed = python.pkgs.buildPythonPackage {

@@ -139,6 +139,7 @@ jobs:
           - cothread-smoke
           - lifecycle-config-failure-smoke
           - testbed-boot
+          - testbed-restart
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix

@@ -27,6 +27,7 @@ IMAGES = {
         "cothread-probe-image",
         "lifecycle-failure-image",
     ),
+    "testbed-restart": ("restart-image", "budget-decay-image"),
 }
 
 if len(sys.argv) != 2:
