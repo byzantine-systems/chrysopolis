@@ -549,8 +549,8 @@
           '';
         };
 
-      # Package review tooling can discover grouped checks through
-      # passthru.tests. This metadata does not change an image's build inputs.
+      # passthru.tests names the testbed groups that boot each image. This
+      # metadata does not change an image's build inputs.
       withImageTests =
         image: names:
         image.overrideAttrs (old: {
@@ -663,7 +663,7 @@
               # modules/beam.nix). Nothing ever starts this application: ERTS
               # boots -mode embedded and start_clean's path covers only kernel
               # and stdlib, so these beams are inert unless a test script asks
-              # for them by name (see tests.nix's loader preamble). They ride
+              # for them by name (load_test_modules in tools/testbed). They ride
               # the one shared disk rather than a test-only variant because,
               # unlike the debug-restart channels and crasher PD that
               # production-sdf-gate keeps out of the shipped topology, bytecode
@@ -716,7 +716,7 @@
         default = withImageTests (mkSel4Image {
           imgName = "sel4-beam-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_server.elf";
-        }) [ "socket-smoke" ];
+        }) [ "testbed-boot" ];
 
         # ERTS-linked image: the same PD topology with liberts.a linked in,
         # so beam_server's init() hands off to erl_start.
@@ -727,10 +727,8 @@
               beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
             })
             [
-              "boot-shell-tcp"
-              "orch-status-smoke"
-              "rng-smoke"
-              "beam-restart-smoke"
+              "testbed-boot"
+              "testbed-orch"
             ];
 
         # The ERTS test topology with the spec commit fixture enabled: the
@@ -741,7 +739,7 @@
           imgName = "sel4-beam-spec-commit-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
           specFixture = true;
-        }) [ "orch-spec-smoke" ];
+        }) [ "testbed-orch" ];
 
         # The ERTS test topology with the command fixture enabled: before ERTS
         # starts, the BEAM sends Root every rejection class, one timer restart,
@@ -751,7 +749,7 @@
           imgName = "sel4-beam-command-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
           commandFixture = true;
-        }) [ "orch-command-smoke" ];
+        }) [ "testbed-orch" ];
 
         # The ERTS test topology with the wake-path trace built in. For
         # debugging the cothread and poll paths; see runtime_trace.h.
@@ -766,7 +764,7 @@
         cothread-probe-image = withImageTests (mkSel4Image {
           imgName = "sel4-beam-cothread-probe-image";
           beamElf = "${config.packages.beam-zig-diagnostic}/bin/beam_server.elf";
-        }) [ "cothread-smoke" ];
+        }) [ "testbed-boot" ];
 
         # Test-only image with a correctly sized but invalid required config.
         # The runtime must catch this before following any patched address.
@@ -778,28 +776,19 @@
             section = runtimeAbi.sections.serial_client;
             elf = "beam_server.elf";
           };
-        }) [ "lifecycle-config-failure-smoke" ];
+        }) [ "testbed-boot" ];
 
         # ERTS image plus test-only control channels and the crasher child of
         # root. The restart/fault checks share this image so each boots the same
         # topology while selecting how the target driver goes down.
-        restart-image =
-          withImageTests
-            (mkSel4Image {
-              imgName = "sel4-beam-restart-image";
-              beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
-              sdf = config.packages.sdf-restart;
-              extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
-              withCrasher = true;
-              restartDebug = true;
-            })
-            [
-              "serial-recovery"
-              "timer-recovery"
-              "blk-recovery"
-              "net-recovery"
-              "blk-giveup-smoke"
-            ];
+        restart-image = withImageTests (mkSel4Image {
+          imgName = "sel4-beam-restart-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+          sdf = config.packages.sdf-restart;
+          extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
+          withCrasher = true;
+          restartDebug = true;
+        }) [ "testbed-restart" ];
 
         # Same restart SDF, but Root selects a short test-only fault window.
         # The normal root.elf remains the sole Root in shipped images.
@@ -810,14 +799,14 @@
           restartDebug = true;
           withFallbackPeer = true;
           specFixture = true;
-        }) [ "orch-fallback-smoke" ];
+        }) [ "testbed-orch" ];
 
         fallback-nomap-image = withImageTests (mkSel4Image {
           imgName = "sel4-beam-fallback-nomap-image";
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
           sdf = config.packages.sdf-nomap;
           restartDebug = true;
-        }) [ "orch-fallback-smoke" ];
+        }) [ "testbed-orch" ];
 
         budget-decay-image = withImageTests (mkSel4Image {
           imgName = "sel4-beam-budget-decay-image";
@@ -827,7 +816,7 @@
           extraElfs = [ "${config.packages.beam-zig}/bin/crasher.elf" ];
           withCrasher = true;
           restartDebug = true;
-        }) [ "budget-decay-smoke" ];
+        }) [ "testbed-restart" ];
       };
     };
 }

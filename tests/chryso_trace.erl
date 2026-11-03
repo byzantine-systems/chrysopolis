@@ -5,9 +5,12 @@ Shell access to `/dev/chrysotrace`, the wake-path trace built only into
 every call returns `{error, enoent}`.
 
 `arm/0` clears and starts the trace, `stop/0` freezes it, and `dump/1`
-prints one `TRACE|<TAG>|...` line per record, with time in microseconds
-since the first record, then `TRACE|<TAG>|done|records=N|dropped=D`.
+logs one `TRACE|<TAG>|...` debug event per record, with time in
+microseconds since the first record, then a `TRACE|<TAG>|done|records=N|dropped=D`
+notice.
 """.
+
+-include_lib("kernel/include/logger.hrl").
 
 -export([arm/0, stop/0, dump/1]).
 
@@ -22,12 +25,12 @@ since the first record, then `TRACE|<TAG>|done|records=N|dropped=D`.
 arm() ->
     control(<<"1">>).
 
--doc "Stop recording; the records stay readable.".
+-doc "Stop recording. The records stay readable.".
 -spec stop() -> ok | {error, term()}.
 stop() ->
     control(<<"0">>).
 
--doc "Print every record, decoded, under the upper-cased `Tag`.".
+-doc "Log every record, decoded, under the upper-cased `Tag`.".
 -spec dump(atom()) -> ok | {error, term()}.
 dump(Tag) ->
     Name = chryso_test:tag(Tag),
@@ -40,8 +43,8 @@ dump(Tag) ->
                 end,
             lists:foreach(
                 fun({Ticks, Event, Cothread, A, B}) ->
-                    io:format(
-                        "TRACE|~s|us=~b|ev=~s|co=~b|a=~b|b=~b~n",
+                    ?LOG_DEBUG(
+                        "TRACE|~s|us=~b|ev=~s|co=~b|a=~b|b=~b",
                         [
                             Name,
                             (Ticks - Start) * 1000000 div max(1, Freq),
@@ -54,7 +57,7 @@ dump(Tag) ->
                 end,
                 Records
             ),
-            io:format("TRACE|~s|done|records=~b|dropped=~b~n", [Name, length(Records), Dropped]);
+            ?LOG_NOTICE("TRACE|~s|done|records=~b|dropped=~b", [Name, length(Records), Dropped]);
         {error, _} = Error ->
             Error
     end.

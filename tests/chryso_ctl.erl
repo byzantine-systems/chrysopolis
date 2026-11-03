@@ -5,21 +5,19 @@ Probes for Root's BEAM devices, `/dev/chrysostat` and `/dev/chrysoctl`
 
 Records are built and read through the generated `orchestrator_abi.hrl`
 offsets, never a hand-written layout, so an ABI change cannot leave these
-probes reading the wrong bytes. Each step prints
-`<PREFIX>|<step>|<result>|ok` or `...|unexpected`, then
-`<PREFIX>|done|unexpected=N`, which `run_probe` in `tests.nix` asserts on.
-Each probe also ends with one framed run (`chryso_test:emit_run/3`) holding
-the same results as records, which the testbed reads. The plain lines stay
-until the NixOS-driver checks that parse them are removed.
+probes reading the wrong bytes. Each probe prints one framed run
+(`chryso_test:emit_run/3`) holding its results as records, which the
+testbed reads: a `step` record per check with its verdict, then the run's
+verdict frame counting the unexpected ones.
 
 `ctl_script/2` and `latency/3` also audit Root in place. Around the run they
 read Root's SYNC tallies and the status page. They then fold every fault
 injected and every accepted restart through `chryso_root_policy` (the
 shipped model in `apps/chryso_core`) and compare the result with Root's
 rows. Each PPC reply is classified the way Root tallies it and compared with
-Root's counters. The verdict is printed as
-`AUDIT|<TAG>|rows=match|...|tallies=match|gap=G`, where `G` counts ring
-events lost between the two reads. A gap never enters the row comparison,
+Root's counters. The verdict is an `audit` record with `rows=match`,
+`tallies=match` and `gap=G`, where `G` counts ring events lost between the
+two reads. A gap never enters the row comparison,
 which uses only the probe's own inputs.
 """.
 
@@ -61,10 +59,8 @@ stat(Tag, Child) ->
         case read_page() of
             {ok, Page} ->
                 #{incarnation := I, seq := S, count := C} = observe(Page, Child),
-                io:format("CTL_STAT|~s|incarnation=~b|seq=~b|count=~b~n", [Name, I, S, C]),
                 [{incarnation, I}, {seq, S}, {count, C}];
             {error, Reason} ->
-                io:format("CTL_STAT|~s|error=~p~n", [Name, Reason]),
                 [{error, Reason}]
         end,
     chryso_test:emit_run("CTL_STAT." ++ Name, [{stat, Fields}], 0).
@@ -73,17 +69,16 @@ stat(Tag, Child) ->
 -spec stat_errors(atom()) -> ok.
 stat_errors(Tag) ->
     Name = chryso_test:tag(Tag),
-    Prefix = "CTL_STAT_ERR|" ++ Name,
     {ok, Short} = file:open(?STAT, [read, raw, binary]),
-    U1 = step(Prefix, short_read, {error, emsgsize}, file:read(Short, ?PAGE - 1)),
-    U2 = step(Prefix, write_readonly, {error, ebadf}, file:write(Short, <<0>>)),
+    U1 = step(short_read, {error, emsgsize}, file:read(Short, ?PAGE - 1)),
+    U2 = step(write_readonly, {error, ebadf}, file:write(Short, <<0>>)),
     ok = file:close(Short),
     {ok, Once} = file:open(?STAT, [read, raw, binary]),
     {ok, _} = file:read(Once, ?PAGE),
-    U3 = step(Prefix, second_read, eof, file:read(Once, ?PAGE)),
+    U3 = step(second_read, eof, file:read(Once, ?PAGE)),
     ok = file:close(Once),
-    U4 = step(Prefix, open_write, {error, eacces}, file:open(?STAT, [write, raw])),
-    done(Prefix, "CTL_STAT_ERR." ++ Name, [U1, U2, U3, U4], []).
+    U4 = step(open_write, {error, eacces}, file:open(?STAT, [write, raw])),
+    done("CTL_STAT_ERR." ++ Name, [U1, U2, U3, U4], []).
 
 -doc """
 Drive the command device against Root, restarting `Child` once.
@@ -95,14 +90,12 @@ opener cannot see it.
 -spec ctl_script(atom(), non_neg_integer()) -> ok.
 ctl_script(Tag, Child) ->
     Name = chryso_test:tag(Tag),
-    Prefix = "CTL|" ++ Name,
     Window = audit_open(),
     {ok, F} = file:open(?CTL, [read, write, raw, binary]),
-    U1 = step(Prefix, second_open, {error, ebusy}, file:open(?CTL, [read, write, raw, binary])),
-    U2 = step(Prefix, read_idle, {error, enodata}, file:read(F, ?RECORD)),
+    U1 = step(second_open, {error, ebusy}, file:open(?CTL, [read, write, raw, binary])),
+    U2 = step(read_idle, {error, enodata}, file:read(F, ?RECORD)),
     Hello = call(F, command(?CHRYSO_PP_OPCODE_HELLO, [?CHRYSO_ABI_VERSION, 0, 0, 0])),
     U3 = step(
-        Prefix,
         hello,
         {?CHRYSO_CTL_RESULT_OK, ?CHRYSO_ABI_VERSION},
         case Hello of
@@ -110,25 +103,23 @@ ctl_script(Tag, Child) ->
             Other -> Other
         end
     ),
-    U4 = step(Prefix, short_write, {error, emsgsize}, file:write(F, <<0:(8 * (?RECORD - 1))>>)),
+    U4 = step(short_write, {error, emsgsize}, file:write(F, <<0:(8 * (?RECORD - 1))>>)),
     U5 = step(
-        Prefix,
         bad_magic,
         {error, ebadmsg},
         file:write(F, put_bin(command(?CHRYSO_PP_OPCODE_HELLO, [0, 0, 0, 0]), 0, <<"XXXXXXXX">>))
     ),
-    U6 = step(Prefix, bad_opcode, {error, ebadmsg}, file:write(F, command(99, [0, 0, 0, 0]))),
+    U6 = step(bad_opcode, {error, ebadmsg}, file:write(F, command(99, [0, 0, 0, 0]))),
     {ok, Before} = read_page(),
     #{generation := Gen, seq := Seq, count := Count} = observe(Before, Child),
     Stale = call(F, command(?CHRYSO_PP_OPCODE_RESTART_CHILD, [Child, Gen, Seq + 2, Count])),
-    U7 = step(Prefix, stale, ?CHRYSO_CTL_RESULT_STALE, result(Stale)),
+    U7 = step(stale, ?CHRYSO_CTL_RESULT_STALE, result(Stale)),
     {ok, Fresh} = read_page(),
     #{seq := Seq1, count := Count1} = observe(Fresh, Child),
     Restart = command(?CHRYSO_PP_OPCODE_RESTART_CHILD, [Child, Gen, Seq1, Count1]),
     First = call(F, Restart),
     chryso_test:settle_driver(),
     U8 = step(
-        Prefix,
         restart,
         {?CHRYSO_CTL_RESULT_OK, Count1 + 1},
         case First of
@@ -137,17 +128,17 @@ ctl_script(Tag, Child) ->
         end
     ),
     Retry = call(F, Restart),
-    U9 = step(Prefix, retry, ?CHRYSO_CTL_RESULT_ALREADY_DONE, result(Retry)),
+    U9 = step(retry, ?CHRYSO_CTL_RESULT_ALREADY_DONE, result(Retry)),
     ok = file:write(F, command(?CHRYSO_PP_OPCODE_SYNC, [0, 0, 0, 0])),
     ok = file:close(F),
     {ok, G} = file:open(?CTL, [read, write, raw, binary]),
-    U10 = step(Prefix, dropped_reply, {error, enodata}, file:read(G, ?RECORD)),
+    U10 = step(dropped_reply, {error, enodata}, file:read(G, ?RECORD)),
     ok = file:close(G),
     Steps = [Child || result(First) =:= ?CHRYSO_CTL_RESULT_OK],
     Calls = lists:foldl(fun count_call/2, zero(), [Hello, Stale, First, Retry]),
     %% The SYNC whose reply close dropped reached Root. Its class is unknown.
-    Audit = audit(Name, Window, Steps, Calls, 1),
-    done(Prefix, "CTL." ++ Name, [U1, U2, U3, U4, U5, U6, U7, U8, U9, U10], Audit).
+    Audit = audit(Window, Steps, Calls, 1),
+    done("CTL." ++ Name, [U1, U2, U3, U4, U5, U6, U7, U8, U9, U10], Audit).
 
 -doc """
 After a BEAM restart, check that the new BEAM observes Root before it
@@ -160,19 +151,16 @@ reading as absent), a restart carrying the previous BEAM's `OldSeq` is
     ok.
 reconcile(Tag, Child, OldIncarnation, OldSeq, SpecGen) ->
     Name = chryso_test:tag(Tag),
-    Prefix = "CTL_RECONCILE|" ++ Name,
     {ok, Page} = read_page(),
     #{generation := Gen, incarnation := I, count := Count} = observe(Page, Child),
-    U1 = step(Prefix, incarnation_advanced, true, I > OldIncarnation),
+    U1 = step(incarnation_advanced, true, I > OldIncarnation),
     U2 = step(
-        Prefix,
         applied_spec,
         SpecGen,
         field(Page, ?CHRYSO_ROOT_STATUS_HEADER_APPLIED_SPEC_GENERATION_OFFSET, 64)
     ),
     {ok, F} = file:open(?CTL, [read, write, raw, binary]),
     U3 = step(
-        Prefix,
         old_seq,
         ?CHRYSO_CTL_RESULT_STALE,
         result(call(F, command(?CHRYSO_PP_OPCODE_RESTART_CHILD, [Child, Gen, OldSeq, Count])))
@@ -185,9 +173,9 @@ reconcile(Tag, Child, OldIncarnation, OldSeq, SpecGen) ->
             Other -> Other
         end,
     chryso_test:settle_driver(),
-    U4 = step(Prefix, fresh, {?CHRYSO_CTL_RESULT_OK, Count1 + 1}, Restarted),
+    U4 = step(fresh, {?CHRYSO_CTL_RESULT_OK, Count1 + 1}, Restarted),
     ok = file:close(F),
-    done(Prefix, "CTL_RECONCILE." ++ Name, [U1, U2, U3, U4], []).
+    done("CTL_RECONCILE." ++ Name, [U1, U2, U3, U4], []).
 
 -doc """
 Fault each `{Class, Child}` driver once through `/dev/pd-restart` and read
@@ -205,13 +193,12 @@ latency(Tag, Mode, Samples) ->
     Name = chryso_test:tag(Tag),
     Window = audit_open(),
     Flood = start_flood(Mode),
-    Taken = [sample(Name, N, Class, Child) || {N, {Class, Child}} <:- lists:enumerate(Samples)],
+    Taken = [sample(N, Class, Child) || {N, {Class, Child}} <:- lists:enumerate(Samples)],
     Missing = lists:sum([M || {M, _} <:- Taken]),
-    {Calls, Flooded} = stop_flood(Name, Flood),
+    {Calls, Flooded} = stop_flood(Flood),
     %% Every injection reaches Root's fault path, even one whose events the
     %% probe missed, so each is one policy step.
-    Audit = audit(Name, Window, [Child || {_, Child} <:- Samples], Calls, 0),
-    io:format("LAT|~s|done|samples=~b|missing=~b~n", [Name, length(Samples), Missing]),
+    Audit = audit(Window, [Child || {_, Child} <:- Samples], Calls, 0),
     Done = {done, [{samples, length(Samples)}, {missing, Missing}]},
     chryso_test:emit_run(
         "LAT." ++ Name, [R || {_, R} <:- Taken] ++ Flooded ++ Audit ++ [Done], Missing
@@ -231,21 +218,18 @@ bench(Tag, N) when is_integer(N), N > 0 ->
         {dirty_cpu, erlang:system_info(dirty_cpu_schedulers_online)},
         {dirty_io, erlang:system_info(dirty_io_schedulers)}
     ],
-    io:format(
-        "BENCH|~s|vm|otp=~s|schedulers=~b|dirty_cpu=~b|dirty_io=~b~n", [Name | [V || {_, V} <:- Vm]]
-    ),
     {ok, Random} = file:open("/dev/urandom", [read, raw, binary]),
-    Urandom = time_op(Name, urandom, N, fun() -> {ok, <<_>>} = file:read(Random, 1) end),
+    Urandom = time_op(urandom, N, fun() -> {ok, <<_>>} = file:read(Random, 1) end),
     ok = file:close(Random),
-    Stat = time_op(Name, stat, N, fun() -> {ok, _} = read_page() end),
+    Stat = time_op(stat, N, fun() -> {ok, _} = read_page() end),
     {ok, F} = file:open(?CTL, [read, write, raw, binary]),
     Sync = command(?CHRYSO_PP_OPCODE_SYNC, [0, 0, 0, 0]),
-    Synced = time_op(Name, sync, N, fun() -> {ok, _, _} = call(F, Sync) end),
+    Synced = time_op(sync, N, fun() -> {ok, _, _} = call(F, Sync) end),
     ok = file:close(F),
     chryso_test:emit_run("BENCH." ++ Name, [{vm, Vm}, Urandom, Stat, Synced], 0).
 
--spec time_op(string(), atom(), pos_integer(), fun(() -> term())) -> chryso_frame:record().
-time_op(Name, Op, N, Fun) ->
+-spec time_op(atom(), pos_integer(), fun(() -> term())) -> chryso_frame:record().
+time_op(Op, N, Fun) ->
     Start = erlang:monotonic_time(microsecond),
     Samples = lists:sort([time_once(Fun) || _ <- lists:seq(1, N)]),
     Elapsed = max(1, erlang:monotonic_time(microsecond) - Start),
@@ -257,10 +241,6 @@ time_op(Name, Op, N, Fun) ->
         {max_us, lists:last(Samples)},
         {per_s, N * 1000000 div Elapsed}
     ],
-    io:format(
-        "BENCH|~s|op=~s|n=~b|min_us=~b|median_us=~b|max_us=~b|per_s=~b~n",
-        [Name | [V || {_, V} <:- Fields]]
-    ),
     {op, Fields}.
 
 -spec time_once(fun(() -> term())) -> non_neg_integer().
@@ -271,8 +251,8 @@ time_once(Fun) ->
 
 %% One fault and its four timestamps, or 1 and a missing record when Root's
 %% events never showed it.
--spec sample(string(), pos_integer(), atom(), non_neg_integer()) -> outcome().
-sample(Name, N, Class, Child) ->
+-spec sample(pos_integer(), atom(), non_neg_integer()) -> outcome().
+sample(N, Class, Child) ->
     {ok, Before} = read_page(),
     Head = field(Before, ?CHRYSO_ROOT_STATUS_HEADER_EVENT_HEAD_OFFSET, 64),
     ok = chryso_test:fault_pd(Class),
@@ -280,10 +260,6 @@ sample(Name, N, Class, Child) ->
         {ok, Page, #{inject := T0, fault := T1, decided := T2}} ->
             Published = field(Page, ?CHRYSO_ROOT_STATUS_HEADER_NOW_TICKS_OFFSET, 64),
             Freq = field(Page, ?CHRYSO_ROOT_STATUS_HEADER_CNTFRQ_OFFSET, 64),
-            io:format(
-                "LAT|~s|~b|child=~b|inject=~b|fault=~b|decided=~b|published=~b|cntfrq=~b~n",
-                [Name, N, Child, T0, T1, T2, Published, Freq]
-            ),
             %% Let the restarted driver settle before the next fault.
             timer:sleep(200),
             {0,
@@ -297,7 +273,6 @@ sample(Name, N, Class, Child) ->
                     {cntfrq, Freq}
                 ]}};
         {error, Reason} ->
-            io:format("LAT|~s|~b|child=~b|missing=~p~n", [Name, N, Child, Reason]),
             {1, {sample, [{sample, N}, {child, Child}, {missing, Reason}]}}
     end.
 
@@ -386,17 +361,13 @@ flood(F, Ref, Parent, Calls) ->
 
 %% The flood's calls by Root's tally classes and its record. A baseline run
 %% has neither.
--spec stop_flood(string(), none | {pid(), reference()}) -> {tally(), [chryso_frame:record()]}.
-stop_flood(_Name, none) ->
+-spec stop_flood(none | {pid(), reference()}) -> {tally(), [chryso_frame:record()]}.
+stop_flood(none) ->
     {zero(), []};
-stop_flood(Name, {Pid, Ref}) ->
+stop_flood({Pid, Ref}) ->
     Pid ! {stop, Ref},
     receive
         {flooded, Ref, #{limited := Limited} = Calls} ->
-            io:format(
-                "LAT|~s|flood|calls=~b|rate_limited=~b~n",
-                [Name, total(Calls), Limited]
-            ),
             {Calls, [{flood, [{calls, total(Calls)}, {rate_limited, Limited}]}]}
     after 5000 -> error(flood_did_not_stop)
     end.
@@ -416,12 +387,11 @@ audit_open() ->
 %% per policy step the run caused, Calls the run's PPCs by class, and Unknown
 %% the PPCs whose reply the run never read.
 -spec audit(
-    string(), {ok, window()} | {error, term()}, [non_neg_integer()], tally(), non_neg_integer()
+    {ok, window()} | {error, term()}, [non_neg_integer()], tally(), non_neg_integer()
 ) -> [chryso_frame:record()].
-audit(Name, {error, Reason}, _Steps, _Calls, _Unknown) ->
-    io:format("AUDIT|~s|error=~0p~n", [Name, {open, Reason}]),
+audit({error, Reason}, _Steps, _Calls, _Unknown) ->
     [{audit, [{error, {open, Reason}}]}];
-audit(Name, {ok, #{page := P0, tallies := T0}}, Steps, Calls, Unknown) ->
+audit({ok, #{page := P0, tallies := T0}}, Steps, Calls, Unknown) ->
     Closed =
         maybe
             {ok, Tallies, Spent} ?= sync_tallies(),
@@ -431,10 +401,6 @@ audit(Name, {ok, #{page := P0, tallies := T0}}, Steps, Calls, Unknown) ->
     case Closed of
         {ok, T1, Own, P1} ->
             Rows = row_mismatches(P0, P1, Steps),
-            [
-                io:format("AUDIT|~s|row|child=~b|model=~0p|root=~0p~n", [Name, C, M, R])
-             || {C, M, R} <:- Rows
-            ],
             Delta = maps:map(fun(K, V) -> V - maps:get(K, T0) end, T1),
             Known = maps:map(fun(K, V) -> V + maps:get(K, Own) end, Calls),
             Fields = [
@@ -446,14 +412,9 @@ audit(Name, {ok, #{page := P0, tallies := T0}}, Steps, Calls, Unknown) ->
                 {tallies, verdict(tallies_agree(Delta, Known, Unknown))},
                 {gap, gap(P0, P1)}
             ],
-            io:format(
-                "AUDIT|~s|rows=~s|steps=~b|accepted=~b|limited=~b|rejected=~b|tallies=~s|gap=~b~n",
-                [Name | [V || {_, V} <:- Fields]]
-            ),
             [{row, [{child, C}, {model, M}, {root, R}]} || {C, M, R} <:- Rows] ++
                 [{audit, Fields}];
         {error, Reason} ->
-            io:format("AUDIT|~s|error=~0p~n", [Name, Reason]),
             [{audit, [{error, Reason}]}]
     end.
 
@@ -582,21 +543,19 @@ verdict(false) -> "mismatch".
 
 %% Print one step's verdict and return it as a record, with 1 when it was
 %% unexpected.
--spec step(string(), atom(), term(), term()) -> outcome().
-step(Prefix, Name, Expected, Got) ->
+-spec step(atom(), term(), term()) -> outcome().
+step(Name, Expected, Got) ->
     {Verdict, Unexpected} =
         case Got of
             Expected -> {ok, 0};
             _ -> {unexpected, 1}
         end,
-    io:format("~s|~s|~0p|~s~n", [Prefix, Name, Got, Verdict]),
     {Unexpected, {step, [{name, Name}, {got, Got}, {verdict, Verdict}]}}.
 
-%% The line run_probe in tests.nix waits on, then the framed run.
--spec done(string(), string(), [outcome()], [chryso_frame:record()]) -> ok.
-done(Prefix, Run, Steps, Extra) ->
+%% The probe's framed run, with its unexpected steps counted in the verdict.
+-spec done(string(), [outcome()], [chryso_frame:record()]) -> ok.
+done(Run, Steps, Extra) ->
     Unexpected = lists:sum([U || {U, _} <:- Steps]),
-    io:format("~s|done|unexpected=~b~n", [Prefix, Unexpected]),
     chryso_test:emit_run(Run, [R || {_, R} <:- Steps] ++ Extra, Unexpected).
 
 -spec read_page() -> {ok, page()} | {error, term()}.

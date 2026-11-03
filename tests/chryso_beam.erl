@@ -69,7 +69,7 @@ OTP shutdown and ends in `erlang:halt(0)`, which reaches the exit/exit_group
 handler in `src/pd/beam/compat/syscall/runtime_sys_identity.c` and becomes a
 restart request to root.
 
-Returns `ok` immediately; the shutdown is asynchronous, so the test waits on
+Returns `ok` immediately. The shutdown is asynchronous, so the test waits on
 the console rather than on this call.
 """.
 -spec stop_vm() -> ok.

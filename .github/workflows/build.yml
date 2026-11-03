@@ -122,22 +122,6 @@ jobs:
       max-parallel: ${{ fromJSON(vars.MAX_PARALLEL_JOBS) }}
       matrix:
         check:
-          - boot-shell-tcp
-          - socket-smoke
-          - rng-smoke
-          - budget-decay-smoke
-          - beam-restart-smoke
-          - orch-status-smoke
-          - orch-spec-smoke
-          - orch-command-smoke
-          - orch-fallback-smoke
-          - serial-recovery
-          - timer-recovery
-          - blk-recovery
-          - net-recovery
-          - blk-giveup-smoke
-          - cothread-smoke
-          - lifecycle-config-failure-smoke
           - testbed-boot
           - testbed-restart
           - testbed-orch

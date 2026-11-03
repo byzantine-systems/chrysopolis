@@ -118,7 +118,8 @@
   #   erts.nix       the cross-compiled ERTS emulator archive (liberts.a)
   #   beam.nix       root build.zig artifacts and Erlang test probes
   #   images.nix     gen-sdf, the FAT disk, the bootable seL4 images
-  #   checks.nix     the QEMU integration tests (tests.nix)
+  #   checks.nix     pure checks: ABI, host tests, topology, baseline
+  #   testbed.nix    the QEMU scenario groups (tools/testbed)
   #   devshell.nix   treefmt + the devenv shell (run-sel4)
   outputs =
     inputs@{

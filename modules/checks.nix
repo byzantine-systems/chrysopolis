@@ -1,11 +1,7 @@
-# Hermetic QEMU integration tests, run by `nix flake check` and CI.
-# NixOS-test-driver based (see tests.nix): each check boots a
-# seL4 image headless under emulation via driver.create_machine and
-# asserts on the serial trace / drives TCP peers from the test
-# script, pinning a phase's exit criterion as an automated gate.
-#
-# Pure (non-QEMU) checks also validate the generated ABI and assert that
-# restart-test affordances stay out of the production topology.
+# Pure checks run by `nix flake check` and CI: the generated ABI, host
+# tests, topology and the phase-zero baseline, including that restart-test
+# affordances stay out of the production topology. The QEMU checks are the
+# testbed groups in modules/testbed.nix.
 {
   perSystem =
     {
@@ -46,41 +42,6 @@
         inherit (pkgs) fetchgit fetchFromGitHub;
         builder = pkgs.beamPackages.buildRebar3;
       };
-      individualVmNames = [
-        "boot-smoke"
-        "shell-smoke"
-        "tcp-smoke"
-        "restart-smoke"
-        "serial-restart-smoke"
-        "serial-fault-smoke"
-        "timer-restart-smoke"
-        "timer-fault-smoke"
-        "blk-restart-smoke"
-        "blk-fault-smoke"
-        "net-restart-smoke"
-        "net-fault-smoke"
-      ];
-      vmTests = import ../tests.nix {
-        inherit pkgs;
-        sel4SystemImage = config.packages.default;
-        sel4TestImage = config.packages.test-image;
-        sel4RestartImage = config.packages.restart-image;
-        sel4BudgetDecayImage = config.packages.budget-decay-image;
-        sel4LifecycleFailureImage = config.packages.lifecycle-failure-image;
-        sel4ThreadProbeImage = config.packages.cothread-probe-image;
-        sel4SpecCommitImage = config.packages.spec-commit-image;
-        sel4CommandImage = config.packages.command-image;
-        sel4FallbackImage = config.packages.fallback-image;
-        sel4FallbackNomapImage = config.packages.fallback-nomap-image;
-        fatDisk = config.packages.disk;
-      };
-      vmScenarioPackages = builtins.listToAttrs (
-        map (name: {
-          name = "vm-scenario-${name}";
-          value = vmTests.${name};
-        }) individualVmNames
-      );
-
       # The behavioral baseline documents every check visible in the final
       # flake output, including treefmt, which is contributed by devshell.nix.
       # Only the attribute names are forced here. Check derivation values are
@@ -204,8 +165,7 @@
           mv "$out/current-a.json" "$out/baseline.json"
           rm "$out/current-b.json"
         '';
-      }
-      // vmScenarioPackages;
+      };
 
       checks = {
         # Dependency direction, explicit first-party source membership,
@@ -588,135 +548,132 @@
         '';
 
       }
-      // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
-        {
-          c23-diagnostic = config.packages.beam-zig-diagnostic;
+      // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux ({
+        c23-diagnostic = config.packages.beam-zig-diagnostic;
 
-          # The trace is built and linked here so its hooks cannot rot, and
-          # shipped ELFs must carry none of its storage. The traced ELF is the
-          # control that proves the symbol test can see it.
-          trace-build = config.packages.trace-image;
-          trace-absent = pkgs.runCommand "chrysopolis-trace-absent" { } ''
-            nm=${chryso.llvm.libllvm}/bin/llvm-nm
-            $nm ${config.packages.beam-zig-trace}/bin/beam_test.elf | grep ' trace_records$' >/dev/null ||
-              { echo "trace-absent: control ELF has no trace_records" >&2; exit 1; }
-            for elf in ${config.packages.beam-zig}/bin/beam_server.elf ${config.packages.beam-zig}/bin/beam_test.elf; do
-              if $nm "$elf" | grep ' trace_records$' >/dev/null; then
-                echo "trace-absent: $elf carries trace storage" >&2
+        # The trace is built and linked here so its hooks cannot rot, and
+        # shipped ELFs must carry none of its storage. The traced ELF is the
+        # control that proves the symbol test can see it.
+        trace-build = config.packages.trace-image;
+        trace-absent = pkgs.runCommand "chrysopolis-trace-absent" { } ''
+          nm=${chryso.llvm.libllvm}/bin/llvm-nm
+          $nm ${config.packages.beam-zig-trace}/bin/beam_test.elf | grep ' trace_records$' >/dev/null ||
+            { echo "trace-absent: control ELF has no trace_records" >&2; exit 1; }
+          for elf in ${config.packages.beam-zig}/bin/beam_server.elf ${config.packages.beam-zig}/bin/beam_test.elf; do
+            if $nm "$elf" | grep ' trace_records$' >/dev/null; then
+              echo "trace-absent: $elf carries trace storage" >&2
+              exit 1
+            fi
+          done
+          touch $out
+        '';
+
+        # Root's restart topology as the Microkit tool actually built it:
+        # which PDs fault to Root, their entry and priority, Root's TCB caps
+        # and the notification caps between Root and its peers, read from
+        # report.txt and cross-checked against the generated SDF and
+        # system-abi.json. Check every assembled image: production SDF users
+        # include the bring-up, ERTS, cothread-probe and config-failure
+        # images; both restart images add the crasher and debug channels;
+        # the fallback image swaps the crasher for the fallback peer, and the
+        # no-map image drops the crasher and both control pages.
+        restart-topology = pkgs.runCommand "chrysopolis-restart-topology" { } ''
+          ${checkTopology "production" config.packages.default config.packages.sdf}
+          ${checkTopology "production" config.packages.test-image config.packages.sdf}
+          ${checkTopology "production" config.packages.cothread-probe-image config.packages.sdf}
+          ${checkTopology "production" config.packages.lifecycle-failure-image config.packages.sdf}
+          ${checkTopology "production" config.packages.spec-commit-image config.packages.sdf}
+          ${checkTopology "production" config.packages.command-image config.packages.sdf}
+          ${checkTopology "restart" config.packages.restart-image config.packages.sdf-restart}
+          ${checkTopology "restart" config.packages.budget-decay-image config.packages.sdf-restart}
+          ${checkTopology "fallback" config.packages.fallback-image config.packages.sdf-fallback}
+          ${checkTopology "nomap" config.packages.fallback-nomap-image config.packages.sdf-nomap}
+          touch $out
+        '';
+
+        # Proves the control-plane half of restart-topology can fail. For each
+        # checker mode, takes that mode's report and SDF, passes them through
+        # the checker untouched (the control), then plants one difference per
+        # case. Production: a wrong or deleted PPC badge, a signaling or PPC
+        # cap in Root's CNode, a drifted fault badge, a one-writer rights flip,
+        # a cache-attribute alias mismatch and a moved control window.
+        # Fallback: the peer given a write map or a PPC cap, and the timer
+        # inject end left on beam_server. Nomap: a control map left in place.
+        # Each planted case must be rejected for its stated reason; a vacuous
+        # mutation aborts the fixture generator.
+        restart-topology-negative = pkgs.runCommand "chrysopolis-restart-topology-negative" { } ''
+          define_of() {
+            awk -v name="$1" '$1 == "#define" && $2 == name { print $3; exit }' \
+              ${chryso.boardDir}/include/microkit.h
+          }
+          base_endpoint=$(define_of BASE_ENDPOINT_CAP)
+          base_notify=$(define_of BASE_OUTPUT_NOTIFICATION_CAP)
+          pp_beam=${toString runtimeAbi.control.pp_channel.beam}
+          pp_root=${toString runtimeAbi.control.pp_channel.root}
+          ppc_badge=$(printf '0x%x' $((0x8000000000000000 | pp_root)))
+          fault_badge=$(printf '0x%x' $((0x4000000000000000 | ${toString runtimeAbi.children.beam})))
+
+          negative() {
+            local mode=$1 report=$2 sdf=$3 fixtures=$TMPDIR/fixtures-$1
+            ${pkgs.python3}/bin/python -I ${../nix/mutate-topology-fixtures.py} \
+              "$report" "$sdf" "$fixtures" \
+              --mode "$mode" \
+              --ppc-slot $((base_endpoint + pp_beam)) \
+              --ppc-badge "$ppc_badge" \
+              --fault-badge "$fault_badge" \
+              --base-notify "$base_notify" \
+              --abi ${../interfaces/generated/system-abi.json}
+            ${pkgs.lib.getExe config.packages.check-restart-topology} \
+              "$fixtures/control/report.txt" "$fixtures/control/system.sdf" \
+              ${chryso.boardDir}/include/microkit.h \
+              ${../interfaces/generated/system-abi.json} "$mode"
+            for case_dir in "$fixtures"/fail-*; do
+              if ${pkgs.lib.getExe config.packages.check-restart-topology} \
+                   "$case_dir/report.txt" "$case_dir/system.sdf" \
+                   ${chryso.boardDir}/include/microkit.h \
+                   ${../interfaces/generated/system-abi.json} "$mode" \
+                   >/dev/null 2>"$TMPDIR/err"; then
+                echo "restart-topology-negative: $mode/$(basename "$case_dir") passed a planted failure" >&2
+                exit 1
+              fi
+              case $mode/$(basename "$case_dir") in
+                production/fail-ppc-badge) expected='PPC badge' ;;
+                production/fail-ppc-cap-removed) expected='does not hold exactly 2 ep_root cap' ;;
+                production/fail-root-signal) expected='signaling cap to beam_server' ;;
+                production/fail-ppc-in-root) expected='carries the PPC badge' ;;
+                production/fail-second-ppc-caller) expected='unauthorized PPC cap to Root' ;;
+                production/fail-fault-badge) expected='no fault-badged ep_root cap' ;;
+                production/fail-status-write | production/fail-spec-write) expected='maps .* with perms' ;;
+                production/fail-alias-attribute) expected='sets a cache attribute' ;;
+                production/fail-vaddr) expected='maps root_status at' ;;
+                fallback/fail-peer-write-map) expected='fallback_peer must map only root_status, read-only' ;;
+                fallback/fail-peer-ppc) expected='fallback_peer holds 2 signaling caps' ;;
+                fallback/fail-timer-inject-on-beam) expected='beam_server still holds the timer fault channel' ;;
+                nomap/fail-nomap-control-map) expected='nomap SDF still declares or maps a control page' ;;
+                *) echo "restart-topology-negative: unexpected fixture $mode/$case_dir" >&2; exit 1 ;;
+              esac
+              if ! grep -Eq "$expected" "$TMPDIR/err"; then
+                echo "restart-topology-negative: $mode/$(basename "$case_dir") failed for the wrong reason:" >&2
+                cat "$TMPDIR/err" >&2
                 exit 1
               fi
             done
-            touch $out
-          '';
+          }
 
-          # Root's restart topology as the Microkit tool actually built it:
-          # which PDs fault to Root, their entry and priority, Root's TCB caps
-          # and the notification caps between Root and its peers, read from
-          # report.txt and cross-checked against the generated SDF and
-          # system-abi.json. Check every assembled image: production SDF users
-          # include the bring-up, ERTS, cothread-probe and config-failure
-          # images; both restart images add the crasher and debug channels;
-          # the fallback image swaps the crasher for the fallback peer, and the
-          # no-map image drops the crasher and both control pages.
-          restart-topology = pkgs.runCommand "chrysopolis-restart-topology" { } ''
-            ${checkTopology "production" config.packages.default config.packages.sdf}
-            ${checkTopology "production" config.packages.test-image config.packages.sdf}
-            ${checkTopology "production" config.packages.cothread-probe-image config.packages.sdf}
-            ${checkTopology "production" config.packages.lifecycle-failure-image config.packages.sdf}
-            ${checkTopology "production" config.packages.spec-commit-image config.packages.sdf}
-            ${checkTopology "production" config.packages.command-image config.packages.sdf}
-            ${checkTopology "restart" config.packages.restart-image config.packages.sdf-restart}
-            ${checkTopology "restart" config.packages.budget-decay-image config.packages.sdf-restart}
-            ${checkTopology "fallback" config.packages.fallback-image config.packages.sdf-fallback}
-            ${checkTopology "nomap" config.packages.fallback-nomap-image config.packages.sdf-nomap}
-            touch $out
-          '';
+          negative production ${config.packages.default}/report.txt ${config.packages.sdf}/system.sdf
+          negative fallback ${config.packages.fallback-image}/report.txt ${config.packages.sdf-fallback}/system.sdf
+          negative nomap ${config.packages.fallback-nomap-image}/report.txt ${config.packages.sdf-nomap}/system.sdf
+          touch $out
+        '';
 
-          # Proves the control-plane half of restart-topology can fail. For each
-          # checker mode, takes that mode's report and SDF, passes them through
-          # the checker untouched (the control), then plants one difference per
-          # case. Production: a wrong or deleted PPC badge, a signaling or PPC
-          # cap in Root's CNode, a drifted fault badge, a one-writer rights flip,
-          # a cache-attribute alias mismatch and a moved control window.
-          # Fallback: the peer given a write map or a PPC cap, and the timer
-          # inject end left on beam_server. Nomap: a control map left in place.
-          # Each planted case must be rejected for its stated reason; a vacuous
-          # mutation aborts the fixture generator.
-          restart-topology-negative = pkgs.runCommand "chrysopolis-restart-topology-negative" { } ''
-            define_of() {
-              awk -v name="$1" '$1 == "#define" && $2 == name { print $3; exit }' \
-                ${chryso.boardDir}/include/microkit.h
-            }
-            base_endpoint=$(define_of BASE_ENDPOINT_CAP)
-            base_notify=$(define_of BASE_OUTPUT_NOTIFICATION_CAP)
-            pp_beam=${toString runtimeAbi.control.pp_channel.beam}
-            pp_root=${toString runtimeAbi.control.pp_channel.root}
-            ppc_badge=$(printf '0x%x' $((0x8000000000000000 | pp_root)))
-            fault_badge=$(printf '0x%x' $((0x4000000000000000 | ${toString runtimeAbi.children.beam})))
-
-            negative() {
-              local mode=$1 report=$2 sdf=$3 fixtures=$TMPDIR/fixtures-$1
-              ${pkgs.python3}/bin/python -I ${../nix/mutate-topology-fixtures.py} \
-                "$report" "$sdf" "$fixtures" \
-                --mode "$mode" \
-                --ppc-slot $((base_endpoint + pp_beam)) \
-                --ppc-badge "$ppc_badge" \
-                --fault-badge "$fault_badge" \
-                --base-notify "$base_notify" \
-                --abi ${../interfaces/generated/system-abi.json}
-              ${pkgs.lib.getExe config.packages.check-restart-topology} \
-                "$fixtures/control/report.txt" "$fixtures/control/system.sdf" \
-                ${chryso.boardDir}/include/microkit.h \
-                ${../interfaces/generated/system-abi.json} "$mode"
-              for case_dir in "$fixtures"/fail-*; do
-                if ${pkgs.lib.getExe config.packages.check-restart-topology} \
-                     "$case_dir/report.txt" "$case_dir/system.sdf" \
-                     ${chryso.boardDir}/include/microkit.h \
-                     ${../interfaces/generated/system-abi.json} "$mode" \
-                     >/dev/null 2>"$TMPDIR/err"; then
-                  echo "restart-topology-negative: $mode/$(basename "$case_dir") passed a planted failure" >&2
-                  exit 1
-                fi
-                case $mode/$(basename "$case_dir") in
-                  production/fail-ppc-badge) expected='PPC badge' ;;
-                  production/fail-ppc-cap-removed) expected='does not hold exactly 2 ep_root cap' ;;
-                  production/fail-root-signal) expected='signaling cap to beam_server' ;;
-                  production/fail-ppc-in-root) expected='carries the PPC badge' ;;
-                  production/fail-second-ppc-caller) expected='unauthorized PPC cap to Root' ;;
-                  production/fail-fault-badge) expected='no fault-badged ep_root cap' ;;
-                  production/fail-status-write | production/fail-spec-write) expected='maps .* with perms' ;;
-                  production/fail-alias-attribute) expected='sets a cache attribute' ;;
-                  production/fail-vaddr) expected='maps root_status at' ;;
-                  fallback/fail-peer-write-map) expected='fallback_peer must map only root_status, read-only' ;;
-                  fallback/fail-peer-ppc) expected='fallback_peer holds 2 signaling caps' ;;
-                  fallback/fail-timer-inject-on-beam) expected='beam_server still holds the timer fault channel' ;;
-                  nomap/fail-nomap-control-map) expected='nomap SDF still declares or maps a control page' ;;
-                  *) echo "restart-topology-negative: unexpected fixture $mode/$case_dir" >&2; exit 1 ;;
-                esac
-                if ! grep -Eq "$expected" "$TMPDIR/err"; then
-                  echo "restart-topology-negative: $mode/$(basename "$case_dir") failed for the wrong reason:" >&2
-                  cat "$TMPDIR/err" >&2
-                  exit 1
-                fi
-              done
-            }
-
-            negative production ${config.packages.default}/report.txt ${config.packages.sdf}/system.sdf
-            negative fallback ${config.packages.fallback-image}/report.txt ${config.packages.sdf-fallback}/system.sdf
-            negative nomap ${config.packages.fallback-nomap-image}/report.txt ${config.packages.sdf-nomap}/system.sdf
-            touch $out
-          '';
-
-          # The checked artifact and behavior reference. The JSON is generated
-          # during the build; its compact fingerprint is updated only after
-          # reviewing changes to the captured facts.
-          phase-zero-baseline = pkgs.runCommand "chrysopolis-phase-zero-baseline" { } ''
-            cd ${config.packages.phase-zero-baseline-current}
-            sha256sum -c ${../baselines/phase-zero/expected.sha256}
-            cp ${config.packages.phase-zero-baseline-current}/baseline.json $out
-          '';
-        }
-        // builtins.removeAttrs vmTests individualVmNames
-      );
+        # The checked artifact and behavior reference. The JSON is generated
+        # during the build; its compact fingerprint is updated only after
+        # reviewing changes to the captured facts.
+        phase-zero-baseline = pkgs.runCommand "chrysopolis-phase-zero-baseline" { } ''
+          cd ${config.packages.phase-zero-baseline-current}
+          sha256sum -c ${../baselines/phase-zero/expected.sha256}
+          cp ${config.packages.phase-zero-baseline-current}/baseline.json $out
+        '';
+      });
     };
 }
