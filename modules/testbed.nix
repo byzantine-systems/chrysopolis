@@ -19,7 +19,10 @@
           ];
         };
         build-system = [ python.pkgs.setuptools ];
-        dependencies = [ python.pkgs.qemu-qmp ];
+        dependencies = [
+          python.pkgs.qemu-qmp
+          python.pkgs.typer
+        ];
         pythonImportsCheck = [ "chryso_testbed" ];
       };
 
@@ -72,6 +75,7 @@
             p.pytest
             p.hypothesis
             p.qemu-qmp
+            p.typer
             p.mypy
           ]))
           pkgs.ruff
