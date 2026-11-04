@@ -133,7 +133,8 @@ Pure and generated-artifact gates include:
 - **`test-modules`** compiles the guest-side probes in `tests/`.
 - **`c23-diagnostic`** compiles first-party C with stricter diagnostics and warnings as errors.
 - **`treefmt`** checks Nix, Gleam, Erlang, C, and Zig formatting.
-- **`phase-zero-baseline`** regenerates normalized SDF, Microkit report, ELF, image, toolchain, host-test, and behavioral-contract facts and checks their fingerprint against [`baselines/phase-zero`](baselines/phase-zero).
+- **`phase-zero-baseline`** regenerates normalized SDF, Microkit report, ELF, image, disk and toolchain facts about the product, with no test facts, and checks their fingerprint against [`baselines/phase-zero`](baselines/phase-zero).
+- **`check-contracts`** requires an entry in `baselines/phase-zero/contracts.json` for every flake check, naming what it protects.
 
 ### Running the BEAM shell
 

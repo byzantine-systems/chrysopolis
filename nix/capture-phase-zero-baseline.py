@@ -1,8 +1,10 @@
 """Capture the behavior-preserving refactor baseline.
 
 The output is a deterministic JSON description of the generated topology,
-Microkit reports, runtime-relevant ELF layout, image sizes, host-test matrix,
-and checked behavior contracts. It deliberately omits timestamps, Nix store
+Microkit reports, runtime-relevant ELF layout, image sizes and the disk's
+product contents. It describes the product only: test payloads on the disk,
+the host-test matrix and the check inventory are left out, so a change to a
+test never moves the fingerprint. It deliberately omits timestamps, Nix store
 prefixes, DWARF, and raw serial logs.
 
 Microkit's report.txt is documented as human-readable rather than stable. The
@@ -16,8 +18,10 @@ import argparse
 import hashlib
 import json
 import re
+import struct
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -43,6 +47,10 @@ PINNED_INPUTS = (
     "zig-overlay",
     "zig2nix",
 )
+# Disk paths only the testbed reads: the probes, the pure model they audit
+# with, and the block-fault read target. Nothing in the shipped boot loads them.
+TEST_PAYLOADS = ("lib/chryso_test/", "lib/chryso_core/", "fault-inflight.bin")
+SECTOR = 512
 STORE_PATH_RE = re.compile(r"/nix/store/[a-z0-9]{32}-[^/\s]+")
 
 
@@ -504,45 +512,6 @@ def parse_elf(readelf: Path, path: Path) -> dict[str, Any]:
     }
 
 
-def parse_host_tests(path: Path) -> dict[str, Any]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        fail(f"cannot read host-test build {path}: {error}")
-    # Suite entries may carry owner/source fields before units after a move.
-    # Require both a named entry and its units declaration so the inventory
-    # still fails closed if the build table's shape changes unexpectedly.
-    suites = re.findall(
-        r'^\s*\.\{\s*\.name\s*=\s*"([^"]+)",[^\n]*\.units\s*=',
-        text,
-        re.MULTILINE,
-    )
-    variants = [
-        {"name": name, "optimize": optimize, "sanitize_c": sanitize}
-        for name, optimize, sanitize in re.findall(
-            r'\.suffix = "([^"]+)", \.optimize = \.([A-Za-z]+), \.sanitize_c = \.([a-z]+)',
-            text,
-        )
-    ]
-    # Zig test roots (the generated-C differential test) run once per variant too.
-    zig_tests = re.findall(
-        r'b\.addTest\(\.\{\s*\.name\s*=\s*b\.fmt\("([a-z0-9_]+)_\{s\}"',
-        text,
-    )
-    if not suites or not variants:
-        fail(f"{path}: could not find host suite and variant declarations")
-    if len(zig_tests) != text.count("b.addTest("):
-        fail(
-            f'{path}: every b.addTest must be named b.fmt("<name>_{{s}}", variant.suffix)'
-        )
-    return {
-        "suites": suites,
-        "zig_tests": zig_tests,
-        "variants": variants,
-        "executions": (len(suites) + len(zig_tests)) * len(variants),
-    }
-
-
 def resolve_lock_inputs(path: Path) -> dict[str, Any]:
     lock = read_json(path)
     try:
@@ -564,26 +533,6 @@ def resolve_lock_inputs(path: Path) -> dict[str, Any]:
     return result
 
 
-def parse_contracts(contracts_path: Path, names_path: Path) -> dict[str, Any]:
-    contracts = read_json(contracts_path)
-    names = read_json(names_path)
-    if not isinstance(contracts, dict) or not isinstance(names, list):
-        fail("check contracts must be an object and check names must be an array")
-    actual = sorted(str(name) for name in names)
-    documented = sorted(contracts)
-    if actual != documented:
-        missing = sorted(set(actual) - set(documented))
-        stale = sorted(set(documented) - set(actual))
-        fail(f"check contract inventory differs: undocumented={missing}, stale={stale}")
-    for name, contract in contracts.items():
-        if not isinstance(contract, dict) or not contract.get("protects"):
-            fail(f"check contract {name} has no protected behavior or artifact")
-    return {
-        "count": len(actual),
-        "contracts": {name: contracts[name] for name in actual},
-    }
-
-
 def file_fact(path: Path, *, include_hash: bool = True) -> dict[str, Any]:
     if not path.is_file():
         fail(f"artifact is not a file: {path}")
@@ -593,13 +542,56 @@ def file_fact(path: Path, *, include_hash: bool = True) -> dict[str, Any]:
     return fact
 
 
+def disk_fact(path: Path, mtools: Path) -> dict[str, Any]:
+    """Hash the MBR and every product file in the FAT partition."""
+    if not path.is_file():
+        fail(f"artifact is not a file: {path}")
+    with path.open("rb") as stream:
+        mbr = stream.read(SECTOR)
+    if len(mbr) != SECTOR or mbr[510:] != b"\x55\xaa":
+        fail(f"{path}: no MBR boot signature")
+    start, sectors = struct.unpack_from("<II", mbr, 446 + 8)
+    if not start or not sectors:
+        fail(f"{path}: partition 1 is empty")
+    files: dict[str, dict[str, Any]] = {}
+    with tempfile.TemporaryDirectory(prefix="disk-") as scratch:
+        root = Path(scratch) / "fat"
+        root.mkdir()
+        try:
+            subprocess.run(
+                [
+                    str(mtools / "mcopy"),
+                    "-s",
+                    "-n",
+                    "-i",
+                    f"{path}@@{start * SECTOR}",
+                    "::/",
+                    str(root),
+                ],
+                check=True,
+                env={"MTOOLS_SKIP_CHECK": "1"},
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            fail(f"cannot extract the FAT partition of {path}: {error}")
+        for file in sorted(root.rglob("*")):
+            name = file.relative_to(root).as_posix()
+            if file.is_file() and not name.startswith(TEST_PAYLOADS):
+                files[name] = file_fact(file)
+    if not files:
+        fail(f"{path}: the FAT partition holds no product files")
+    return {
+        "bytes": path.stat().st_size,
+        "mbr_sha256": hashlib.sha256(mbr).hexdigest(),
+        "partition": {"start_sector": start, "sectors": sectors},
+        "excluded": list(TEST_PAYLOADS),
+        "files": files,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--abi", type=Path, required=True)
     parser.add_argument("--flake-lock", type=Path, required=True)
-    parser.add_argument("--host-build", type=Path, required=True)
-    parser.add_argument("--contracts", type=Path, required=True)
-    parser.add_argument("--check-names", type=Path, required=True)
     parser.add_argument("--production-sdf", type=Path, required=True)
     parser.add_argument("--restart-sdf", type=Path, required=True)
     parser.add_argument("--beam-zig", type=Path, required=True)
@@ -608,6 +600,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--restart-image", type=Path, required=True)
     parser.add_argument("--disk", type=Path, required=True)
     parser.add_argument("--readelf", type=Path, required=True)
+    parser.add_argument("--mtools", type=Path, required=True)
     parser.add_argument("--microkit-version", required=True)
     parser.add_argument("--microkit-board", required=True)
     parser.add_argument("--microkit-config", required=True)
@@ -647,7 +640,7 @@ def main() -> int:
         )
         elf_dir = args.beam_zig / "bin"
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "toolchain": {
                 "microkit": {
                     "version": args.microkit_version,
@@ -660,7 +653,6 @@ def main() -> int:
                 "flake_inputs": resolve_lock_inputs(args.flake_lock),
             },
             "abi": abi,
-            "host_tests": parse_host_tests(args.host_build),
             "generated": generated,
             "capacity": {
                 name: value["capacity"]
@@ -681,7 +673,7 @@ def main() -> int:
                 # preserving every runtime address and behavior. Record image
                 # size here; topology, capability, and ELF layout are compared
                 # structurally above. The FAT disk has no native source paths,
-                # so its byte hash remains useful.
+                # so it is compared file by file, without the test payloads.
                 "production": file_fact(
                     args.production_image / "sel4-beam.img", include_hash=False
                 ),
@@ -691,9 +683,8 @@ def main() -> int:
                 "restart": file_fact(
                     args.restart_image / "sel4-beam.img", include_hash=False
                 ),
-                "disk": file_fact(args.disk),
+                "disk": disk_fact(args.disk, args.mtools),
             },
-            "checks": parse_contracts(args.contracts, args.check_names),
             "normalization": {
                 "excluded": [
                     "Nix store prefixes",
@@ -701,9 +692,10 @@ def main() -> int:
                     "ELF non-allocated sections including DWARF",
                     "ELF segment and whole-image hashes that encode source paths",
                     "raw QEMU serial logs",
+                    "test payloads on the disk, the host-test matrix and the check inventory",
                     "report kernel-object physical addresses",
                 ],
-                "serial_evidence": "required and forbidden marker contracts plus QEMU checks",
+                "serial_evidence": "the testbed groups, outside this fingerprint",
             },
         }
     except (BaselineError, KeyError, TypeError, ValueError) as error:

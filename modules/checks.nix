@@ -42,12 +42,10 @@
         inherit (pkgs) fetchgit fetchFromGitHub;
         builder = pkgs.beamPackages.buildRebar3;
       };
-      # The behavioral baseline documents every check visible in the final
-      # flake output, including treefmt, which is contributed by devshell.nix.
-      # Only the attribute names are forced here. Check derivation values are
-      # not evaluated, avoiding a dependency from the baseline capture back to
-      # the checks whose contracts it inventories.
-      phaseZeroCheckNames = pkgs.writeText "chrysopolis-phase-zero-check-names.json" (
+      # check-contracts holds every check visible in the final flake output,
+      # including treefmt from devshell.nix, to a contract. Only the attribute
+      # names are forced here, so no check depends on the values it lists.
+      checkNames = pkgs.writeText "chrysopolis-check-names.json" (
         builtins.toJSON (
           pkgs.lib.subtractLists [ "abi-stale" "project-structure" ] (builtins.attrNames config.checks)
         )
@@ -57,9 +55,6 @@
         ${pkgs.python3}/bin/python ${../nix/capture-phase-zero-baseline.py} \
           --abi ${../interfaces/generated/system-abi.json} \
           --flake-lock ${../flake.lock} \
-          --host-build ${../tests/host/build.zig} \
-          --contracts ${../baselines/phase-zero/contracts.json} \
-          --check-names ${phaseZeroCheckNames} \
           --production-sdf ${config.packages.sdf} \
           --restart-sdf ${config.packages.sdf-restart} \
           --beam-zig ${config.packages.beam-zig} \
@@ -68,6 +63,7 @@
           --restart-image ${config.packages.restart-image} \
           --disk ${config.packages.disk} \
           --readelf ${chryso.llvm.libllvm}/bin/llvm-readelf \
+          --mtools ${pkgs.mtools}/bin \
           --microkit-version ${chryso.microkitVersion} \
           --microkit-board ${chryso.microkitBoard} \
           --microkit-config ${chryso.microkitConfig} \
@@ -168,6 +164,12 @@
       };
 
       checks = {
+        # One contract per check, each naming what it protects.
+        check-contracts = pkgs.runCommand "chrysopolis-check-contracts" { } ''
+          ${pkgs.python3}/bin/python ${../nix/check-contracts.py} \
+            ${../baselines/phase-zero/contracts.json} ${checkNames} | tee $out
+        '';
+
         # Dependency direction, explicit first-party source membership,
         # public header isolation and the vendored TCP formatting boundary.
         project-structure = pkgs.stdenvNoCC.mkDerivation {
@@ -666,9 +668,9 @@
           touch $out
         '';
 
-        # The checked artifact and behavior reference. The JSON is generated
-        # during the build; its compact fingerprint is updated only after
-        # reviewing changes to the captured facts.
+        # The product's artifact reference, with no test facts in it. The JSON
+        # is generated during the build and its fingerprint is updated only
+        # after reviewing changes to the captured facts.
         phase-zero-baseline = pkgs.runCommand "chrysopolis-phase-zero-baseline" { } ''
           cd ${config.packages.phase-zero-baseline-current}
           sha256sum -c ${../baselines/phase-zero/expected.sha256}

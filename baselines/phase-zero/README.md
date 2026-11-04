@@ -8,11 +8,11 @@ The generated baseline contains normalized facts derived from the pinned flake i
 - Generated production and restart SDF topology, capacity, and config-blob identities.
 - Microkit 2.3.0 TCB, IRQ, and capability facts used by restart supervision.
 - Runtime-relevant ELF segments, allocated sections, and symbols.
-- Boot image sizes and the FAT disk hash.
-- Host test suites and build variants.
-- Every flake check and the artifact or serial behavior it protects.
+- Boot image sizes, and the FAT disk's MBR, partition and the hash of every product file on it.
 
-Raw QEMU transcripts, timestamps, Nix store prefixes, debug sections, kernel-object physical addresses, and native segment hashes are intentionally excluded. Native segments can contain diagnostic source paths, so a source-only move can change their bytes without changing the ELF layout or runtime behavior. `contracts.json` records required and forbidden serial markers instead. The QEMU checks remain responsible for observing those markers on a real boot.
+The fingerprint describes the product only, so changing a test never moves it. The test payloads on the disk (`/lib/chryso_test`, `/lib/chryso_core` and `/fault-inflight.bin`), the host-test matrix and the check inventory are left out. `check-contracts` holds every flake check to an entry in `contracts.json` naming what it protects, and the testbed groups observe the serial behavior on a real boot.
+
+Raw QEMU transcripts, timestamps, Nix store prefixes, debug sections, kernel-object physical addresses, and native segment hashes are intentionally excluded. Native segments can contain diagnostic source paths, so a source-only move can change their bytes without changing the ELF layout or runtime behavior.
 
 ## Check the baseline
 

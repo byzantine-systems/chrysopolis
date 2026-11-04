@@ -50,8 +50,8 @@
   "phase-zero-baseline": {
     "kind": "artifact-comparison",
     "protects": [
-      "reviewed topology and runtime artifact facts match the current milestone",
-      "every current flake check has a documented contract",
+      "reviewed topology, runtime artifact and product disk facts match the current milestone",
+      "test payloads, the host-test matrix and the check inventory stay out of the fingerprint",
       "baseline extraction is deterministic"
     ]
   },
@@ -305,6 +305,12 @@
     ],
     "forbidden_markers": [
       "unexpected PD fault"
+    ]
+  },
+  "check-contracts": {
+    "kind": "pure",
+    "protects": [
+      "every current flake check has a documented contract naming what it protects"
     ]
   }
 }

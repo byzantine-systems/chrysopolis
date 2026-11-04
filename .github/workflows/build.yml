@@ -19,14 +19,18 @@ jobs:
 
   # Cheap, pure gate: no QEMU, so it runs alongside the image build rather than
   # behind it. Asserts the test-only restart affordances (the crasher PD and the
-  # beam_server -> root debug channels) stay out of the production topology.
+  # beam_server -> root debug channels) stay out of the production topology,
+  # and that every flake check has a contract.
   sdf-gate:
     name: "[Nix] Production SDF gate"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
-      - run: nix build .#checks.x86_64-linux.production-sdf-gate --print-build-logs
+      - run: >-
+          nix build --print-build-logs
+          .#checks.x86_64-linux.production-sdf-gate
+          .#checks.x86_64-linux.check-contracts
 
   # The other cheap pure gate: compile tests/*.erl. It is a transitive
   # dependency of .#disk anyway, but named here so an Erlang typo fails in
