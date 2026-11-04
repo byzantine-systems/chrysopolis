@@ -13,10 +13,23 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Final
 
-from chryso_testbed import inject, probes
+from chryso_testbed import inject, probes, rootlog
 from chryso_testbed.blkdebug import EIO, Delay, WriteError
 from chryso_testbed.console import Mark
-from chryso_testbed.faults import Arm, Corrupt, Disarm, Get, Model, Pause, Ping, Put, Step, Unplug
+from chryso_testbed.faults import (
+    Arm,
+    Corrupt,
+    Disarm,
+    Driver,
+    Fault,
+    Get,
+    Model,
+    Pause,
+    Ping,
+    Put,
+    Step,
+    Unplug,
+)
 from chryso_testbed.machine import Machine
 from chryso_testbed.outcomes import Outcome, render
 from chryso_testbed.scenario import Context, registry
@@ -387,6 +400,44 @@ async def blk_iron(ctx: Context) -> None:
             model = Model.start(ctx.abi.driver_budget)
             await inject.check(m, program, model, abi=ctx.abi, observe=record_into(outcomes))
         ctx.record("blk-iron-smoke", outcomes=outcomes)
+
+
+@registry.scenario("root-lineage-smoke", group=GROUP, timeout=900)
+async def root_lineage(ctx: Context) -> None:
+    """A second fault inside a driver's recovery window, for blk and eth: the
+    workload after it gets an outcome the model allows, and Root's event ring
+    records every decision its console printed."""
+    program = (
+        Put(kind="put", file=1, seed=5),
+        Fault(kind="fault", driver="blk", settle=False),
+        Fault(kind="fault", driver="blk"),
+        Get(kind="get", file=1),
+        Fault(kind="fault", driver="eth", settle=False),
+        Ping(kind="ping"),
+    )
+    decisions: list[tuple[Step, Outcome]] = []
+    outcomes: list[str] = []
+
+    def observe(step: Step, seen: Outcome, before: Model) -> None:
+        decisions.append((step, seen))
+        outcomes.append(f"{step.kind}: {render(seen)}")
+
+    async with ctx.boot(IMAGE) as m:
+        await net_ready(ctx, m)
+        async with ctx.step("faults in the window"), asyncio.timeout(400):
+            _, ring = rootlog.read(
+                await probes.run(m, "chryso_ctl:events(start, 0).", "CTL_EVENTS.START")
+            )
+            model = Model.start(ctx.abi.driver_budget)
+            await inject.check(m, program, model, abi=ctx.abi, observe=observe)
+            events, _ = rootlog.read(
+                await probes.run(m, f"chryso_ctl:events(finish, {ring.head}).", "CTL_EVENTS.FINISH")
+            )
+        recoverable: tuple[Driver, ...] = ("blk", "eth")
+        children = {d: ctx.abi.child(d) for d in recoverable}
+        if problems := rootlog.disagreements(decisions, events, children):
+            raise m.console.fail(f"Root's ring disagrees with its console: {problems}")
+        ctx.record("root-lineage-smoke", outcomes=outcomes, events=len(events))
 
 
 @registry.scenario("blk-giveup-smoke", group=GROUP, timeout=1500)

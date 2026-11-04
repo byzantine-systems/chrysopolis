@@ -39,14 +39,21 @@ class DriverRecord:
 
 class DriverLifecycle(_Chart[DriverRecord]):
     """Root's view of one driver: restarted while its lifetime budget lasts,
-    faults and debug restarts alike, then stopped for good. Every later
-    request is ignored."""
+    faults and debug restarts alike, then stopped for good. An unsettled
+    restart leaves it `recovering` until the next step has run."""
 
     running = State(initial=True)
+    recovering = State()
     gone = State()
 
-    restarted = running.to(running, cond="has_budget", on="spend")
-    gave_up = running.to(gone, unless="has_budget")
+    restarted = running.to(running, cond="has_budget", on="spend") | recovering.to(
+        running, cond="has_budget", on="spend"
+    )
+    restarted_unsettled = running.to(recovering, cond="has_budget", on="spend") | recovering.to(
+        recovering, cond="has_budget", on="spend"
+    )
+    gave_up = running.to(gone, unless="has_budget") | recovering.to(gone, unless="has_budget")
+    settled = recovering.to(running)
     ignored = gone.to(gone, internal=True)
 
     def has_budget(self) -> bool:

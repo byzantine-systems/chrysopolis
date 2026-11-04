@@ -33,6 +33,7 @@ from chryso_testbed.lifecycles import (
 from chryso_testbed.outcomes import GaveUp, Outcome, Restarted, Seed, Status
 
 type Driver = Literal["serial", "timer", "blk", "eth"]
+DRIVERS: Final[tuple[Driver, ...]] = ("serial", "timer", "blk", "eth")
 KEPT: Final[frozenset[Driver]] = frozenset({"serial", "timer"})
 FILES: Final = 4
 
@@ -42,17 +43,21 @@ class _Step(BaseModel):
 
 
 class Fault(_Step):
-    """Root resumes the driver at address 0, a genuine fault."""
+    """Root resumes the driver at address 0, a genuine fault. Unsettled, the next step
+    lands while the driver is still recovering."""
 
     kind: Literal["fault"]
     driver: Driver
+    settle: bool = True
 
 
 class Restart(_Step):
-    """Root restarts the healthy driver on request."""
+    """Root restarts the healthy driver on request. Unsettled, the next step
+    lands while the driver is still recovering."""
 
     kind: Literal["restart"]
     driver: Driver
+    settle: bool = True
 
 
 class Unplug(_Step):
@@ -207,13 +212,24 @@ class RootModel:
     def after(self, step: Fault | Restart, outcome: Outcome) -> RootModel:
         match outcome:
             case Restarted():
-                event = "restarted"
+                event = "restarted" if step.settle else "restarted_unsettled"
             case GaveUp():
                 event = "gave_up"
             case _:
                 event = "ignored"
         chart = self.chart(step.driver).evolved(event)
         return replace(self, drivers={**self.drivers, step.driver: chart})
+
+    def recovering(self, driver: Driver) -> bool:
+        return self.chart(driver).at == "recovering"
+
+    def settled(self, drivers: Iterable[Driver]) -> RootModel:
+        """Every driver in `drivers` that was recovering, back to running."""
+        charts = {
+            d: c.evolved("settled") if d in drivers and c.at == "recovering" else c
+            for d, c in self.drivers.items()
+        }
+        return replace(self, drivers=charts)
 
     def key(self) -> tuple[object, ...]:
         return tuple(sorted((d, c.at, c.model.spent) for d, c in self.drivers.items()))
@@ -446,16 +462,34 @@ class Model:
         match step:
             case Fault() | Restart():
                 return self.root.expect(step)
-            case Put() | Get() | Arm() | Disarm() | Corrupt():
+            case Put() | Get():
+                allowed = self.storage.expect(step, up=self.root.up("blk"))
+                # A driver still reconciling may refuse the request.
+                return (allowed | expect(EIO, ERROR)) if self.root.recovering("blk") else allowed
+            case Arm() | Disarm() | Corrupt():
                 return self.storage.expect(step, up=self.root.up("blk"))
-            case Ping() | Unplug() | Pause():
+            case Ping():
+                allowed = self.net.expect(step, up=self.root.up("eth"))
+                return (
+                    (allowed | expect(Status.UNREACHABLE))
+                    if self.root.recovering("eth")
+                    else allowed
+                )
+            case Unplug() | Pause():
                 return self.net.expect(step, up=self.root.up("eth"))
 
     def after(self, step: Step, outcome: Outcome) -> Model:
+        """The step's own effect, then every driver that was recovering before
+        it settles, as the interpreter waits for them after each step. An
+        unsettled request to a recovering driver keeps it recovering."""
+        recovering = {d for d in DRIVERS if self.root.recovering(d)}
+        if isinstance(step, Fault | Restart) and not step.settle:
+            recovering.discard(step.driver)
         match step:
             case Fault() | Restart():
-                return replace(self, root=self.root.after(step, outcome))
+                model = replace(self, root=self.root.after(step, outcome))
             case Put() | Get() | Arm() | Disarm() | Corrupt():
-                return replace(self, storage=self.storage.after(step, outcome))
+                model = replace(self, storage=self.storage.after(step, outcome))
             case Ping() | Unplug() | Pause():
-                return replace(self, net=self.net.after(step, outcome))
+                model = replace(self, net=self.net.after(step, outcome))
+        return replace(model, root=model.root.settled(recovering)) if recovering else model

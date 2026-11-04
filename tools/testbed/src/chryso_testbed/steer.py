@@ -14,6 +14,7 @@ from hypothesis import strategies as st
 
 from chryso_testbed.fatlayout import Region
 from chryso_testbed.faults import (
+    DRIVERS,
     FILES,
     KEPT,
     Arm,
@@ -35,7 +36,6 @@ from chryso_testbed.faults import (
 from chryso_testbed.outcomes import GaveUp, Outcome, Restarted, Seed, Status
 
 MAX_STEPS: Final = 16
-DRIVERS: Final[tuple[Driver, ...]] = ("serial", "timer", "blk", "eth")
 REGIONS: Final[tuple[Region, ...]] = ("data", "fat", "entry")
 # When several outcomes are allowed, look ahead as if things went well.
 PREFERENCE: Final[tuple[Status, ...]] = (
@@ -111,9 +111,10 @@ def _corrupt(model: Model) -> st.SearchStrategy[Step]:
 
 
 def _request(model: Model, drivers: list[Driver]) -> st.SearchStrategy[Step]:
+    driver, settle = st.sampled_from(drivers), st.booleans()
     return st.one_of(
-        st.builds(Fault, kind=st.just("fault"), driver=st.sampled_from(drivers)),
-        st.builds(Restart, kind=st.just("restart"), driver=st.sampled_from(drivers)),
+        st.builds(Fault, kind=st.just("fault"), driver=driver, settle=settle),
+        st.builds(Restart, kind=st.just("restart"), driver=driver, settle=settle),
     )
 
 
@@ -252,12 +253,20 @@ def _workload(model: Model) -> st.SearchStrategy[Step]:
     return st.one_of(_get(model), writes(model))
 
 
-def faults_to(drivers: tuple[Driver, ...]) -> Toward:
+def faults_to(drivers: tuple[Driver, ...], *, settle: bool = True) -> Toward:
     def toward(model: Model) -> st.SearchStrategy[Step]:
         live = [d for d in drivers if model.root.up(d)] or list(drivers)
-        return st.builds(Fault, kind=st.just("fault"), driver=st.sampled_from(live))
+        return st.builds(
+            Fault, kind=st.just("fault"), driver=st.sampled_from(live), settle=st.just(settle)
+        )
 
     return toward
+
+
+def _in_window(model: Model) -> st.SearchStrategy[Step]:
+    """A fault on a driver still recovering, so it lands in the window."""
+    recovering = [d for d in DRIVERS if model.root.recovering(d)]
+    return faults_to(tuple(recovering) or ("blk", "eth"))(model)
 
 
 def _repeat(scenario: Scenario, times: int) -> Scenario:
@@ -279,7 +288,8 @@ SCENARIOS: Final[dict[str, Scenario]] = {
         reach(has_file, writes, 4), then(_write_fault_on_metadata), _repeat(then(_workload), 4)
     ),
     "recover-then-fault": chain(
-        then(faults_to(("blk", "eth"))),
+        then(faults_to(("blk", "eth"), settle=False)),
+        then(_in_window),
         anything(2),
         then(faults_to(("blk", "eth"))),
         anything(2),

@@ -88,17 +88,46 @@ def decision(kind: str, count: str | None, reason: str | None) -> Outcome:
             raise ValueError(f"unreadable Root decision: {kind} {count} {reason}")
 
 
-async def root_decision(m: Machine, driver: Driver, child: int, mark: Mark) -> Outcome:
-    """Root's answer to a request for `child`, and the driver settled after it."""
+async def root_decision(
+    m: Machine, driver: Driver, child: int, mark: Mark, *, settle: bool = True
+) -> Outcome:
+    """Root's answer to a request for `child`, and with `settle` the driver
+    serving again after it."""
     hit = await m.console.wait(
         rf"ROOT\|(restart|debug-restart|giveup|gone)\|child={child}\|"
         r"(?:count=(\d+)|reason=([\w-]+)|ignored=[\w-]+)",
         since=mark,
     )
     kind, count, reason = hit.groups
-    if (settled := SETTLED.get((driver, kind or ""))) is not None:
+    if settle and (settled := SETTLED.get((driver, kind or ""))) is not None:
         await m.console.wait(settled, since=m.console.at(hit.end))
     return decision(kind or "", count, reason)
+
+
+SERVING_TRIES: Final = 20
+
+
+async def serving(m: Machine, driver: Driver, tag: str, ports: Ports) -> bool:
+    """Whether `driver` serves again, shown by a request that succeeds: a
+    module read for blk, a ping for eth. Its own console lines cannot be
+    waited for here, since the next command's echo splices into them."""
+    for attempt in range(SERVING_TRIES):
+        probe = f"{tag}r{attempt}"
+        match driver:
+            case "blk":
+                hit = await probes.call(
+                    m, f"chryso_fs:read_status({probe}, lists).",
+                    rf"BLKGONE_{probe.upper()}\|(ok|error|EXIT)",
+                )  # fmt: skip
+                if hit.groups[0] == "ok":
+                    return True
+            case "eth":
+                if await ping(m, probe, ports.take()) == Status.OK:
+                    return True
+            case _:
+                return True
+        await asyncio.sleep(0.5)
+    return False
 
 
 async def ping(m: Machine, tag: str, port: int) -> Outcome:
@@ -132,7 +161,7 @@ async def perform(m: Machine, step: Step, *, tag: str, abi: Abi, port: int) -> O
             mark = m.console.mark()
             verb = "fault" if isinstance(step, Fault) else "restart"
             await m.console.send(f"chryso_test:{verb}_pd({d}).")
-            return await root_decision(m, d, abi.child(d), mark)
+            return await root_decision(m, d, abi.child(d), mark, settle=step.settle)
         case Unplug(ms=ms):
             async with m.unplugged():
                 await asyncio.sleep(ms / 1000)
@@ -186,10 +215,22 @@ async def check(
     the model after the last step, so the caller can see what the run went
     through (which drivers are gone, say)."""
     ports = Ports()
+    # Drivers left recovering by an unsettled restart, confirmed serving
+    # after the next step.
+    pending: set[Driver] = set()
     for n, step in enumerate(program):
         allowed = model.expect(step)
         async with asyncio.timeout(step_timeout):
             seen = await perform(m, step, tag=f"s{n}", abi=abi, port=ports.take())
+            unsettled: Driver | None = None
+            if isinstance(step, Fault | Restart) and not step.settle:
+                unsettled = step.driver
+            for driver in sorted(pending - {unsettled}):
+                if not await serving(m, driver, f"s{n}{driver}", ports):
+                    log.warning("driver.unconfirmed", driver=driver, n=n)
+                pending.discard(driver)
+            if unsettled is not None and isinstance(seen, Restarted):
+                pending.add(unsettled)
         if observe is not None:
             observe(step, seen, model)
         fields = {"n": n, **step.model_dump(), "outcome": render(seen)}

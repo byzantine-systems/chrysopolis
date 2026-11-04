@@ -30,6 +30,7 @@ from chryso_testbed.blkdebug import PLAN, Expected
 from chryso_testbed.blkdebug import SCHEMA as PLAN_SCHEMA
 from chryso_testbed.fatlayout import Region
 from chryso_testbed.faults import (
+    DRIVERS,
     KEPT,
     PROGRAM,
     STEP,
@@ -151,9 +152,10 @@ net_steps = steps.filter(lambda s: owner(s) == "net")
 def test_steps_of_different_components_commute(
     model: Model, pair: list[Step], data: st.DataObject
 ) -> None:
-    """Only Root's availability crosses components, so a storage step and a
-    network step can run in either order."""
+    """Only Root's availability crosses components, so with no driver
+    recovering a storage step and a network step can run in either order."""
     a, b = pair
+    model = replace(model, root=model.root.settled(DRIVERS))
     seen_a = data.draw(outcome(model.expect(a)))
     seen_b = data.draw(outcome(model.expect(b)))
     assert model.after(b, seen_b).expect(a) == model.expect(a)
@@ -233,6 +235,39 @@ def test_without_the_block_driver_no_data_reads_back(
     assert model.expect(Get(kind="get", file=held_file)).outcomes == {Status.EIO, Status.ERROR}
     if model.storage.file(other).at == "absent":
         assert Status.ENOENT in model.expect(Get(kind="get", file=other))
+
+
+# --- the recovery window -----------------------------------------------------------
+
+recoverable = st.sampled_from(["blk", "eth"])
+
+
+@given(start=states(), driver=recoverable, request=st.sampled_from([Fault, Restart]), then=steps)
+def test_an_unsettled_request_only_widens_the_next_step(
+    start: Model,
+    driver: Literal["blk", "eth"],
+    request: type[Fault] | type[Restart],
+    then: Step,
+) -> None:
+    """Not waiting for the driver adds outcomes to the next step and nothing
+    else: Root spends the same budget, and after that step the two runs are
+    the same model again."""
+    model = replace(start, root=start.root.settled(DRIVERS))
+    kind = "fault" if request is Fault else "restart"
+    settled = request(kind=kind, driver=driver)  # type: ignore[arg-type]
+    unsettled = request(kind=kind, driver=driver, settle=False)  # type: ignore[arg-type]
+    assert model.expect(settled) == model.expect(unsettled)
+    (seen,) = model.expect(settled).outcomes
+    waited, hurried = model.after(settled, seen), model.after(unsettled, seen)
+    assert waited.root.chart(driver).model.spent == hurried.root.chart(driver).model.spent
+    if isinstance(then, Fault | Restart) and then.driver == driver and not then.settle:
+        return
+    assert (
+        waited.expect(then).outcomes <= hurried.expect(then).outcomes
+        or hurried.expect(then).anything
+    )
+    for outcome in sorted(waited.expect(then).outcomes, key=render):
+        assert waited.after(then, outcome).key() == hurried.after(then, outcome).key()
 
 
 # --- storage -------------------------------------------------------------------------
