@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from hypothesis_jsonschema import from_schema
 
+from chryso_testbed.blkdebug import RULES
 from chryso_testbed.console import ScenarioFailure
-from chryso_testbed.machine import Machine, Profile, Tools
+from chryso_testbed.machine import Machine, Profile, Tools, drive
 
 
 def alive(pid: int) -> bool:
@@ -104,3 +109,29 @@ async def _timed(coro: Coroutine[object, object, None]) -> float:
     with pytest.raises(ScenarioFailure, match=r"(?s)status 3 before QMP.*bad option"):
         await coro
     return loop.time() - began
+
+
+paths = st.builds(
+    Path, st.from_regex(r"/[a-z0-9_.-]{1,20}(/[a-z0-9_.-]{1,20}){0,3}", fullmatch=True)
+)
+
+
+@given(rules=from_schema(RULES), overlay=paths, disk=paths)
+@settings(max_examples=200, deadline=None)
+def test_blockdev_puts_the_rules_under_both_layers(
+    rules: list[dict[str, object]], overlay: Path, disk: Path
+) -> None:
+    """The overlay holds the guest's writes over a read-only image, and the
+    rules, verbatim, wrap both or neither."""
+    flag, value = drive(Profile(Path("/img"), disk, blkdebug=tuple(rules)), overlay)
+    node = json.loads(value)
+    assert (flag, node["driver"], node["node-name"]) == ("-blockdev", "qcow2", "hd")
+    backing = node["backing"]
+    assert backing["driver"] == "raw"
+    for layer, path, readonly in ((node["file"], overlay, False), (backing["file"], disk, True)):
+        image = layer["image"] if rules else layer
+        assert layer.get("inject-error", []) == rules
+        assert (layer["driver"] == "blkdebug") == bool(rules)
+        assert image == {"driver": "file", "filename": str(path)} | (
+            {"read-only": True} if readonly else {}
+        )

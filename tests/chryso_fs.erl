@@ -19,7 +19,7 @@ These modules are loaded into memory before any test damages the disk (see
 reporting after the device they probe is gone.
 """.
 
--export([read_tagged/2, read_status/2, read_inflight/1, read_during_fault/0]).
+-export([read_tagged/2, read_status/2, read_inflight/1, read_during_fault/0, write_status/1]).
 
 -doc """
 blk-restart-smoke: report the size read, so a successful round trip is
@@ -84,3 +84,21 @@ read_during_fault() ->
         R = (catch file:read_file("/fault-inflight.bin")),
         chryso_test:emit("FS_INFLIGHT", element(1, R))
     end).
+
+-doc """
+blk-eio-smoke: write a file, sync it and close it, reporting each step's
+result. `file:write_file/2` would hide a failed close, and FatFs only reaches
+the disk on sync or close, so each step is reported on its own.
+""".
+-spec write_status(atom()) -> ok.
+write_status(Tag) ->
+    Outcome =
+        case file:open("/eio-probe.txt", [write, raw, binary]) of
+            {ok, Fd} ->
+                Written = file:write(Fd, <<"chryso">>),
+                Synced = file:sync(Fd),
+                {Written, Synced, file:close(Fd)};
+            {error, _} = Error ->
+                Error
+        end,
+    chryso_test:emit("FS_WRITE_" ++ chryso_test:tag(Tag), Outcome).

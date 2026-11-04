@@ -209,17 +209,34 @@ def test_frames_survive_colour_around_every_byte() -> None:
     assert asyncio.run(scenario()) == 1
 
 
-def test_a_crashed_probe_fails_the_wait_at_once() -> None:
+shell_text = st.text(st.characters(min_codepoint=0x20, max_codepoint=0x7E), max_size=40)
+
+
+@given(prompt=st.none() | st.integers(1, 99_999), message=shell_text)
+@settings(max_examples=100, deadline=None)
+def test_a_crashed_probe_fails_the_wait_at_once(prompt: int | None, message: str) -> None:
+    """A shell exception fails the wait whether or not a prompt precedes it."""
     from chryso_testbed.abi import Abi
     from chryso_testbed.scenario import default_failures
 
     abi = Abi(drivers={}, beam=5, crasher=4, driver_budget=8, exit_fault_base=0)
+    lead = "" if prompt is None else f"{prompt}> "
+    line = f"{lead}** exception {message}\r\n".encode()
 
     async def scenario() -> None:
         console = Console(default_failures(abi))
-        feeder = asyncio.create_task(later(console, b"** exception error: {reserved_key,n}\r\n"))
+        feeder = asyncio.create_task(later(console, line))
         await console.await_run("LAT.FB_BASE", since=Mark(0, 0))
         await feeder
 
-    with pytest.raises(ScenarioFailure, match=r"failure '\*\* exception "):
-        asyncio.run(asyncio.wait_for(scenario(), 5))
+    with pytest.raises(ScenarioFailure, match=r"\*\* exception "):
+        asyncio.run(asyncio.wait_for(scenario(), 0.5))
+
+
+@given(lead=st.from_regex(r"[A-Za-z(][ -~]{0,30}", fullmatch=True), message=shell_text)
+def test_an_echoed_exception_is_not_a_crash(lead: str, message: str) -> None:
+    """Text that only mentions an exception mid-line, such as an echoed
+    command, is not one."""
+    from chryso_testbed.scenario import SHELL_EXCEPTION
+
+    assert re.search(SHELL_EXCEPTION, f"{lead} ** exception {message}") is None

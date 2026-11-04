@@ -73,6 +73,7 @@
           (python.withPackages (p: [
             p.pytest
             p.hypothesis
+            p.hypothesis-jsonschema
             p.qemu-qmp
             p.typer
             p.mypy

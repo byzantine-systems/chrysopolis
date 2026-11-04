@@ -85,7 +85,8 @@ class Step:
 
 MON_FAULT: Final = r"MON\|ERROR"
 # A probe that crashed prints this instead of its result, so waiting on is futile.
-SHELL_EXCEPTION: Final = r"^\*\* exception "
+# The shell may print its next prompt on the same line first.
+SHELL_EXCEPTION: Final = r"^(?:\d+> )?\*\* exception "
 
 
 def default_failures(abi: Abi) -> list[str]:
@@ -121,10 +122,13 @@ class Context:
         *,
         hostfwd: tuple[tuple[int, int], ...] = (),
         failures: Iterable[str] | None = None,
+        blkdebug: tuple[dict[str, object], ...] = (),
     ) -> AsyncIterator[Machine]:
-        """Boot `image` and power it off on exit."""
+        """Boot `image` and power it off on exit. `blkdebug` holds disk fault rules."""
         name = f"{image}-{len(self.machines) + 1}"
-        profile = Profile(self.settings.images[image], self.settings.disk, hostfwd)
+        profile = Profile(
+            self.settings.images[image], self.settings.disk, hostfwd, blkdebug=blkdebug
+        )
         watched = default_failures(self.abi) if failures is None else failures
         async with Machine(
             name, profile, self.workdir / name, self.settings.tools, watched

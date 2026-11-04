@@ -3,7 +3,10 @@
 The flags match the Microkit image's needs: the image is loaded at
 0x70000000, and the drivers expect the disk on virtio-mmio bus 1 and the NIC
 on bus 0. Writes go to a qcow2 overlay over the read-only FAT image, so a
-boot costs no copy. The overlay and QMP socket are scratch, removed on exit.
+boot costs no copy. A profile's `blkdebug` rules go to a blkdebug node under
+both the overlay and the FAT image, so they see every guest data read and
+write (QEMU's blkdebug `inject-error` options, passed through as given). The
+overlay and QMP socket are scratch, removed on exit.
 Only the console logs and QEMU's stderr stay in the work directory.
 
 The testbed listens on the QMP socket and QEMU connects to it, so nothing
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import signal
@@ -49,6 +53,26 @@ class Profile:
     disk: Path
     hostfwd: tuple[tuple[int, int], ...] = ()
     extra: tuple[str, ...] = ()
+    blkdebug: tuple[dict[str, object], ...] = ()
+
+
+def debugged(
+    rules: tuple[dict[str, object], ...], path: Path, **extra: object
+) -> dict[str, object]:
+    image = {"driver": "file", "filename": str(path), **extra}
+    return {"driver": "blkdebug", "inject-error": list(rules), "image": image} if rules else image
+
+
+def drive(profile: Profile, overlay: Path) -> list[str]:
+    """The disk as one -blockdev: qcow2 overlay, raw FAT image as its backing."""
+    rules = profile.blkdebug
+    node = {
+        "driver": "qcow2",
+        "node-name": "hd",
+        "file": debugged(rules, overlay),
+        "backing": {"driver": "raw", "file": debugged(rules, profile.disk, **{"read-only": True})},
+    }
+    return ["-blockdev", json.dumps(node)]
 
 
 def argv(tools: Tools, profile: Profile, disk: Path, qmp: Path) -> list[str]:
@@ -60,7 +84,7 @@ def argv(tools: Tools, profile: Profile, disk: Path, qmp: Path) -> list[str]:
         "-m", "size=2G",
         "-device", f"loader,file={profile.image / 'sel4-beam.img'},addr={LOAD_ADDRESS},cpu-num=0",
         "-global", "virtio-mmio.force-legacy=false",
-        "-drive", f"file={disk},if=none,format=qcow2,id=hd",
+        *drive(profile, disk),
         "-device", "virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1",
         "-device", "virtio-net-device,netdev=net0,bus=virtio-mmio-bus.0",
         "-netdev", netdev,
@@ -123,10 +147,9 @@ class Machine:
     async def start(self) -> None:
         self.workdir.mkdir(parents=True, exist_ok=True)
         disk = self._scratch / "disk.qcow2"
-        await run(
-            self.tools.qemu_img, "create", "-q", "-f", "qcow2",
-            "-b", str(self.profile.disk), "-F", "raw", str(disk),
-        )  # fmt: skip
+        # No backing in the header: -blockdev names it, with any blkdebug node.
+        size = str(self.profile.disk.stat().st_size)
+        await run(self.tools.qemu_img, "create", "-q", "-f", "qcow2", str(disk), size)
         await self.qmp.start_server(str(self.qmp_socket))
         with (self.workdir / "qemu.stderr").open("wb") as stderr:
             self._proc = await asyncio.create_subprocess_exec(

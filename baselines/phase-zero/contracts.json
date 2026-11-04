@@ -215,6 +215,8 @@
       "Root reads the board counter without a timer client",
       "a fault window refills without reducing the lifetime count",
       "the lifetime ceiling stops a repeatedly faulting child",
+      "a plain file write, sync and close leaves the volume readable",
+      "the system boots and reads with every disk read delayed by blkdebug",
       "the recovery scenarios run concurrently in one derivation and budget-decay-smoke runs alone"
     ],
     "required_markers": [
@@ -256,7 +258,10 @@
       "BLKGONE_ALIVE|42",
       "ROOT|clock|freq=",
       "ROOT|restart|child=3|count=3|window=1",
-      "ROOT|giveup|child=3|reason=lifetime-exhausted"
+      "ROOT|giveup|child=3|reason=lifetime-exhausted",
+      "FS_WRITE_PLAIN|",
+      "FS_AFTER_WRITE|",
+      "FS_SLOW|"
     ],
     "forbidden_markers": [
       "unexpected PD fault",
