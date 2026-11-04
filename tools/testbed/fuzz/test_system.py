@@ -37,6 +37,7 @@ from chryso_testbed.faults import (
     Step,
     Unplug,
 )
+from chryso_testbed.ldfi import load_corpus
 from chryso_testbed.machine import Machine, Profile
 from chryso_testbed.outcomes import Outcome, render
 from chryso_testbed.scenario import Settings, default_failures
@@ -69,9 +70,12 @@ class Run:
     program: Program
 
 
-RUNS = st.tuples(PLANS, st.sampled_from(sorted(SCENARIOS))).flatmap(
+STEERED = st.tuples(PLANS, st.sampled_from(sorted(SCENARIOS))).flatmap(
     lambda chosen: _program_for(*chosen)
 )
+# Programs `chryso-testbed ldfi` found failing, replayed every campaign.
+CORPUS = tuple(Run((), "corpus", p) for p in load_corpus(Path(__file__).with_name("corpus.json")))
+RUNS = st.one_of(STEERED, st.sampled_from(CORPUS)) if CORPUS else STEERED
 
 
 def abstract(model: Model) -> tuple[object, ...]:

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Final, Literal
 
-from chryso_testbed.fatlayout import Region
+from chryso_testbed.fatlayout import REGIONS, Region
 from chryso_testbed.faults import (
     Arm,
     Disarm,
@@ -26,7 +26,6 @@ from chryso_testbed.faults import (
     Step,
 )
 from chryso_testbed.outcomes import Outcome, Seed, Status
-from chryso_testbed.steer import REGIONS
 
 # Serial and timer carry every probe, so the run never cuts them.
 PATHS: Final[dict[type[Step], tuple[Driver, ...]]] = {Put: ("blk",), Get: ("blk",), Ping: ("eth",)}

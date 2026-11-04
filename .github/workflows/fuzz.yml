@@ -38,6 +38,9 @@ jobs:
           BLK_FUZZ_EXAMPLES="$EXAMPLES" SYSTEM_FUZZ_EXAMPLES="$EXAMPLES"
           nix run .#testbed-fuzz --
           --hypothesis-profile=nightly --hypothesis-show-statistics --basetemp=fuzz-out
+      - name: Lineage-driven fault injection
+        if: always()
+        run: nix run .#testbed -- --log-format json ldfi --boots 30 --out ldfi-out
       - name: Save the example database
         if: always()
         uses: actions/cache/save@v6
@@ -48,5 +51,7 @@ jobs:
         if: failure()
         with:
           name: fuzz-consoles
-          path: fuzz-out
+          path: |
+            fuzz-out
+            ldfi-out
           retention-days: 14

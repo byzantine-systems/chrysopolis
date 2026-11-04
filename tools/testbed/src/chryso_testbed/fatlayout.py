@@ -21,6 +21,7 @@ FIRST_LBA: Final = 0x1C6
 FAT32_ENTRY: Final = 4
 
 type Region = Literal["data", "fat", "entry"]
+REGIONS: Final[tuple[Region, ...]] = ("data", "fat", "entry")
 
 
 def partition_start(mbr: bytes) -> int:

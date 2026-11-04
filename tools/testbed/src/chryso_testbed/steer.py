@@ -12,7 +12,7 @@ from typing import Final, Literal
 
 from hypothesis import strategies as st
 
-from chryso_testbed.fatlayout import Region
+from chryso_testbed.fatlayout import REGIONS
 from chryso_testbed.faults import (
     DRIVERS,
     FILES,
@@ -36,7 +36,6 @@ from chryso_testbed.faults import (
 from chryso_testbed.outcomes import GaveUp, Outcome, Restarted, Seed, Status
 
 MAX_STEPS: Final = 16
-REGIONS: Final[tuple[Region, ...]] = ("data", "fat", "entry")
 # When several outcomes are allowed, look ahead as if things went well.
 PREFERENCE: Final[tuple[Status, ...]] = (
     Status.OK, Status.PRESENT, Status.DIFFERS, Status.ENOENT, Status.GONE,
