@@ -19,14 +19,18 @@ jobs:
 
   # Cheap, pure gate: no QEMU, so it runs alongside the image build rather than
   # behind it. Asserts the test-only restart affordances (the crasher PD and the
-  # beam_server -> root debug channels) stay out of the production topology.
+  # beam_server -> root debug channels) stay out of the production topology,
+  # and that every flake check has a contract.
   sdf-gate:
     name: "[Nix] Production SDF gate"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
-      - run: nix build .#checks.x86_64-linux.production-sdf-gate --print-build-logs
+      - run: >-
+          nix build --print-build-logs
+          .#checks.x86_64-linux.production-sdf-gate
+          .#checks.x86_64-linux.check-contracts
 
   # The other cheap pure gate: compile tests/*.erl. It is a transitive
   # dependency of .#disk anyway, but named here so an Erlang typo fails in
@@ -117,27 +121,14 @@ jobs:
     needs: image
     runs-on: ubuntu-latest
     strategy:
-      # Let independent smoke tests finish even if one fails.
+      # Let independent groups finish even if one fails.
       fail-fast: false
       max-parallel: ${{ fromJSON(vars.MAX_PARALLEL_JOBS) }}
       matrix:
         check:
-          - boot-shell-tcp
-          - socket-smoke
-          - rng-smoke
-          - budget-decay-smoke
-          - beam-restart-smoke
-          - orch-status-smoke
-          - orch-spec-smoke
-          - orch-command-smoke
-          - orch-fallback-smoke
-          - serial-recovery
-          - timer-recovery
-          - blk-recovery
-          - net-recovery
-          - blk-giveup-smoke
-          - cothread-smoke
-          - lifecycle-config-failure-smoke
+          - testbed-boot
+          - testbed-restart
+          - testbed-orch
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
@@ -148,5 +139,33 @@ jobs:
           name: ci-image-closure
           path: /nix/ci-image-transfer
       - run: bash nix/ci-transfer-images.sh import /nix/ci-image-transfer
-      - run: python3 nix/ci-check-image-store.py ${{ matrix.check }}
-      - run: nix build .#checks.x86_64-linux.${{ matrix.check }} --print-build-logs
+      # The images must come from the transferred closure. A dry run fails
+      # here if any would be built, and its evaluation is reused below.
+      - name: Require the imported images
+        run: |
+          nix build .#checks.x86_64-linux.${{ matrix.check }} --dry-run 2> plan.txt
+          if grep -E 'sel4-beam|chrysopolis-fat' plan.txt; then
+            echo "these images are missing from the transferred closure" >&2
+            exit 1
+          fi
+      - run: nix build .#checks.x86_64-linux.${{ matrix.check }} --print-build-logs --keep-failed
+      # A passing group's reports are its output. A failing one leaves them
+      # in the kept build directory.
+      - name: Collect reports
+        if: always()
+        run: |
+          mkdir -p testbed-reports
+          if [ -e result ]; then
+            cp -rL result/. testbed-reports/
+          else
+            sudo find /nix/var/nix/builds /tmp -maxdepth 3 -type d -name reports \
+              -path "*/build/reports" -exec cp -r {}/. testbed-reports/ \; 2>/dev/null || true
+            sudo chown -R "$USER" testbed-reports
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: testbed-reports-${{ matrix.check }}
+          path: testbed-reports
+          retention-days: 7
+          if-no-files-found: warn

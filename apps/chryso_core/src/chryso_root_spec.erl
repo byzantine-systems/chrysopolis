@@ -5,7 +5,7 @@ Which committed spec Root uses: the semantic half of `root_spec_consume`
 it (`t:page/0`), so byte checks stay in the codec and this module holds only
 the retention rule.
 
-The active bank wins whenever it can be used; the other bank is read only
+The active bank wins whenever it can be used. The other bank is read only
 when the active one is empty or rejected. A bank is used when it is newer
 than the retained generation, or equal with identical content.
 
@@ -15,7 +15,7 @@ Laws, observed through the retained policy:
   retained policy unchanged.
 - **monotone**: the retained generation never decreases (an older bank is
   `regressed`).
-- **idempotence**: consuming the same page twice applies at most once; the
+- **idempotence**: consuming the same page twice applies at most once. The
   second result is never `applied`.
 - **no merge**: an equal generation with different content is `conflict`
   and is never applied.
@@ -54,7 +54,7 @@ sealed generation with its per-child budgets and desired states.
 -doc "What a refresh did.".
 -type outcome() :: absent | applied | unchanged | kept.
 
--doc "A policy Root applied; generation 0 is the compiled-in policy.".
+-doc "A policy Root applied. Generation 0 is the compiled-in policy.".
 -type policy() :: #{
     generation := non_neg_integer(),
     bank := 0 | 1,
@@ -106,7 +106,7 @@ consume({banks, Active, ActiveBank, OtherBank}, #{retained := Retained} = State)
             {applied, other} -> State#{retained := SecondPolicy};
             _ -> State
         end,
-    %% Only the active bank's rejection is reported; a fallback bank
+    %% Only the active bank's rejection is reported. A fallback bank
     %% mid-write is the normal state of a commit in progress.
     {Reason, Gen} =
         case FirstKind of

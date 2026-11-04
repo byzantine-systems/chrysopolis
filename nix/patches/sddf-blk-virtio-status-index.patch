@@ -1,0 +1,25 @@
+--- a/drivers/blk/virtio/block.c
++++ b/drivers/blk/virtio/block.c
+@@ -78,7 +78,10 @@
+         LOG_DRIVER("response header addr: 0x%lx, len: %d\n", hdr_desc.addr, hdr_desc.len);
+ 
+         assert(hdr_desc.len == VIRTIO_BLK_REQ_HDR_SIZE);
+-        struct virtio_blk_req *hdr = &virtio_headers[virtq_idx];
++        // START_CHRYSOPOLIS_MODIFICATION: the device wrote its status into the
++        // header of this request's descriptor chain, not the one at the used-ring slot.
++        struct virtio_blk_req *hdr = &virtio_headers[hdr_used.id];
++        // END_CHRYSOPOLIS_MODIFICATION
+         virtio_blk_print_req(hdr);
+ 
+         uint16_t data_desc_idx = virtq.desc[hdr_used.id].next;
+@@ -201,6 +204,10 @@
+             struct virtio_blk_req *hdr = &virtio_headers[hdr_desc_idx];
+             hdr->type = type;
+             hdr->sector = virtio_block_number;
++            // START_CHRYSOPOLIS_MODIFICATION: a status the device never wrote must not
++            // read as VIRTIO_BLK_S_OK left over from an earlier request.
++            hdr->status = VIRTIO_BLK_S_IOERR;
++            // END_CHRYSOPOLIS_MODIFICATION
+ 
+             virtq.desc[hdr_desc_idx] = (struct virtq_desc) {
+                 .addr = virtio_headers_paddr + (hdr_desc_idx * sizeof(struct virtio_blk_req)),

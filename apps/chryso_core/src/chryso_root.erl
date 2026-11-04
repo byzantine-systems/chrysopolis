@@ -9,7 +9,7 @@ PropEr laws (`prop_root*`), replay of traces from the C units
 (`prop_root_traces`), and in-situ against Root's status rows
 (`chryso_ctl`'s audit, on the guest).
 
-Inputs are faults and framed commands; the spec page arrives as the codec
+Inputs are faults and framed commands. The spec page arrives as the codec
 classifies it (`t:chryso_root_spec:page/0`), read at each refresh. Outputs
 are the decision for a refresh and the reply for a command.
 
@@ -95,7 +95,7 @@ fault(Root, Child, Page, _Now) ->
 
 -doc """
 A PPC command. `Page` is what a refresh would read, used only when the
-command reaches the restart path; pass `none` when no refresh follows.
+command reaches the restart path. Pass `none` when no refresh follows.
 Returns the reply and, for an accepted restart, the decision it caused.
 """.
 -spec command(

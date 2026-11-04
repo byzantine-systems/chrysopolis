@@ -7,10 +7,11 @@ Differential law: for every run in the corpus traced from Root's C units
 codec classified it, so this checks the semantics, not the byte checks.
 
 The corpus is finite, so one case replays all of it and reports every
-divergence. Trace text is matched against a closed vocabulary; nothing read
+divergence. Trace text is matched against a closed vocabulary. Nothing read
 from a file becomes an atom.
 """.
 -include_lib("proper/include/proper.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -export([prop_model_agrees_with_c/0]).
 -compile([nowarn_missing_spec, nowarn_missing_doc]).
@@ -23,7 +24,7 @@ prop_model_agrees_with_c() ->
             Files = corpus(Dir),
             Diverged = [{filename:basename(F), E} || F <- Files, {error, E} <- [replay_safe(F)]],
             ?WHENFAIL(
-                io:format("~b of ~b traces diverged:~n~p~n", [
+                ?LOG_ERROR("~b of ~b traces diverged:~n~p", [
                     length(Diverged), length(Files), Diverged
                 ]),
                 Files =/= [] andalso Diverged =:= []

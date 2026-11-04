@@ -10,6 +10,7 @@ corruption of the active bank, a writer restart that loses its counter), which i
 conflicting banks reachable.
 """.
 -include_lib("proper/include/proper.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -export([
     prop_rejection_identity/0,
@@ -117,14 +118,14 @@ prop_generator_reaches_classes() ->
             Seen = lists:usort(lists:flatmap(fun classes/1, Histories)),
             Required = [absent, applied, unchanged, kept, conflict, regressed, header],
             ?WHENFAIL(
-                io:format("missing classes: ~p~n", [Required -- Seen]),
+                ?LOG_ERROR("missing classes: ~p", [Required -- Seen]),
                 Required -- Seen =:= []
             )
         end
     ).
 
 %% Anchor for the cap law through the spec: an applied entry above
-%% hard_max yields hard_max; an entry of 0 yields the compiled budget.
+%% hard_max yields hard_max. An entry of 0 yields the compiled budget.
 prop_applied_budget_is_capped() ->
     ?FORALL(
         {Entry, Compiled},

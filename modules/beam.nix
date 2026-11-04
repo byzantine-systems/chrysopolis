@@ -199,7 +199,7 @@
         # This derivation exists for the COMPILE GATE as much as for the
         # bytecode. The guest runs ERTS -mode embedded with no compiler
         # application on the disk, so guest-side compilation is not available
-        # and a typo used to surface as a wait_console timeout minutes into a
+        # and a typo would otherwise surface as a testbed timeout minutes into a
         # QEMU boot. Here it is a build error in seconds.
         #
         # rebar3 rather than a bare erlc call so that ONE file describes the

@@ -4,35 +4,14 @@ import json
 import subprocess
 import sys
 
-IMAGES = {
-    "boot-shell-tcp": ("test-image",),
-    "beam-restart-smoke": ("test-image",),
-    "orch-status-smoke": ("test-image",),
-    "orch-spec-smoke": ("spec-commit-image",),
-    "orch-command-smoke": ("command-image",),
-    "orch-fallback-smoke": ("fallback-image", "fallback-nomap-image"),
-    "rng-smoke": ("test-image",),
-    "socket-smoke": ("default",),
-    "serial-recovery": ("restart-image",),
-    "timer-recovery": ("restart-image",),
-    "blk-recovery": ("restart-image",),
-    "net-recovery": ("restart-image",),
-    "blk-giveup-smoke": ("restart-image",),
-    "budget-decay-smoke": ("budget-decay-image",),
-    "cothread-smoke": ("cothread-probe-image",),
-    "lifecycle-config-failure-smoke": ("lifecycle-failure-image",),
-}
+# The testbed groups guard their images with a dry run in the workflow, so
+# only the topology check still needs this script.
+IMAGES = {"restart-topology": ("default", "restart-image", "budget-decay-image")}
 
-if len(sys.argv) != 2:
-    raise SystemExit("usage: ci-check-image-store.py CHECK")
+if len(sys.argv) != 2 or sys.argv[1] not in IMAGES:
+    raise SystemExit(f"usage: ci-check-image-store.py {{{','.join(IMAGES)}}}")
 
-check = sys.argv[1]
-if check == "restart-topology":
-    names = ["default", "restart-image", "budget-decay-image"]
-else:
-    if check not in IMAGES:
-        raise SystemExit(f"unknown QEMU check: {check}")
-    names = ["disk", *IMAGES[check]]
+names = list(IMAGES[sys.argv[1]])
 
 name_list = "[ " + " ".join(json.dumps(name) for name in names) + " ]"
 expression = (
@@ -49,7 +28,8 @@ evaluated = subprocess.run(
         expression,
     ],
     check=True,
-    capture_output=True,
+    # stderr stays on the job log, so a failed eval shows its cause.
+    stdout=subprocess.PIPE,
     text=True,
 )
 for item in json.loads(evaluated.stdout):

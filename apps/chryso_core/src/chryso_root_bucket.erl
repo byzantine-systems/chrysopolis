@@ -2,7 +2,7 @@
 -moduledoc """
 Root's command token bucket (`root_command_init` and `refill_step` in
 `src/pd/root/command.c`). Its refill machine is `running`, then `off` for
-good after an unavailable or backwards clock sample; `off` still spends the
+good after an unavailable or backwards clock sample. `off` still spends the
 tokens already held.
 
 Laws, observed through `take/3` and `tokens/1`:

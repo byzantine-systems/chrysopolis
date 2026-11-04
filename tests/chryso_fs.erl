@@ -6,7 +6,7 @@ Every probe reads a module that is not already loaded, so the read is a
 genuine round trip through fatfs -> blk_virt -> blk_driver rather than a
 cache hit. `code:which/1` only resolves a path string from the code path and
 does no I/O, so it stays cheap and keeps working even once the block device
-has been stopped for good; `file:read_file/1` is the part that actually
+has been stopped for good. `file:read_file/1` is the part that actually
 touches the disk.
 
 Results are reported via `catch` and `element(1, ...)` so that success and
@@ -15,11 +15,11 @@ that could only print success would be unable to tell a failure apart from
 a hang, which is precisely the wedge the give-up path exists to prevent.
 
 These modules are loaded into memory before any test damages the disk (see
-the loader in `tests.nix`), which is what lets them keep reporting after the
-device they probe is gone.
+`load_test_modules` in tools/testbed), which is what lets them keep
+reporting after the device they probe is gone.
 """.
 
--export([read_tagged/2, read_status/2, read_inflight/1, read_during_fault/0]).
+-export([read_tagged/2, read_status/2, read_inflight/1, read_during_fault/0, write_status/1]).
 
 -doc """
 blk-restart-smoke: report the size read, so a successful round trip is
@@ -45,7 +45,7 @@ read_status(Tag, Module) ->
 -doc """
 blk-restart-smoke, scenario 2: start a read and return immediately, so the
 caller can restart the driver while the request is still outstanding. The
-reader must come back with something, ok or an error, and must not hang; a
+reader must come back with something, ok or an error, and must not hang. A
 silent reader here is the wedge the restart protocol exists to prevent.
 """.
 -spec read_inflight(module()) -> pid().
@@ -58,7 +58,7 @@ read_inflight(Module) ->
 -doc """
 blk-fault-smoke: remove the serial-shell delay between starting the client
 read and asking Root to fault blk_driver. The reader wakes a fault worker
-immediately before entering `file:read_file/1`; that worker waits a bounded
+immediately before entering `file:read_file/1`. That worker waits a bounded
 100 ms so the async transfer is established before it writes the test-only
 fault command.
 
@@ -84,3 +84,21 @@ read_during_fault() ->
         R = (catch file:read_file("/fault-inflight.bin")),
         chryso_test:emit("FS_INFLIGHT", element(1, R))
     end).
+
+-doc """
+blk-eio-smoke: write a file, sync it and close it, reporting each step's
+result. `file:write_file/2` would hide a failed close, and FatFs only reaches
+the disk on sync or close, so each step is reported on its own.
+""".
+-spec write_status(atom()) -> ok.
+write_status(Tag) ->
+    Outcome =
+        case file:open("/eio-probe.txt", [write, raw, binary]) of
+            {ok, Fd} ->
+                Written = file:write(Fd, <<"chryso">>),
+                Synced = file:sync(Fd),
+                {Written, Synced, file:close(Fd)};
+            {error, _} = Error ->
+                Error
+        end,
+    chryso_test:emit("FS_WRITE_" ++ chryso_test:tag(Tag), Outcome).

@@ -11,6 +11,8 @@ second each under TCG. They are tagged and space-separated so each is
 unambiguous to the extractor even though they share a line.
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([sample/0]).
 
 -doc """
@@ -28,7 +30,7 @@ sample() ->
     {ok, Fd} = file:open("/dev/urandom", [read, binary, raw]),
     {ok, Urandom} = file:read(Fd, 8),
     ok = file:close(Fd),
-    io:format(
-        "RNG_BYTES|~w RNG_REF|~p RNG_URANDOM|~w~n",
+    ?LOG_NOTICE(
+        "RNG_BYTES|~w RNG_REF|~p RNG_URANDOM|~w",
         [rand:bytes(8), erlang:make_ref(), Urandom]
     ).

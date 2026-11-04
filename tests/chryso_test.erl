@@ -1,36 +1,21 @@
 -module(chryso_test).
 -moduledoc """
-Shared helpers for the QEMU integration tests in tests.nix.
-
-Everything in tests/ used to live inside Python string literals passed to
-machine.send_console(). That put it out of reach of every tool this repo
-already has: erlfmt is wired into treefmt and ELP is in the dev shell, but
-neither can see inside a Python string, so a typo surfaced only as a
-multi-minute wait_console timeout inside a QEMU boot. As real modules the
-code is formatted, linted, and compiled by erlc -Werror at nix build time.
+Shared helpers for the probes the testbed (tools/testbed) types at the
+guest's Eshell. Results are logger events, notices for what the testbed
+reads and errors for failures, and probe runs arrive as frames.
 
 Two properties of the serial console shape every API here.
 
-1. THE CONSOLE ECHOES THE TYPED LINE, and the test driver waits on a regex
-   over the accumulated log, so an echo can satisfy a wait before the
-   command has even run. The inline code dodged this by splitting tags into
-   adjacent Erlang literals ("SERIAL_" "BEFORE|"), which only join once
-   evaluated. That hack is retired here: the caller types a lower-case tag
+1. THE CONSOLE ECHOES THE TYPED LINE, so a pattern that matched the echo
+   would pass before the command ran. The caller types a lower-case tag
    atom and the module supplies the upper-case prefix, so the joined tag
-   exists only in evaluated output and never in the echo. Module source is
-   never echoed, which is why the literals below can be written whole.
+   exists only in evaluated output. A pattern the testbed waits on must
+   never be a substring of the line it types. Exported functions return ok
+   rather than anything tag-shaped for the same reason. eval_check/0 is the
+   one exception, and says why.
 
-   The rule for anything added later: the regex a test waits on must not be
-   a substring of the line it types. A corollary is that exported functions
-   return ok rather than anything tag-shaped, so the Eshell's own result
-   line cannot satisfy a wait either. eval_check/0 is the one deliberate
-   exception, and says why.
-
-2. ESHELL BINDINGS PERSIST FOR THE WHOLE SESSION, so the inline code needed
-   a fresh variable name per call (F1, F2, ..., RBEFORE) or an explicit f()
-   to forget them, otherwise a second `Var = ...` became a match against the
-   first value and badmatched. Function-local variables have no such
-   problem, so both workarounds are gone.
+2. ESHELL BINDINGS PERSIST FOR THE WHOLE SESSION. Function-local variables
+   do not, so calls never collide with an earlier binding.
 
 Everything in tests/ may call kernel, stdlib and the pure modules of
 apps/chryso_core, and nothing else. The FAT disk carries only those, the
@@ -39,10 +24,14 @@ remote call is a plain undef with no autoload to rescue it. The loader below
 loads chryso_core's modules with the probes.
 """.
 
-%% Loader, used once per boot by the tests.nix preamble.
+-include_lib("kernel/include/logger.hrl").
+
+%% Loader, used once per boot by the testbed.
 -export([loaded/1]).
 %% Tag plumbing, shared with the sibling chryso_* modules.
--export([emit/2, tag/1]).
+-export([emit/2, tag/1, emit_run/3]).
+%% Console framing self-check.
+-export([frame_check/1]).
 %% Assertions.
 -export([eval_check/0, alive/1, restart_pd/1, fault_pd/1, settle_driver/0]).
 -export([serial_before/0, serial_after/0, serial_rx/0]).
@@ -55,14 +44,14 @@ loads chryso_core's modules with the probes.
 Load the sibling test modules and report in ONE line whether they all made
 it. Called with chryso_test itself already loaded by hand: something has to
 bootstrap the path, and doing it from the shell keeps the module list in
-tests.nix (generated from the directory listing) as the single source of
-truth.
+the testbed manifest (generated from the directory listing) as the single
+source of truth.
 
 code:load_file/1 rather than code:ensure_loaded/1: the latter returns
 {error,embedded} under -mode embedded and would report every module as
 missing. Reporting failures instead of crashing turns a bad disk or a bad
-path into an immediate, named error rather than a wait_console timeout at
-whatever assertion happens to run first.
+path into an immediate, named error rather than a timeout at whatever
+assertion happens to run first.
 
 The via= field is not decoration. code:load_file/1 resolves through the code
 path, which means code_server has to stat the directory added by
@@ -75,6 +64,9 @@ are still fine.
 """.
 -spec loaded([module()]) -> ok.
 loaded(Mods) ->
+    %% Only debug images load the probes, so their debug events are wanted
+    %% here. A release image never runs this and keeps the default level.
+    ok = logger:set_primary_config(level, debug),
     Results = [{M, load(M)} || M <- Mods],
     case [M || {M, error} <- Results] of
         [] ->
@@ -83,9 +75,9 @@ loaded(Mods) ->
                     true -> "load_binary";
                     false -> "load_file"
                 end,
-            io:format("TEST_MODULES|ok|mods=~p|via=~s~n", [length(Results), Via]);
+            ?LOG_NOTICE("TEST_MODULES|ok|mods=~p|via=~s", [length(Results), Via]);
         Missing ->
-            io:format("TEST_MODULES|missing ~p~n", [Missing])
+            ?LOG_ERROR("TEST_MODULES|missing ~p", [Missing])
     end.
 
 -spec load(module()) -> file | binary | error.
@@ -120,14 +112,42 @@ load_binary(M, [Dir | Dirs]) ->
     end.
 
 -doc """
-Print Tag|Value on one console line. Every assertion in tests/ funnels
-through here so the log format is uniform and greppable. ~p, not ~w: the
-inline code used ~p wherever a term could be an error tuple, and the two are
-identical for the integers and atoms printed here.
+Log Tag|Value as a notice. Every assertion in tests/ funnels through here,
+so the format is uniform and greppable. ~p, not ~w, because a value can be
+an error tuple.
 """.
 -spec emit(string(), term()) -> ok.
 emit(Tag, Value) ->
-    io:format("~s|~p~n", [Tag, Value]).
+    ?LOG_NOTICE("~s|~p", [Tag, Value]).
+
+-doc """
+Log a probe run as frames in one notice, so the handler writes the whole run
+at once and the testbed can tell a whole result from one another writer cut
+into.
+""".
+-spec emit_run(string(), [chryso_frame:record()], non_neg_integer()) -> ok.
+emit_run(Run, Records, Unexpected) ->
+    ?LOG_NOTICE("~ts", [chryso_frame:encode_run(Run, Records, Unexpected)]).
+
+-doc """
+Print a control run `<TAG>.CONTROL`, then `<TAG>.PLANTED` with one CRC digit
+changed. The testbed must accept the first and report the second as damaged,
+which proves framing survives the real console path.
+""".
+-spec frame_check(atom()) -> ok.
+frame_check(Tag) ->
+    Name = tag(Tag),
+    Records = [{check, [{value, 42}, {text, "a|b@c"}]}],
+    emit_run(Name ++ ".CONTROL", Records, 0),
+    Planted = iolist_to_binary(chryso_frame:encode_run(Name ++ ".PLANTED", Records, 0)),
+    {At, Len} = binary:match(Planted, <<"|crc=">>),
+    <<Pre:(At + Len)/binary, Digit, Post/binary>> = Planted,
+    Changed =
+        case Digit of
+            $0 -> $1;
+            _ -> $0
+        end,
+    ?LOG_NOTICE("~ts", [<<Pre/binary, Changed, Post/binary>>]).
 
 -doc """
 Upper-case a lower-case tag atom. This is what keeps the typed line free of
@@ -140,9 +160,9 @@ tag(Atom) ->
 
 -doc """
 shell-smoke: the Eshell evaluates real code. This is the one function that
-returns its value rather than ok, so the shell still prints a bare `2` and
-the original assertion holds unchanged; the tagged line is the stronger
-assertion layered on top, since a bare 2 could come from anywhere in the log.
+returns its value rather than ok, so the shell still prints a bare `2`. The
+tagged line is the stronger assertion, since a bare 2 could come from
+anywhere in the log.
 """.
 -spec eval_check() -> integer().
 eval_check() ->
@@ -192,9 +212,8 @@ request_pd(Request) ->
 -doc """
 Wait for a just-restarted driver to finish its boot lines. Drivers print
 through the kernel debug console under their own budget (eth: 100 us per
-400 us), so a line can span several periods; console output written in
-between lands inside it and breaks both lines' patterns. 100 ms is about
-250 eth periods.
+400 us), so a line can span several periods. Console output written in
+between lands inside it. 100 ms is about 250 eth periods.
 """.
 -spec settle_driver() -> ok.
 settle_driver() ->

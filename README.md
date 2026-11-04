@@ -91,17 +91,21 @@ nix fmt
 ```bash
 # All hermetic QEMU checks
 nix flake check -L
-# ...or one at a time:
-nix build .#checks.x86_64-linux.boot-shell-tcp -L
-# The same grouped test is linked to the image package:
-nix build .#test-image.tests.boot-shell-tcp -L
-# Run an isolated scenario while debugging:
-nix build .#vm-scenario-shell-smoke -L
+# ...or one group at a time:
+nix build .#checks.x86_64-linux.testbed-boot -L
+# The groups that boot an image are linked to its package:
+nix build .#test-image.tests.testbed-boot -L
+# List scenarios, run one on its own, or boot an image by hand:
+nix run .#testbed -- list
+nix run .#testbed -- run -k shell-smoke
+nix run .#testbed -- shell test-image
+# Hypothesis draws disk fault plans, one boot per example:
+BLK_FUZZ_EXAMPLES=20 nix run .#testbed-fuzz
 ```
 
-All QEMU checks gate the build. Compatible scenarios share a QEMU boot in the `boot-shell-tcp`, `serial-recovery`, `timer-recovery`, `blk-recovery`, and `net-recovery` checks. The scenarios merged into these groups remain available as `vm-scenario-<name>` packages for isolated debugging. The remaining checks retain separate boots, including both boots in `rng-smoke`. Host-only checks validate pure runtime logic, ABI values, generated topology, ELF layout, test modules, diagnostics, and formatting.
+All QEMU checks gate the build. The testbed (`tools/testbed`) runs each group's scenarios concurrently in one derivation: `testbed-boot`, `testbed-restart` and `testbed-orch`. Timing-sensitive scenarios (`rng-smoke`, `budget-decay-smoke`, `orch-fallback-smoke`) run alone after the others. The `isolated` scenarios are in no check and run on demand. Profiles can carry blkdebug rules (`tools/testbed/src/chryso_testbed/blkdebug.py`) that delay disk I/O or fail guest writes, and `testbed-fuzz` draws such plans with Hypothesis and shrinks a failure to its smallest plan. Host-only checks validate pure runtime logic, ABI values, generated topology, ELF layout, test modules, diagnostics, and formatting.
 
-Grouped check outputs contain deterministic `*.observations.json` summaries. The serial trace remains in the build log, which `-L` prints during a build and `nix log .#checks.x86_64-linux.boot-shell-tcp` retrieves afterward. Raw serial output includes entropy and clock readings, so writing it into the Nix output makes `--rebuild` report a nondeterministic derivation even when every scenario passes.
+A group's output holds `report.json`, `junit.xml`, each scenario's `observations.json`, and each machine's `console.log` (colour stripped) and `console.raw`.
 
 Core function:
 
@@ -131,7 +135,8 @@ Pure and generated-artifact gates include:
 - **`test-modules`** compiles the guest-side probes in `tests/`.
 - **`c23-diagnostic`** compiles first-party C with stricter diagnostics and warnings as errors.
 - **`treefmt`** checks Nix, Gleam, Erlang, C, and Zig formatting.
-- **`phase-zero-baseline`** regenerates normalized SDF, Microkit report, ELF, image, toolchain, host-test, and behavioral-contract facts and checks their fingerprint against [`baselines/phase-zero`](baselines/phase-zero).
+- **`phase-zero-baseline`** regenerates normalized SDF, Microkit report, ELF, image, disk and toolchain facts about the product, with no test facts, and checks their fingerprint against [`baselines/phase-zero`](baselines/phase-zero).
+- **`check-contracts`** requires an entry in `baselines/phase-zero/contracts.json` for every flake check, naming what it protects.
 
 ### Running the BEAM shell
 

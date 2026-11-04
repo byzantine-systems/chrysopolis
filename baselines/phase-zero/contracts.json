@@ -30,200 +30,14 @@
       "every golden vector's stated verdict equals the Zig reference verdict"
     ]
   },
-  "beam-restart-smoke": {
-    "forbidden_markers": [
-      "BEAM_MARK_AFTER|present"
-    ],
-    "kind": "qemu",
-    "protects": [
-      "ERTS exits reach Root",
-      "beam_server restarts with fresh writable state",
-      "the Erlang shell becomes ready after each restart"
-    ],
-    "required_markers": [
-      "BEAM|exit|code=0|requesting-restart",
-      "ROOT|restart|child=5|count=1",
-      "BEAM|boot|generation=2|bss-counter=1",
-      "BEAM_MARK_AFTER|absent"
-    ]
-  },
   "core-erlang": {
     "kind": "host-test",
     "protects": [
       "apps/chryso_core compiles with warnings, specs and docs as errors and passes Dialyzer and xref",
       "every PropEr law of Root's model holds: policy absorption and monotonicity, spec rejection identity and generation monotonicity, fenced idempotence, bucket bounds and rate, composed noninterference",
       "the Erlang model of Root reproduces every decision and reply in the C units' differential traces",
-      "a fenced intent sent across Erlang distribution has exactly one effect under lost replies and dropped connections"
-    ]
-  },
-  "orch-status-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "BEAM reads a validated Root-owned status snapshot without a PPC",
-      "a BEAM restart observes the updated incarnation and charged child row"
-    ],
-    "required_markers": [
-      "ROOT_STATUS|boot|incarnation=1",
-      "ROOT_STATUS|restart|incarnation=2|count=1"
-    ],
-    "forbidden_markers": [
-      "ROOT_STATUS|invalid-map",
-      "ROOT_STATUS|invalid-page",
-      "ROOT_STATUS|invalid-rows",
-      "ROOT_STATUS|unexpected-journal",
-      "ROOT_STATUS|unexpected-transition",
-      "ROOT_STATUS|torn"
-    ]
-  },
-  "orch-spec-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "Root applies a complete committed spec while a newer commit is half written across a BEAM restart",
-      "Root rejects a conflicting equal generation, keeps its applied budget and gives up where the compiled budget would restart"
-    ],
-    "required_markers": [
-      "SPEC_FIXTURE|open|committed=1|pending=2",
-      "ROOT|spec|applied|generation=0x0000000000000001|bank=1",
-      "SPEC_FIXTURE|applied|generation=1",
-      "SPEC_FIXTURE|conflict-staged",
-      "ROOT|spec|reject|reason=conflict|generation=0x0000000000000001|bank=0",
-      "ROOT|giveup|child=5|reason=budget-exhausted"
-    ],
-    "forbidden_markers": [
-      "SPEC_FIXTURE|unexpected-applied",
-      "SPEC_FIXTURE|writer-refused",
-      "SPEC_FIXTURE|invalid-map",
-      "SPEC_FIXTURE|status-unreadable",
-      "SPEC_FIXTURE|later"
-    ]
-  },
-  "orch-command-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "Root answers every malformed, undeclared, non-driver, slot and stale command with a typed result and no effect",
-      "a lost-reply retry of a completed restart is already_done without a second restart",
-      "the command token bucket reaches rate_limited and Root's tallies match the caller's"
-    ],
-    "required_markers": [
-      "CMD_FIXTURE|restart|result=1|ok",
-      "CMD_FIXTURE|retry|result=8|ok",
-      "CMD_FIXTURE|flood|result=4|ok",
-      "ROOT|ctl-restart|child=1|count=1",
-      "CMD_FIXTURE|done"
-    ],
-    "forbidden_markers": [
-      "|unexpected",
-      "CMD_FIXTURE|invalid-map",
-      "CMD_FIXTURE|status-unreadable",
-      "CMD_FIXTURE|later"
-    ]
-  },
-  "orch-fallback-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "a driver fault is decided within the recorded bound while the BEAM floods Root with commands",
-      "a restarted BEAM observes its committed spec and the current fence before commanding, and a conflicting bank leaves driver policy intact",
-      "with the BEAM gone Root still faults and restarts the timer for the fallback peer",
-      "with no status or spec page the compiled driver budget decides exactly"
-    ],
-    "required_markers": [
-      "LAT|FB_BASE|done|samples=21|missing=0",
-      "LAT|FB_FLOOD|done|samples=21|missing=0",
-      "CTL_RECONCILE|FB_POST|done|unexpected=0",
-      "ROOT|spec|reject|reason=conflict",
-      "PEER|fallback|timer|count=2",
-      "PEER|done",
-      "CTL_STAT|FB_NOMAP|error=enodev"
-    ],
-    "forbidden_markers": [
-      "|unexpected",
-      "PEER|failed",
-      "PEER|beam-not-gone",
-      "ROOT|reject"
-    ]
-  },
-  "blk-giveup-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "the block-driver lifetime budget is finite",
-      "Root stops a permanently failing child",
-      "blk_virt degrades without wedging",
-      "later requests for a gone child are ignored"
-    ],
-    "required_markers": [
-      "ROOT|giveup|child=2|reason=budget-exhausted",
-      "driver stopped, reconciling outstanding requests",
-      "ROOT|gone|child=2|ignored=fault-inject",
-      "ROOT|gone|child=2|ignored=debug-restart",
-      "BLKGONE_ALIVE|42"
-    ]
-  },
-  "blk-recovery": {
-    "kind": "qemu",
-    "protects": [
-      "a requested healthy block-driver restart is authorized",
-      "idle and in-flight filesystem requests reconcile",
-      "filesystem service remains usable",
-      "a genuine block-driver fault reaches Root",
-      "the virtualiser reconciles idle and in-flight requests",
-      "filesystem service recovers"
-    ],
-    "required_markers": [
-      "PD_RESTART|request|class=blk",
-      "ROOT|debug-restart|child=2",
-      "driver restarted, reconciling",
-      "FS_AFTER_INFLIGHT|",
-      "ROOT|fault|child=2",
-      "ROOT|restart|child=2|count=3",
-      "ROOT|restart|child=2|count=4",
-      "FS_FAULT_AFTER_INFLIGHT|"
-    ]
-  },
-  "boot-shell-tcp": {
-    "kind": "qemu",
-    "protects": [
-      "ERTS starts",
-      "FAT is detected",
-      "the sDDF monotonic clock works",
-      "the Erlang shell becomes ready",
-      "guest Erlang test modules load from FAT",
-      "interactive Eshell input and output work",
-      "guest gen_tcp accepts host connections",
-      "guest gen_tcp connects to a host listener",
-      "TCP payloads survive in both directions"
-    ],
-    "required_markers": [
-      "beam_server up on the LionsOS reference stack.",
-      "monotonic clock via sDDF timer:",
-      "Handing off to ERTS core loop...",
-      "MBR partitioning detected",
-      "Eshell",
-      "TEST_MODULES|",
-      "SHELL_EVAL|2",
-      "LISTENER_UP",
-      "ECHOED",
-      "NET_OK|CHRYSO_PING"
-    ],
-    "forbidden_markers": [
-      "unexpected PD fault",
-      "unexpected beam_server fault"
-    ]
-  },
-  "budget-decay-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "Root reads the board counter without a timer client",
-      "a fault window refills without reducing the lifetime count",
-      "the lifetime ceiling stops a repeatedly faulting child"
-    ],
-    "required_markers": [
-      "ROOT|clock|freq=",
-      "ROOT|restart|child=3|count=3|window=1",
-      "ROOT|giveup|child=3|reason=lifetime-exhausted"
-    ],
-    "forbidden_markers": [
-      "ROOT|clock|unavailable",
-      "ROOT|giveup|child=3|reason=window-exhausted"
+      "a fenced intent sent across Erlang distribution has exactly one effect under lost replies and dropped connections",
+      "the console frame codec keeps its laws: round trip, chunk invariance, soundness under a shuffle with other writers, prefix stability and completeness"
     ]
   },
   "c23-diagnostic": {
@@ -233,58 +47,11 @@
       "tcp.c retains its dedicated diagnostic object boundary"
     ]
   },
-  "cothread-smoke": {
-    "forbidden_markers": [
-      "COTHREAD_PROBE|FAIL"
-    ],
-    "kind": "qemu",
-    "protects": [
-      "pthread compatibility runs over libmicrokitco",
-      "cothread slots and synchronization primitives remain usable"
-    ],
-    "required_markers": [
-      "COTHREAD_PROBE|PASS"
-    ]
-  },
-  "lifecycle-config-failure-smoke": {
-    "forbidden_markers": [
-      "BEAM|boot|",
-      "Microkit event loop live",
-      "ROOT|fault|child=5"
-    ],
-    "kind": "qemu",
-    "protects": [
-      "malformed injected configuration fails before partial initialization",
-      "persistent configuration errors do not consume restart budget"
-    ],
-    "required_markers": [
-      "BEAM|lifecycle|FATAL|stage=config|status=config-serial|code=1"
-    ]
-  },
-  "net-recovery": {
-    "kind": "qemu",
-    "protects": [
-      "a requested healthy network-driver restart is authorized",
-      "network queues are reclaimed",
-      "outbound TCP service recovers",
-      "a genuine network-driver fault reaches Root"
-    ],
-    "required_markers": [
-      "PD_RESTART|request|class=eth",
-      "ROOT|debug-restart|child=3",
-      "ETH|restart|reclaimed|",
-      "NET_OK|",
-      "ROOT|fault|child=3",
-      "ROOT|restart|child=3|count=3",
-      "ROOT|restart|child=3|count=4",
-      "NET_OK|FAULT_AFTER2"
-    ]
-  },
   "phase-zero-baseline": {
     "kind": "artifact-comparison",
     "protects": [
-      "reviewed topology and runtime artifact facts match the current milestone",
-      "every current flake check has a documented contract",
+      "reviewed topology, runtime artifact and product disk facts match the current milestone",
+      "test payloads, the host-test matrix and the check inventory stay out of the fingerprint",
       "baseline extraction is deterministic"
     ]
   },
@@ -319,19 +86,6 @@
       "a nomap control passes, then a surviving control map is rejected"
     ]
   },
-  "rng-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "RNG initialization succeeds",
-      "RNG fingerprints, rand bytes, references, and urandom bytes differ across boots"
-    ],
-    "required_markers": [
-      "RNG|source=",
-      "RNG_BYTES|",
-      "RNG_REF|",
-      "RNG_URANDOM|"
-    ]
-  },
   "runtime-host-tests": {
     "kind": "host-test",
     "protects": [
@@ -341,59 +95,10 @@
       "the wake pipe, trace ring and drain decisions match their transition tables and counter models"
     ]
   },
-  "serial-recovery": {
-    "kind": "qemu",
-    "protects": [
-      "Root catches a deliberately faulting child",
-      "restart counts are monotonic",
-      "Root gives up after the configured budget",
-      "a requested healthy serial-driver restart is authorized",
-      "serial transmit and receive recover",
-      "a genuine serial-driver fault reaches Root"
-    ],
-    "required_markers": [
-      "CRASHER|init|n=",
-      "ROOT|restart|child=4|count=",
-      "ROOT|giveup|child=4|reason=budget-exhausted",
-      "PD_RESTART|request|class=serial",
-      "ROOT|debug-restart|child=0",
-      "SERIAL_AFTER|42",
-      "SERIAL_RX|3",
-      "ROOT|fault|child=0",
-      "ROOT|restart|child=0|count=2"
-    ]
-  },
-  "socket-smoke": {
-    "kind": "qemu",
-    "protects": [
-      "lwIP receives a DHCP lease",
-      "native socket bind, listen, connect, and transfer work before ERTS"
-    ],
-    "required_markers": [
-      "SOCKET_SMOKE|DHCP:",
-      "SOCKET_SMOKE|PASS"
-    ]
-  },
   "test-modules": {
     "kind": "compile",
     "protects": [
       "guest Erlang probes compile with warnings as errors"
-    ]
-  },
-  "timer-recovery": {
-    "kind": "qemu",
-    "protects": [
-      "a requested healthy timer-driver restart is authorized",
-      "monotonic time and delayed sends recover",
-      "a genuine timer-driver fault reaches Root"
-    ],
-    "required_markers": [
-      "PD_RESTART|request|class=timer",
-      "ROOT|debug-restart|child=1",
-      "TIMER_AFTER|",
-      "ROOT|fault|child=1",
-      "ROOT|restart|child=1|count=2",
-      "SLEPT_FAULT_AFTER|"
     ]
   },
   "trace-absent": {
@@ -413,6 +118,204 @@
     "protects": [
       "Nix, Erlang, Gleam, C, and Zig formatting remains reproducible",
       "vendored tcp.c remains outside automatic formatting"
+    ]
+  },
+  "testbed-unit": {
+    "kind": "host-test",
+    "protects": [
+      "the testbed package passes ruff and strict mypy",
+      "the Python frame reader reproduces every Erlang golden vector, whole and at every split point",
+      "a planted CRC change or driver fragment in a frame is refused as damaged",
+      "the fast frame reader equals the bytewise reference on generated logs"
+    ]
+  },
+  "testbed-boot": {
+    "kind": "qemu",
+    "protects": [
+      "ERTS starts",
+      "FAT is detected",
+      "the sDDF monotonic clock works",
+      "the Erlang shell becomes ready",
+      "guest Erlang test modules load from FAT",
+      "interactive Eshell input and output work",
+      "guest gen_tcp accepts host connections",
+      "guest gen_tcp connects to a host listener",
+      "TCP payloads survive in both directions",
+      "lwIP receives a DHCP lease",
+      "native socket bind, listen, connect, and transfer work before ERTS",
+      "pthread compatibility runs over libmicrokitco",
+      "cothread slots and synchronization primitives remain usable",
+      "malformed injected configuration fails before partial initialization",
+      "persistent configuration errors do not consume restart budget",
+      "ERTS exits reach Root",
+      "beam_server restarts with fresh writable state",
+      "the Erlang shell becomes ready after each restart",
+      "RNG initialization succeeds",
+      "RNG fingerprints, rand bytes, references, and urandom bytes differ across boots",
+      "every boot-group scenario runs in one derivation, concurrently except rng-smoke",
+      "a framed probe run is accepted whole and a planted CRC change is refused as damaged"
+    ],
+    "required_markers": [
+      "beam_server up on the LionsOS reference stack.",
+      "monotonic clock via sDDF timer:",
+      "Handing off to ERTS core loop...",
+      "MBR partitioning detected",
+      "Eshell",
+      "TEST_MODULES|",
+      "SHELL_EVAL|2",
+      "LISTENER_UP",
+      "ECHOED",
+      "NET_OK|CHRYSO_PING",
+      "SOCKET_SMOKE|DHCP:",
+      "SOCKET_SMOKE|PASS",
+      "COTHREAD_PROBE|PASS",
+      "BEAM|lifecycle|FATAL|stage=config|status=config-serial|code=1",
+      "BEAM|exit|code=0|requesting-restart",
+      "ROOT|restart|child=5|count=1",
+      "BEAM|boot|generation=2|bss-counter=1",
+      "BEAM_MARK_AFTER|absent",
+      "RNG|source=",
+      "RNG_BYTES|",
+      "RNG_REF|",
+      "RNG_URANDOM|",
+      "@@CHRYSO|FCHECK.CONTROL"
+    ],
+    "forbidden_markers": [
+      "unexpected PD fault",
+      "unexpected beam_server fault",
+      "COTHREAD_PROBE|FAIL"
+    ]
+  },
+  "testbed-restart": {
+    "kind": "qemu",
+    "protects": [
+      "Root catches a deliberately faulting child",
+      "restart counts are monotonic",
+      "Root gives up after the configured budget",
+      "a requested healthy serial-driver restart is authorized",
+      "serial transmit and receive recover",
+      "a genuine serial-driver fault reaches Root",
+      "a requested healthy timer-driver restart is authorized",
+      "monotonic time and delayed sends recover",
+      "a genuine timer-driver fault reaches Root",
+      "a requested healthy block-driver restart is authorized",
+      "idle and in-flight filesystem requests reconcile",
+      "filesystem service remains usable",
+      "a genuine block-driver fault reaches Root",
+      "the virtualiser reconciles idle and in-flight requests",
+      "filesystem service recovers",
+      "a requested healthy network-driver restart is authorized",
+      "network queues are reclaimed",
+      "outbound TCP service recovers",
+      "a genuine network-driver fault reaches Root",
+      "the block-driver lifetime budget is finite",
+      "Root stops a permanently failing child",
+      "blk_virt degrades without wedging",
+      "later requests for a gone child are ignored",
+      "Root reads the board counter without a timer client",
+      "a fault window refills without reducing the lifetime count",
+      "the lifetime ceiling stops a repeatedly faulting child",
+      "a plain file write, sync and close leaves the volume readable",
+      "the system boots and reads with every disk read delayed by blkdebug",
+      "the recovery scenarios run concurrently in one derivation and budget-decay-smoke runs alone"
+    ],
+    "required_markers": [
+      "CRASHER|init|n=",
+      "ROOT|restart|child=4|count=",
+      "ROOT|giveup|child=4|reason=budget-exhausted",
+      "PD_RESTART|request|class=serial",
+      "ROOT|debug-restart|child=0",
+      "SERIAL_AFTER|42",
+      "SERIAL_RX|3",
+      "ROOT|fault|child=0",
+      "ROOT|restart|child=0|count=2",
+      "PD_RESTART|request|class=timer",
+      "ROOT|debug-restart|child=1",
+      "TIMER_AFTER|",
+      "ROOT|fault|child=1",
+      "ROOT|restart|child=1|count=2",
+      "SLEPT_FAULT_AFTER|",
+      "PD_RESTART|request|class=blk",
+      "ROOT|debug-restart|child=2",
+      "driver restarted, reconciling",
+      "FS_AFTER_INFLIGHT|",
+      "ROOT|fault|child=2",
+      "ROOT|restart|child=2|count=3",
+      "ROOT|restart|child=2|count=4",
+      "FS_FAULT_AFTER_INFLIGHT|",
+      "PD_RESTART|request|class=eth",
+      "ROOT|debug-restart|child=3",
+      "ETH|restart|reclaimed|",
+      "NET_OK|",
+      "ROOT|fault|child=3",
+      "ROOT|restart|child=3|count=3",
+      "ROOT|restart|child=3|count=4",
+      "NET_OK|FAULT_AFTER2",
+      "ROOT|giveup|child=2|reason=budget-exhausted",
+      "driver stopped, reconciling outstanding requests",
+      "ROOT|gone|child=2|ignored=fault-inject",
+      "ROOT|gone|child=2|ignored=debug-restart",
+      "BLKGONE_ALIVE|42",
+      "ROOT|clock|freq=",
+      "ROOT|restart|child=3|count=3|window=1",
+      "ROOT|giveup|child=3|reason=lifetime-exhausted",
+      "FS_WRITE_PLAIN|",
+      "FS_AFTER_WRITE|",
+      "FS_SLOW|"
+    ],
+    "forbidden_markers": [
+      "unexpected PD fault",
+      "unexpected beam_server fault"
+    ]
+  },
+  "testbed-orch": {
+    "kind": "qemu",
+    "protects": [
+      "BEAM reads a validated Root-owned status snapshot without a PPC",
+      "a BEAM restart observes the updated incarnation and charged child row",
+      "Root applies a complete committed spec while a newer commit is half written across a BEAM restart",
+      "Root rejects a conflicting equal generation, keeps its applied budget and gives up where the compiled budget would restart",
+      "Root answers every malformed, undeclared, non-driver, slot and stale command with a typed result and no effect",
+      "a lost-reply retry of a completed restart is already_done without a second restart",
+      "the command token bucket reaches rate_limited and Root's tallies match the caller's",
+      "a driver fault is decided within the recorded bound while the BEAM floods Root with commands",
+      "a restarted BEAM observes its committed spec and the current fence before commanding, and a conflicting bank leaves driver policy intact",
+      "with the BEAM gone Root still faults and restarts the timer for the fallback peer",
+      "with no status or spec page the compiled driver budget decides exactly",
+      "probe results from /dev/chrysostat and /dev/chrysoctl arrive as framed runs and a damaged run fails at once",
+      "orch-fallback-smoke runs alone, after the other orch scenarios"
+    ],
+    "required_markers": [
+      "ROOT_STATUS|boot|incarnation=1",
+      "ROOT_STATUS|restart|incarnation=2|count=1",
+      "SPEC_FIXTURE|open|committed=1|pending=2",
+      "ROOT|spec|applied|generation=0x0000000000000001|bank=1",
+      "SPEC_FIXTURE|applied|generation=1",
+      "SPEC_FIXTURE|conflict-staged",
+      "ROOT|spec|reject|reason=conflict|generation=0x0000000000000001|bank=0",
+      "ROOT|giveup|child=5|reason=budget-exhausted",
+      "CMD_FIXTURE|restart|result=1|ok",
+      "CMD_FIXTURE|retry|result=8|ok",
+      "CMD_FIXTURE|flood|result=4|ok",
+      "ROOT|ctl-restart|child=1|count=1",
+      "CMD_FIXTURE|done",
+      "LAT|FB_BASE|done|samples=21|missing=0",
+      "LAT|FB_FLOOD|done|samples=21|missing=0",
+      "CTL_RECONCILE|FB_POST|done|unexpected=0",
+      "ROOT|spec|reject|reason=conflict",
+      "PEER|fallback|timer|count=2",
+      "PEER|done",
+      "CTL_STAT|FB_NOMAP|error=enodev",
+      "@@CHRYSO|LAT.FB_FLOOD"
+    ],
+    "forbidden_markers": [
+      "unexpected PD fault"
+    ]
+  },
+  "check-contracts": {
+    "kind": "pure",
+    "protects": [
+      "every current flake check has a documented contract naming what it protects"
     ]
   }
 }

@@ -2,7 +2,7 @@
 -moduledoc """
 Test-only simulated Root: a `gen_server` around the pure `chryso_root` model,
 so a host node (a `peer`, or later a braid node) can stand in for a guest's
-Root. `command/4` can drop its reply to model a lost PPC reply; the caller
+Root. `command/4` can drop its reply to model a lost PPC reply. The caller
 then sees a timeout although the effect happened.
 
 Trace points (Snabbkaffe): `sim_effect` for every command that reached the

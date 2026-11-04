@@ -12,6 +12,8 @@ See `chryso_test` for why tags arrive as lower-case atoms and are upper-cased
 here rather than by the caller.
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([ping/2, echo_server/1]).
 
 -doc """
@@ -32,9 +34,9 @@ ping(Tag, Port) ->
         {ok, Sock} ->
             ok = gen_tcp:send(Sock, list_to_binary(Name)),
             ok = gen_tcp:close(Sock),
-            io:format("NET_OK|~s~n", [Name]);
+            ?LOG_NOTICE("NET_OK|~s", [Name]);
         Err ->
-            io:format("NET_ERR|~s ~p~n", [Name, Err])
+            ?LOG_ERROR("NET_ERR|~s ~p", [Name, Err])
     end.
 
 -doc """
@@ -47,15 +49,15 @@ echo_server(Port) ->
     spawn(fun() ->
         Opts = [binary, {packet, raw}, {active, false}, {reuseaddr, true}],
         {ok, Listen} = gen_tcp:listen(Port, Opts),
-        io:format("LISTENER_UP~n"),
+        ?LOG_NOTICE("LISTENER_UP"),
         accept_loop(Listen)
     end).
 
-%% The hot path (accept -> recv -> send -> close) MUST stay free of io:format:
-%% each console write costs about a second under TCG and two of them blow the
-%% host's 3s socket timeout. The ECHOED print therefore lands after the close,
-%% which is deliberate twice over: it keeps the round trip fast, and its
-%% absence is the regression signal for the close-with-in-flight-ACK crash.
+%% The hot path (accept -> recv -> send -> close) MUST stay free of logging.
+%% Each console write costs about a second under TCG and two of them blow the
+%% host's 3s socket timeout. The ECHOED event therefore lands after the close,
+%% which keeps the round trip fast, and its absence is the regression signal
+%% for the close-with-in-flight-ACK crash.
 -spec accept_loop(gen_tcp:socket()) -> no_return().
 accept_loop(Listen) ->
     case gen_tcp:accept(Listen, 30000) of
@@ -64,11 +66,11 @@ accept_loop(Listen) ->
                 {ok, Bin} ->
                     gen_tcp:send(Sock, Bin),
                     gen_tcp:close(Sock),
-                    io:format("ECHOED ~p~n", [Bin]);
+                    ?LOG_NOTICE("ECHOED ~p", [Bin]);
                 RecvErr ->
-                    io:format("RECV_ERR ~p~n", [RecvErr])
+                    ?LOG_ERROR("RECV_ERR ~p", [RecvErr])
             end;
         AcceptErr ->
-            io:format("ACCEPT_ERR ~p~n", [AcceptErr])
+            ?LOG_ERROR("ACCEPT_ERR ~p", [AcceptErr])
     end,
     accept_loop(Listen).

@@ -21,7 +21,7 @@ here rather than by the caller.
 -export([now_tagged/1, sleep_check/1]).
 
 -doc """
-Print the raw monotonic reading; the driver-side assertion (that it advanced
+Print the raw monotonic reading. The driver-side assertion (that it advanced
 across a restart) is the test script's job, not the probe's.
 """.
 -spec now_tagged(atom()) -> ok.
