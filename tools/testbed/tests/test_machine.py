@@ -119,11 +119,14 @@ paths = st.builds(
 @given(plan=from_schema(SCHEMA).map(PLAN.validate_python), overlay=paths, disk=paths)
 @settings(max_examples=200, deadline=None)
 def test_blockdev_puts_the_plan_under_both_layers(plan: Plan, overlay: Path, disk: Path) -> None:
-    """The overlay holds the guest's writes over a read-only image, and the
-    plan, in QEMU's form, wraps both or neither."""
-    flag, value = drive(Profile(Path("/img"), disk, blkdebug=plan), overlay)
+    """The overlay holds the guest's writes over a read-only image, the plan,
+    in QEMU's form, wraps both or neither, and the device's `top` node reads
+    the overlay until something is armed."""
+    flag, value, top_flag, top_value = drive(Profile(Path("/img"), disk, blkdebug=plan), overlay)
     node = json.loads(value)
     assert (flag, node["driver"], node["node-name"]) == ("-blockdev", "qcow2", "hd")
+    assert top_flag == "-blockdev"
+    assert json.loads(top_value) == {"driver": "raw", "node-name": "top", "file": "hd"}
     backing = node["backing"]
     assert backing["driver"] == "raw"
     for layer, path, readonly in ((node["file"], overlay, False), (backing["file"], disk, True)):

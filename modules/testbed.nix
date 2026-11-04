@@ -80,8 +80,13 @@
             p.qemu-qmp
             p.typer
             p.mypy
+            p.pyfatfs
+            p.python-statemachine
           ]))
           pkgs.ruff
+          # Build FAT32 volumes for the layout reader's oracle.
+          pkgs.dosfstools
+          pkgs.mtools
         ];
         dontConfigure = true;
         dontInstall = true;
@@ -163,6 +168,8 @@
         build-system = [ python.pkgs.setuptools ];
         dependencies = [
           python.pkgs.pydantic
+          python.pkgs.pyfatfs
+          python.pkgs.python-statemachine
           python.pkgs.qemu-qmp
           python.pkgs.typer
         ];

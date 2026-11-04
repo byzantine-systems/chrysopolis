@@ -7,6 +7,12 @@ boot costs no copy. A profile's `blkdebug` rules go to a blkdebug node under
 both the overlay and the FAT image, so they see every guest data read and
 write (`blkdebug.Plan`, dumped in QEMU's `inject-error` field names). The
 overlay and QMP socket are scratch, removed on exit.
+
+The device reads a raw `top` node over the overlay (`hd`). `arm` swaps a
+blkdebug node in between them with `blockdev-reopen`, so runtime rules see
+guest sectors, and `disarm` swaps it out. `export` serves `hd` over NBD on a
+scratch socket, which is how `copy_disk` and `overwrite` reach the disk
+without HMP's qemu-io, whose output would land on the serial console.
 Only the console logs and QEMU's stderr stay in the work directory.
 
 The testbed listens on the QMP socket and QEMU connects to it, so nothing
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import json
 import os
 import shutil
@@ -35,7 +42,7 @@ from typing import Final, Self
 
 from qemu.qmp import EventListener, QMPClient
 
-from chryso_testbed.blkdebug import PLAN, Plan
+from chryso_testbed.blkdebug import PLAN, RUNTIME, Plan, SectorError
 from chryso_testbed.console import Console
 
 LOAD_ADDRESS: Final = "0x70000000"
@@ -48,6 +55,11 @@ NETDEV: Final = "net0"
 class Tools:
     qemu: str
     qemu_img: str
+
+    @property
+    def qemu_io(self) -> str:
+        """qemu-io ships beside qemu-img."""
+        return str(Path(self.qemu_img).with_name("qemu-io"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +79,8 @@ def debugged(rules: Plan, path: Path, **extra: object) -> dict[str, object]:
 
 
 def drive(profile: Profile, overlay: Path) -> list[str]:
-    """The disk as one -blockdev: qcow2 overlay, raw FAT image as its backing."""
+    """The disk: a qcow2 overlay over the raw FAT image, and the raw `top`
+    node the device reads, which `Machine.arm` re-points at a blkdebug node."""
     rules = profile.blkdebug
     node = {
         "driver": "qcow2",
@@ -75,7 +88,8 @@ def drive(profile: Profile, overlay: Path) -> list[str]:
         "file": debugged(rules, overlay),
         "backing": {"driver": "raw", "file": debugged(rules, profile.disk, **{"read-only": True})},
     }
-    return ["-blockdev", json.dumps(node)]
+    top = {"driver": "raw", "node-name": "top", "file": "hd"}
+    return ["-blockdev", json.dumps(node), "-blockdev", json.dumps(top)]
 
 
 def argv(tools: Tools, profile: Profile, disk: Path, qmp: Path) -> list[str]:
@@ -88,7 +102,7 @@ def argv(tools: Tools, profile: Profile, disk: Path, qmp: Path) -> list[str]:
         "-device", f"loader,file={profile.image / 'sel4-beam.img'},addr={LOAD_ADDRESS},cpu-num=0",
         "-global", "virtio-mmio.force-legacy=false",
         *drive(profile, disk),
-        "-device", "virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1",
+        "-device", "virtio-blk-device,drive=top,share-rw=on,bus=virtio-mmio-bus.1",
         "-device", f"virtio-net-device,netdev={NETDEV},bus=virtio-mmio-bus.0",
         "-netdev", netdev,
         "-chardev", f"socket,id=qmp,path={qmp}",
@@ -102,13 +116,15 @@ def argv(tools: Tools, profile: Profile, disk: Path, qmp: Path) -> list[str]:
     ]  # fmt: skip
 
 
-async def run(*cmd: str) -> None:
+async def run(*cmd: str) -> str:
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
     )
     out, _ = await proc.communicate()
+    text = out.decode(errors="replace")
     if proc.returncode:
-        raise RuntimeError(f"{cmd[0]} exited {proc.returncode}: {out.decode(errors='replace')}")
+        raise RuntimeError(f"{cmd[0]} exited {proc.returncode}: {text}")
+    return text
 
 
 class Machine:
@@ -124,6 +140,9 @@ class Machine:
         self._proc: asyncio.subprocess.Process | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._stops_expected = 0
+        self._armed: str | None = None
+        self._arms = itertools.count(1)
+        self._nbd: str | None = None
         # Scratch lives in a short private directory: a unix socket path must
         # fit in 108 bytes, which a Nix output path can exceed.
         self._scratch = Path(tempfile.mkdtemp(prefix="tb-"))
@@ -202,6 +221,55 @@ class Machine:
                 else:
                     await self.console.report(f"QEMU {event['event']} {event.get('data', {})}")
                     return
+
+    async def arm(self, rules: tuple[SectorError, ...]) -> None:
+        """Put `rules` between the device and the disk, replacing any armed."""
+        name = f"dbg{next(self._arms)}"
+        await self.qmp.execute(
+            "blockdev-add",
+            {"driver": "blkdebug", "node-name": name, "image": "hd",
+             "inject-error": RUNTIME.dump_python(rules)},
+        )  # fmt: skip
+        await self._point_top_at(name)
+
+    async def disarm(self) -> None:
+        """Take the armed rules out, if any."""
+        await self._point_top_at("hd")
+
+    async def _point_top_at(self, node: str) -> None:
+        await self.qmp.execute(
+            "blockdev-reopen", {"options": [{"driver": "raw", "node-name": "top", "file": node}]}
+        )
+        if self._armed is not None:
+            await self.qmp.execute("blockdev-del", {"node-name": self._armed})
+        self._armed = node if node != "hd" else None
+
+    async def export(self) -> str:
+        """An NBD URI for the overlay, writable, served on a scratch socket."""
+        if self._nbd is None:
+            socket = self._scratch / "nbd.sock"
+            await self.qmp.execute(
+                "nbd-server-start", {"addr": {"type": "unix", "data": {"path": str(socket)}}}
+            )
+            await self.qmp.execute(
+                "block-export-add",
+                {"type": "nbd", "id": "disk", "node-name": "hd", "name": "hd", "writable": True},
+            )
+            self._nbd = f"nbd+unix:///hd?socket={socket}"
+        return self._nbd
+
+    async def copy_disk(self) -> Path:
+        """The disk as the guest would read it now, as a raw scratch file."""
+        copy = self._scratch / "disk.raw"
+        copy.unlink(missing_ok=True)
+        await run(self.tools.qemu_img, "convert", "-f", "raw", "-O", "raw",
+                  await self.export(), str(copy))  # fmt: skip
+        return copy
+
+    async def overwrite(self, sector: int, count: int, byte: int) -> None:
+        """Fill `count` sectors from `sector` with `byte`, behind the guest's back."""
+        await run(self.tools.qemu_io, "-f", "raw", await self.export(),
+                  "-c", f"write -P {byte} {sector * 512} {count * 512}")  # fmt: skip
 
     @contextlib.asynccontextmanager
     async def paused(self) -> AsyncIterator[None]:

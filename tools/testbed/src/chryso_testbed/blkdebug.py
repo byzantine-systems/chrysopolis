@@ -10,6 +10,10 @@ union.
 
 `PLAN` validates plans, dumps them in QEMU's field names, and gives the JSON
 Schema that properties draw plans from with hypothesis-jsonschema.
+
+A `SectorRead` or `SectorWrite` is armed at runtime instead (`Machine.arm`).
+It fails reads or writes that touch one guest sector, once or every time. A
+sticky read error is IRON's latent sector error.
 """
 
 from __future__ import annotations
@@ -60,6 +64,28 @@ type Rule = Annotated[Delay | WriteError, Field(discriminator="errno")]
 type Plan = Annotated[tuple[Rule, ...], Field(max_length=4)]
 PLAN: Final = TypeAdapter[Plan](Plan)
 SCHEMA: Final = PLAN.json_schema()
+
+
+class SectorRead(_Rule):
+    """Fail guest reads that touch `sector` with EIO."""
+
+    errno: Literal[5] = 5
+    event: Literal["read_aio"] = "read_aio"
+    iotype: Literal["read"] = "read"
+    sector: int = Field(ge=0)
+
+
+class SectorWrite(_Rule):
+    """Fail guest writes that touch `sector` with EIO."""
+
+    errno: Literal[5] = 5
+    event: Literal["write_aio"] = "write_aio"
+    iotype: Literal["write"] = "write"
+    sector: int = Field(ge=0)
+
+
+type SectorError = Annotated[SectorRead | SectorWrite, Field(discriminator="iotype")]
+RUNTIME: Final = TypeAdapter[tuple[SectorError, ...]](tuple[SectorError, ...])
 
 
 def fails_writes(plan: Iterable[Delay | WriteError]) -> bool:
