@@ -16,8 +16,9 @@ from typing import Final
 from chryso_testbed import inject, probes
 from chryso_testbed.blkdebug import EIO, Delay, WriteError
 from chryso_testbed.console import Mark
-from chryso_testbed.faults import Arm, Corrupt, Disarm, Get, Model, Pause, Ping, Put, Unplug
+from chryso_testbed.faults import Arm, Corrupt, Disarm, Get, Model, Pause, Ping, Put, Step, Unplug
 from chryso_testbed.machine import Machine
+from chryso_testbed.outcomes import Outcome, render
 from chryso_testbed.scenario import Context, registry
 
 GROUP = "restart"
@@ -330,6 +331,15 @@ async def net_recovery(ctx: Context) -> None:
         ctx.record("net-fault-smoke", restart_count=4)
 
 
+def record_into(outcomes: list[str]) -> Callable[[Step, Outcome, Model], None]:
+    """An `inject.check` observer keeping each step's outcome for the facts."""
+
+    def observe(step: Step, seen: Outcome, _: Model) -> None:
+        outcomes.append(f"{step.kind}: {render(seen)}")
+
+    return observe
+
+
 @registry.scenario("net-unplug-smoke", group=GROUP, timeout=900)
 async def net_unplug(ctx: Context) -> None:
     """A pulled cable, then a paused VM: the guest dials the host after each."""
@@ -345,7 +355,7 @@ async def net_unplug(ctx: Context) -> None:
         await net_ready(ctx, m)
         async with ctx.step("unplug and pause"), asyncio.timeout(300):
             model = Model.start(ctx.abi.driver_budget)
-            await inject.check(m, program, model, abi=ctx.abi, log=outcomes.append)
+            await inject.check(m, program, model, abi=ctx.abi, observe=record_into(outcomes))
         ctx.record("net-unplug-smoke", outcomes=outcomes)
 
 
@@ -375,7 +385,7 @@ async def blk_iron(ctx: Context) -> None:
         await ready(ctx, m)
         async with ctx.step("iron"), asyncio.timeout(300):
             model = Model.start(ctx.abi.driver_budget)
-            await inject.check(m, program, model, abi=ctx.abi, log=outcomes.append)
+            await inject.check(m, program, model, abi=ctx.abi, observe=record_into(outcomes))
         ctx.record("blk-iron-smoke", outcomes=outcomes)
 
 

@@ -82,6 +82,7 @@
             p.mypy
             p.pyfatfs
             p.python-statemachine
+            p.structlog
           ]))
           pkgs.ruff
           # Build FAT32 volumes for the layout reader's oracle.
@@ -171,6 +172,7 @@
           python.pkgs.pyfatfs
           python.pkgs.python-statemachine
           python.pkgs.qemu-qmp
+          python.pkgs.structlog
           python.pkgs.typer
         ];
         pythonImportsCheck = [ "chryso_testbed" ];

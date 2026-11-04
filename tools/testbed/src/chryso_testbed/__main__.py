@@ -14,10 +14,12 @@ import sys
 from pathlib import Path
 from typing import Annotated
 
+import structlog
 import typer
 from rich.console import Console as Terminal
 from rich.table import Table
 
+from chryso_testbed import log as logging_setup
 from chryso_testbed import scenarios
 from chryso_testbed.abi import Abi
 from chryso_testbed.machine import Machine, Profile, Tools
@@ -26,6 +28,18 @@ from chryso_testbed.scenario import Settings, registry
 
 app = typer.Typer(no_args_is_help=True, help="QEMU scenarios for the Nix-built images.")
 terminal = Terminal(stderr=True)
+log = structlog.get_logger(__name__)
+
+
+@app.callback()
+def main(
+    log_format: Annotated[
+        logging_setup.Format, typer.Option(help="Console on a terminal, JSON lines otherwise.")
+    ] = logging_setup.Format.AUTO,
+) -> None:
+    """Configure logging before any command runs."""
+    logging_setup.configure(log_format)
+
 
 Manifest = Annotated[
     Path,
@@ -104,7 +118,7 @@ def shell(
 async def interact(settings: Settings, image: str) -> None:
     profile = Profile(settings.images[image], settings.disk)
     async with Machine("shell", profile, settings.out, settings.tools, ()) as machine:
-        terminal.print(f"QMP socket: {machine.qmp_socket} (qmp-shell can attach)")
+        log.info("shell.ready", qmp_socket=str(machine.qmp_socket))
         reader = asyncio.StreamReader()
         await asyncio.get_running_loop().connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(reader), sys.stdin

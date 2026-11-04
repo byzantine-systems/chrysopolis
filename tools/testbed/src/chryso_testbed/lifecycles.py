@@ -1,16 +1,7 @@
 """The lifecycles the fault model tracks, as python-statemachine charts.
 
-Each chart's events are observations: Root restarted a driver, a write was
-reported ok, a fault found its target. The model sends one only after the
-step's outcome passed `Model.expect`, and every chart refuses an event its
-state has no transition for (`allow_event_without_transition = False`), so a
-model that would follow an impossible history raises `TransitionNotAllowed`
-instead of drifting.
-
-A chart keeps its data (a budget, a seed, the armed fault) in a small record,
-its domain model. Records are copied before an event is sent, so a model's
-`after` returns a new model and the old one stays as it was, which steering
-relies on to look ahead. `diagrams()` renders every chart as Mermaid.
+Events are observed outcomes, and a chart refuses one it has no transition
+for. `evolved` copies before sending, so models stay immutable.
 """
 
 from __future__ import annotations

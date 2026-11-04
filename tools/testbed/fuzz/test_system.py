@@ -1,15 +1,7 @@
-"""Fault programs against the restart image, one boot per example.
+"""Steered fault programs against `restart-image`, one boot per example.
 
-Run with `nix run .#testbed-fuzz -- -k system`. SYSTEM_FUZZ_EXAMPLES
-sets the example count (default 5). Each example boots with a blkdebug plan,
-then runs a program drawn from one of `steer.SCENARIOS` by simulating the
-model, checking every outcome against `faults.Model` as it goes.
-
-`--hypothesis-show-statistics` prints the scenarios drawn, whether each arm
-or corruption found its target, and the fault-reaction table: for every
-read or write a disk fault could touch, the fault and what the guest saw.
-`target()` steers generation toward runs covering more distinct pairs of
-abstract state and step kind.
+`nix run .#testbed-fuzz -- -k system --hypothesis-show-statistics`, with
+SYSTEM_FUZZ_EXAMPLES examples (default 5).
 """
 
 from __future__ import annotations
@@ -147,6 +139,7 @@ async def test_the_system_does_what_its_model_allows(testbed: Settings, run: Run
     covered: set[tuple[object, str]] = set()
 
     def observe(step: Step, seen: Outcome, before: Model) -> None:
+        note(f"{step!r}: {render(seen)}")
         covered.add((abstract(before), step.kind))
         if (row := reaction(step, seen, before)) is not None:
             event(row)
@@ -164,7 +157,7 @@ async def test_the_system_does_what_its_model_allows(testbed: Settings, run: Run
             await m.console.wait(r"SOCKET_SMOKE\|DHCP:")
             banner = await m.console.wait("Eshell")
             await probes.load_test_modules(m, testbed.test_modules, banner)
-        model = await inject.check(m, program, model, abi=testbed.abi, log=note, observe=observe)
+        model = await inject.check(m, program, model, abi=testbed.abi, observe=observe)
         for driver in model.root.gone:
             event(f"gave up {driver}")
         target(len(covered), label="state-step pairs covered")

@@ -8,11 +8,9 @@ both the overlay and the FAT image, so they see every guest data read and
 write (`blkdebug.Plan`, dumped in QEMU's `inject-error` field names). The
 overlay and QMP socket are scratch, removed on exit.
 
-The device reads a raw `top` node over the overlay (`hd`). `arm` swaps a
-blkdebug node in between them with `blockdev-reopen`, so runtime rules see
-guest sectors, and `disarm` swaps it out. `export` serves `hd` over NBD on a
-scratch socket, which is how `copy_disk` and `overwrite` reach the disk
-without HMP's qemu-io, whose output would land on the serial console.
+`arm` swaps a blkdebug node in above the overlay with `blockdev-reopen`, so
+runtime rules see guest sectors. `copy_disk` and `overwrite` go through an
+NBD export, since HMP's qemu-io would print on the serial console.
 Only the console logs and QEMU's stderr stay in the work directory.
 
 The testbed listens on the QMP socket and QEMU connects to it, so nothing
@@ -40,11 +38,13 @@ from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
 
+import structlog
 from qemu.qmp import EventListener, QMPClient
 
 from chryso_testbed.blkdebug import PLAN, RUNTIME, Plan, SectorError
 from chryso_testbed.console import Console
 
+log = structlog.get_logger(__name__)
 LOAD_ADDRESS: Final = "0x70000000"
 QMP_TIMEOUT: Final = 30.0
 FATAL_EVENTS: Final = ("SHUTDOWN", "RESET", "STOP", "GUEST_PANICKED")
@@ -185,6 +185,7 @@ class Machine:
         stdin, stdout = self._proc.stdin, self._proc.stdout
         if stdin is None or stdout is None:
             raise RuntimeError("QEMU started without console pipes")
+        log.info("machine.start", machine=self.name, pid=self._proc.pid, workdir=str(self.workdir))
         self.console.attach(stdin)
         self._tasks.append(asyncio.create_task(self.console.pump(stdout)))
         await self._connected(self._proc)
@@ -218,7 +219,9 @@ class Machine:
             async for event in listener:
                 if event["event"] == "STOP" and self._stops_expected:
                     self._stops_expected -= 1
+                    log.debug("qmp.stop.expected", machine=self.name)
                 else:
+                    log.warning("qmp.fatal", machine=self.name, qmp_event=event["event"])
                     await self.console.report(f"QEMU {event['event']} {event.get('data', {})}")
                     return
 
@@ -231,10 +234,12 @@ class Machine:
              "inject-error": RUNTIME.dump_python(rules)},
         )  # fmt: skip
         await self._point_top_at(name)
+        log.info("disk.armed", machine=self.name, rules=RUNTIME.dump_python(rules))
 
     async def disarm(self) -> None:
         """Take the armed rules out, if any."""
         await self._point_top_at("hd")
+        log.info("disk.disarmed", machine=self.name)
 
     async def _point_top_at(self, node: str) -> None:
         await self.qmp.execute(
@@ -270,6 +275,7 @@ class Machine:
         """Fill `count` sectors from `sector` with `byte`, behind the guest's back."""
         await run(self.tools.qemu_io, "-f", "raw", await self.export(),
                   "-c", f"write -P {byte} {sector * 512} {count * 512}")  # fmt: skip
+        log.info("disk.overwritten", machine=self.name, sector=sector, count=count, byte=byte)
 
     @contextlib.asynccontextmanager
     async def paused(self) -> AsyncIterator[None]:

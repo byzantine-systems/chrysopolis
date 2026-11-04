@@ -1,9 +1,4 @@
-"""What a fault program step can be seen to do.
-
-The interpreter (`inject.py`) parses the guest's and Root's console lines
-into these once, and the model (`faults.py`) predicts sets of them, so a
-misspelt outcome is a type error rather than a silent mismatch.
-"""
+"""What a step can be seen to do, typed so a misspelt outcome fails to check."""
 
 from __future__ import annotations
 

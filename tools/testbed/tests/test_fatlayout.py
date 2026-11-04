@@ -1,9 +1,5 @@
-"""The FAT32 layout reader against volumes made by mkfs.fat and mtools.
-
-The oracle is independent of pyfatfs: mtools' `mshowfat` names each file's
-clusters, the boot sector's BPB gives the geometry, and the raw image must
-then hold the file's bytes at its data sector, its 8.3 name in its entry's
-sector, and an allocated FAT entry at its FAT sector.
+"""The FAT32 layout reader against mtools and the raw boot sector, never
+pyfatfs itself.
 """
 
 from __future__ import annotations

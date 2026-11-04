@@ -1,29 +1,10 @@
-"""Fault programs: what a fuzz run does to the guest, and what it may see.
+"""Fault programs and the model that judges them.
 
-A `Program` is a sequence of steps. Some are workload (write or read a
-file, dial the host) and some are faults (fault or restart a driver through
-Root, cut the link, pause the VM). A blkdebug `Plan` is fixed at boot, so a
-run is a plan plus a program.
-
-The block backend adds runtime disk faults, aimed IRON-style at one file's
-structures (`fatlayout.Region`): `Arm` an EIO on reads or writes of its data,
-FAT entry or directory entry, once or every time, `Disarm` it, or `Corrupt`
-one of them at rest. Another file system backend (NFS) would add its own
-steps, server and network faults, judged by the same observations.
-
-`Model` is the oracle, a Mealy machine over steps and the product of three
-components that each own some steps: `RootModel` (Root's restart budget),
-`StorageModel` (the block backend: a write reported ok reads back, a failed
-write leaves its file unknown, runtime faults as IRON predicts) and
-`NetModel`. `expect` says which outcomes a step may have from the current
-state and `after` folds the observed outcome in. Steps of different
-components other than Root commute, since only Root's availability crosses
-between them. The interpreter in
-`inject.py` turns a step into QMP calls and shell input and an observation
-into one of the outcome strings below.
-
-Serial and timer never give up in a program: without the console or the
-clock the run could not report anything. `trim` enforces that.
+A run is a blkdebug plan plus a `Program` of workload and fault steps.
+`Model` is a product of components (Root, storage, network) built on the
+charts in `lifecycles.py`: `expect` gives the outcomes a step may have,
+`after` folds in the one observed. `trim` keeps serial and timer under
+budget so the console and clock survive.
 """
 
 from __future__ import annotations

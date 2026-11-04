@@ -1,15 +1,5 @@
-"""Where a FAT32 volume keeps each root-level file, in sectors of the whole disk.
-
-Block faults target a file's structures the way IRON's type-aware injection
-does: its first data sector, the FAT sector holding its first cluster's
-entry, and the directory sector holding its 8.3 entry. The disk carries an
-MBR with the volume in its first partition, so every address here is
-absolute: the partition's start plus the offset inside the volume. pyfatfs
-parses the volume. This module adds the MBR, the sector arithmetic and the
-search for each entry.
-
-This is the block backend's view only. Other file system backends (NFS, say)
-fault their server or network instead and need no layout.
+"""Where a FAT32 file keeps its data, FAT entry and directory entry, in disk
+sectors, for IRON-style targeted faults. pyfatfs parses the volume.
 """
 
 from __future__ import annotations

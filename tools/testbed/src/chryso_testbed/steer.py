@@ -1,17 +1,8 @@
-"""Fault programs drawn by simulating the model, in the style of
-quickcheck-dynamic.
+"""Fault programs drawn by simulating the model (quickcheck-dynamic style).
 
-Instead of drawing every step independently, generation keeps a `Model` and
-asks it what makes sense next. `enabled` offers steps that can matter in the
-current state: reads and faults aimed at files that exist, requests only to
-drivers Root still runs. `reach` steers toward a goal, and named scenarios
-chain goals and steps ("a file exists, a read fault is armed on its data,
-then it is read"). Hypothesis still shrinks, because a shrunk choice sequence
-is replayed through the same simulation and every program stays valid.
-
-Looking ahead needs an outcome for each simulated step. `nominal` picks one
-the model allows. The real run is still judged against everything the model
-allows, so a wrong guess only makes steering less targeted, never unsound.
+`enabled` offers steps that matter in the current state, `reach` steers to
+a goal, and `SCENARIOS` chain them. Look-ahead assumes `nominal` outcomes,
+while the real run is judged against everything the model allows.
 """
 
 from __future__ import annotations

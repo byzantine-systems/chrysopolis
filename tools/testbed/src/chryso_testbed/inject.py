@@ -1,11 +1,5 @@
-"""Run fault program steps against a guest and name what each one did.
-
-`perform` is the interpreter for `faults.Step`. It types probes at the shell
-or calls QMP, waits for the step's own evidence (probe lines carry the
-step's tag, Root lines are read from the step's mark onwards) and returns
-an `outcomes.Outcome`, the type `faults.Model` predicts. It never judges: an
-unexpected outcome is still returned. `check` runs a whole program and
-compares each outcome with the model, so a failure names both.
+"""The interpreter for fault program steps: QMP calls and shell probes in,
+typed outcomes out. `perform` never judges, `check` compares with the model.
 """
 
 from __future__ import annotations
@@ -14,6 +8,8 @@ import asyncio
 import re
 from collections.abc import Callable
 from typing import Final
+
+import structlog
 
 from chryso_testbed import probes
 from chryso_testbed.abi import Abi
@@ -40,6 +36,7 @@ from chryso_testbed.machine import Machine
 from chryso_testbed.outcomes import GaveUp, Outcome, Restarted, Seed, Status, render
 from chryso_testbed.ports import Ports
 
+log = structlog.get_logger(__name__)
 PING_TIMEOUT: Final = 20.0
 # What a corrupted sector is filled with. Only one of a file's sixteen
 # sectors changes, so it reads back as differs whatever its seed.
@@ -179,13 +176,13 @@ async def check(
     model: Model,
     *,
     abi: Abi,
-    log: Callable[[str], object] = print,
     observe: Callable[[Step, Outcome, Model], object] | None = None,
     step_timeout: float = 300,
 ) -> Model:
     """Run `program`, failing at the first outcome `model` does not allow.
 
-    `observe` sees each step, its outcome and the model before it. Returns
+    Each step logs a `step` event with its fields and outcome. `observe` sees
+    each step, its outcome and the model before it. Returns
     the model after the last step, so the caller can see what the run went
     through (which drivers are gone, say)."""
     ports = Ports()
@@ -193,11 +190,13 @@ async def check(
         allowed = model.expect(step)
         async with asyncio.timeout(step_timeout):
             seen = await perform(m, step, tag=f"s{n}", abi=abi, port=ports.take())
-        log(f"step {n} {step!r}: {render(seen)}")
         if observe is not None:
             observe(step, seen, model)
+        fields = {"n": n, **step.model_dump(), "outcome": render(seen)}
         if seen not in allowed:
             wanted = "anything" if allowed.anything else sorted(map(render, allowed.outcomes))
+            log.error("step.disallowed", **fields, allowed=wanted)
             raise m.console.fail(f"step {n} {step!r}: got {render(seen)}, allowed {wanted}")
+        log.info("step", **fields)
         model = model.after(step, seen)
     return model

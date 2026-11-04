@@ -11,9 +11,7 @@ union.
 `PLAN` validates plans, dumps them in QEMU's field names, and gives the JSON
 Schema that properties draw plans from with hypothesis-jsonschema.
 
-A `SectorRead` or `SectorWrite` is armed at runtime instead (`Machine.arm`).
-It fails reads or writes that touch one guest sector, once or every time. A
-sticky read error is IRON's latent sector error.
+`SectorRead`/`SectorWrite` are armed at runtime on one guest sector.
 """
 
 from __future__ import annotations

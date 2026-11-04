@@ -1,4 +1,4 @@
-"""Steered generation: the model simulated forward to draw fault programs."""
+"""Laws of steered generation."""
 
 from __future__ import annotations
 

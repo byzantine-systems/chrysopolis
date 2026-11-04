@@ -1,11 +1,7 @@
 """Fault programs and the model that judges them.
 
-A run is simulated by drawing each step's outcome from what the model
-allows, so these properties hold for every run the real fuzz can accept.
-Laws that need a particular state (a written file, an armed fault, many
-requests to one driver) build it rather than wait for it.
-
-Each law was checked against a planted defect, in a scratch copy:
+Runs are simulated by drawing outcomes the model allows. Laws build the
+state they need instead of waiting for it. Each caught a planted defect:
 
 | Planted defect | Caught by |
 |---|---|
@@ -17,9 +13,7 @@ Each law was checked against a planted defect, in a scratch copy:
 | Root restarts once past the budget | test_a_driver_is_restarted_budget_times_... |
 | a ping leaves FatFs's window dirty | test_steps_of_different_components_commute |
 
-Before the component split, the old model ran in lockstep with this one
-(a RuleBasedStateMachine over 200 runs of 24 steps) and they allowed the
-same outcomes at every step. It caught all seven defects too.
+The pre-split model ran in lockstep with this one before it was deleted.
 """
 
 from __future__ import annotations

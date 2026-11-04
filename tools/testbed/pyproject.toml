@@ -13,6 +13,7 @@ dependencies = [
     "pyfatfs>=1.1",
     "python-statemachine>=3.2",
     "qemu.qmp>=0.0.6",
+    "structlog>=26",
     "typer>=0.25",
 ]
 
