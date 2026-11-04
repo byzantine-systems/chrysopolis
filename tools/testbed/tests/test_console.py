@@ -212,16 +212,25 @@ def test_frames_survive_colour_around_every_byte() -> None:
 shell_text = st.text(st.characters(min_codepoint=0x20, max_codepoint=0x7E), max_size=40)
 
 
-@given(prompt=st.none() | st.integers(1, 99_999), message=shell_text)
+shell_errors = st.one_of(
+    st.just("** exception "),
+    st.builds(lambda line, col: f"* {line}:{col}: ", st.integers(1, 999), st.integers(1, 999)),
+)
+
+
+@given(prompt=st.none() | st.integers(1, 99_999), error=shell_errors, message=shell_text)
 @settings(max_examples=100, deadline=None)
-def test_a_crashed_probe_fails_the_wait_at_once(prompt: int | None, message: str) -> None:
-    """A shell exception fails the wait whether or not a prompt precedes it."""
+def test_a_crashed_or_unparsed_probe_fails_the_wait_at_once(
+    prompt: int | None, error: str, message: str
+) -> None:
+    """A shell exception, or a line the shell could not parse, fails the wait
+    whether or not a prompt precedes it."""
     from chryso_testbed.abi import Abi
     from chryso_testbed.scenario import default_failures
 
     abi = Abi(drivers={}, beam=5, crasher=4, driver_budget=8, exit_fault_base=0)
     lead = "" if prompt is None else f"{prompt}> "
-    line = f"{lead}** exception {message}\r\n".encode()
+    line = f"{lead}{error}{message}\r\n".encode()
 
     async def scenario() -> None:
         console = Console(default_failures(abi))
@@ -229,14 +238,18 @@ def test_a_crashed_probe_fails_the_wait_at_once(prompt: int | None, message: str
         await console.await_run("LAT.FB_BASE", since=Mark(0, 0))
         await feeder
 
-    with pytest.raises(ScenarioFailure, match=r"\*\* exception "):
+    with pytest.raises(ScenarioFailure, match=re.escape(error)):
         asyncio.run(asyncio.wait_for(scenario(), 0.5))
 
 
-@given(lead=st.from_regex(r"[A-Za-z(][ -~]{0,30}", fullmatch=True), message=shell_text)
-def test_an_echoed_exception_is_not_a_crash(lead: str, message: str) -> None:
-    """Text that only mentions an exception mid-line, such as an echoed
+@given(
+    lead=st.from_regex(r"[A-Za-z(][ -~]{0,30}", fullmatch=True),
+    error=shell_errors,
+    message=shell_text,
+)
+def test_an_echoed_error_is_not_a_crash(lead: str, error: str, message: str) -> None:
+    """Text that only mentions a shell error mid-line, such as an echoed
     command, is not one."""
     from chryso_testbed.scenario import SHELL_EXCEPTION
 
-    assert re.search(SHELL_EXCEPTION, f"{lead} ** exception {message}") is None
+    assert re.search(SHELL_EXCEPTION, f"{lead} {error}{message}") is None

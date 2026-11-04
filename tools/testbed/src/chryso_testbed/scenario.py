@@ -87,7 +87,9 @@ class Step:
 MON_FAULT: Final = r"MON\|ERROR"
 # A probe that crashed prints this instead of its result, so waiting on is futile.
 # The shell may print its next prompt on the same line first.
-SHELL_EXCEPTION: Final = r"^(?:\d+> )?\*\* exception "
+# A crashed probe (`** exception`), or a typed line the shell could not
+# parse (`* 1:19: syntax error ...`), which would otherwise hang the wait.
+SHELL_EXCEPTION: Final = r"^(?:\d+> )?(?:\*\* exception |\* \d+:\d+: )"
 
 
 def default_failures(abi: Abi) -> list[str]:
