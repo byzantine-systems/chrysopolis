@@ -123,7 +123,9 @@ type Step = Annotated[
     Fault | Restart | Unplug | Pause | Put | Get | Ping | Arm | Disarm | Corrupt,
     Field(discriminator="kind"),
 ]
-type Program = Annotated[tuple[Step, ...], Field(max_length=16)]
+# Generation draws at most 16 steps. Lineage cuts may insert a driver's whole
+# budget of faults around one.
+type Program = Annotated[tuple[Step, ...], Field(max_length=32)]
 STEP: Final = TypeAdapter[Step](Step)
 PROGRAM: Final = TypeAdapter[Program](Program)
 

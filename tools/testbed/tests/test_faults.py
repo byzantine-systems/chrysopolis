@@ -330,7 +330,9 @@ def test_disarm_forgets_the_fault(
 ) -> None:
     model = with_fault(start, op, region, file, once)
     disarmed = model.after(Disarm(kind="disarm"), Status.OK)
-    assert disarmed.expect(step) == without_fault(model).expect(step)
+    # Disarm is a step like any other, so it also settles recovering drivers.
+    plain = without_fault(model)
+    assert disarmed.expect(step) == replace(plain, root=plain.root.settled(DRIVERS)).expect(step)
 
 
 @given(start=states(), file=files, seed=st.integers(0, 255), once=st.booleans())
