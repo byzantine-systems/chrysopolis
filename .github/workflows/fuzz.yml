@@ -1,0 +1,52 @@
+# The random fuzz campaign: disk fault plans and fault programs, one boot per
+# example. PRs run only the pinned examples (build.yml). Hypothesis's example
+# database lives in the Actions cache, so a failure found one night is tried
+# first the next.
+name: "[Nix] Fuzz"
+
+on:
+  workflow_dispatch:
+    inputs:
+      examples:
+        description: "Examples per fuzz test"
+        default: "40"
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  fuzz:
+    name: "[QEMU] fuzz campaign"
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      EXAMPLES: ${{ inputs.examples || '40' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-nix
+      - name: Restore the example database
+        uses: actions/cache/restore@v6
+        with:
+          path: .hypothesis
+          key: hypothesis-${{ github.run_id }}
+          restore-keys: hypothesis-
+      - name: Run the fuzz
+        run: >-
+          BLK_FUZZ_EXAMPLES="$EXAMPLES" SYSTEM_FUZZ_EXAMPLES="$EXAMPLES"
+          nix run .#testbed-fuzz --
+          --hypothesis-profile=nightly --hypothesis-show-statistics --basetemp=fuzz-out
+      - name: Save the example database
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: .hypothesis
+          key: hypothesis-${{ github.run_id }}
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: fuzz-consoles
+          path: fuzz-out
+          retention-days: 14

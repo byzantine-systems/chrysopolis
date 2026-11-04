@@ -134,7 +134,7 @@
             ];
             text = ''
               export CHRYSO_TESTBED_MANIFEST=''${CHRYSO_TESTBED_MANIFEST:-${manifest}}
-              exec python -m pytest -p no:cacheprovider --rootdir . ${../tools/testbed/fuzz} "$@"
+              exec python -m pytest -p no:cacheprovider -p chryso_testbed.fuzzing --rootdir . ${../tools/testbed/fuzz} "$@"
             '';
           }
         );
