@@ -13,9 +13,10 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Final
 
-from chryso_testbed import probes
+from chryso_testbed import inject, probes
 from chryso_testbed.blkdebug import EIO, Delay, WriteError
 from chryso_testbed.console import Mark
+from chryso_testbed.faults import Model, Pause, Ping, Unplug
 from chryso_testbed.machine import Machine
 from chryso_testbed.scenario import Context, registry
 
@@ -327,6 +328,25 @@ async def net_recovery(ctx: Context) -> None:
             await eth_fault(m, eth, 4)
             await probes.ping(m, "fault_after2", ctx.ports.take())
         ctx.record("net-fault-smoke", restart_count=4)
+
+
+@registry.scenario("net-unplug-smoke", group=GROUP, timeout=900)
+async def net_unplug(ctx: Context) -> None:
+    """A pulled cable, then a paused VM: the guest dials the host after each."""
+    program = (
+        Ping(kind="ping"),
+        Unplug(kind="unplug", ms=3000),
+        Ping(kind="ping"),
+        Pause(kind="pause", ms=1000),
+        Ping(kind="ping"),
+    )
+    outcomes: list[str] = []
+    async with ctx.boot(IMAGE) as m:
+        await net_ready(ctx, m)
+        async with ctx.step("unplug and pause"), asyncio.timeout(300):
+            model = Model(ctx.abi.driver_budget)
+            await inject.check(m, program, model, abi=ctx.abi, log=outcomes.append)
+        ctx.record("net-unplug-smoke", outcomes=outcomes)
 
 
 @registry.scenario("blk-giveup-smoke", group=GROUP, timeout=1500)

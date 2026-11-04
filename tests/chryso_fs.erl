@@ -26,7 +26,9 @@ reporting after the device they probe is gone.
     read_during_fault/0,
     write_status/1,
     read_outcome/2,
-    read_back/1
+    read_back/1,
+    put/3,
+    get/2
 ]).
 
 -doc """
@@ -142,6 +144,56 @@ read_outcome(Tag, Module) ->
             {error, _} = Error -> Error
         end,
     chryso_test:emit("FS_READ_" ++ chryso_test:tag(Tag), Outcome).
+
+-define(FUZZ_SIZE, 8192).
+
+-doc """
+The system fuzz: write file `File` as 8 KiB of the byte `Seed`, then sync
+and close, and report `FS_PUT_<TAG>|{Write, Sync, Close}` or
+`{error, Reason}`. Below one FatFs cluster, so a disk error may surface at
+any of the three steps.
+""".
+-spec put(atom(), 0..255, byte()) -> ok.
+put(Tag, File, Seed) ->
+    Outcome =
+        case catch file:open(fuzz_path(File), [write, raw, binary]) of
+            {ok, Fd} ->
+                Written = file:write(Fd, binary:copy(<<Seed>>, ?FUZZ_SIZE)),
+                Synced = file:sync(Fd),
+                {Written, Synced, file:close(Fd)};
+            {error, _} = Error ->
+                Error;
+            {'EXIT', _} ->
+                {error, exit}
+        end,
+    chryso_test:emit("FS_PUT_" ++ chryso_test:tag(Tag), Outcome).
+
+-doc """
+The system fuzz: read file `File` back and report `{ok, Seed}` when it is
+whole and every byte is `Seed`, `differs` when it is not, or
+`{error, Reason}`.
+""".
+-spec get(atom(), 0..255) -> ok.
+get(Tag, File) ->
+    Outcome =
+        case catch file:read_file(fuzz_path(File)) of
+            {ok, <<Seed, _/binary>> = Bin} when byte_size(Bin) =:= ?FUZZ_SIZE ->
+                case binary:copy(<<Seed>>, ?FUZZ_SIZE) of
+                    Bin -> {ok, Seed};
+                    _ -> differs
+                end;
+            {ok, _} ->
+                differs;
+            {error, _} = Error ->
+                Error;
+            {'EXIT', _} ->
+                {error, exit}
+        end,
+    chryso_test:emit("FS_GET_" ++ chryso_test:tag(Tag), Outcome).
+
+-spec fuzz_path(0..255) -> string().
+fuzz_path(File) ->
+    "/fuzz" ++ integer_to_list(File) ++ ".bin".
 
 -spec back(binary()) -> same | differs.
 back(Bin) ->

@@ -11,7 +11,8 @@ Only the console logs and QEMU's stderr stay in the work directory.
 
 The testbed listens on the QMP socket and QEMU connects to it, so nothing
 polls for the socket. A SHUTDOWN, RESET or STOP event fails the console's
-waits at once. With -no-reboot a guest reset arrives as SHUTDOWN.
+waits at once, except the STOP of `paused()`. With -no-reboot a guest reset
+arrives as SHUTDOWN.
 
 The guest runs in its own process group, and leaving the context always
 SIGKILLs and reaps it, even on cancellation.
@@ -26,7 +27,7 @@ import os
 import shutil
 import signal
 import tempfile
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -40,6 +41,7 @@ from chryso_testbed.console import Console
 LOAD_ADDRESS: Final = "0x70000000"
 QMP_TIMEOUT: Final = 30.0
 FATAL_EVENTS: Final = ("SHUTDOWN", "RESET", "STOP", "GUEST_PANICKED")
+NETDEV: Final = "net0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +79,7 @@ def drive(profile: Profile, overlay: Path) -> list[str]:
 
 
 def argv(tools: Tools, profile: Profile, disk: Path, qmp: Path) -> list[str]:
-    netdev = "user,id=net0" + "".join(f",hostfwd=tcp::{h}-:{g}" for h, g in profile.hostfwd)
+    netdev = f"user,id={NETDEV}" + "".join(f",hostfwd=tcp::{h}-:{g}" for h, g in profile.hostfwd)
     return [
         tools.qemu,
         "-machine", "virt,virtualization=on",
@@ -87,7 +89,7 @@ def argv(tools: Tools, profile: Profile, disk: Path, qmp: Path) -> list[str]:
         "-global", "virtio-mmio.force-legacy=false",
         *drive(profile, disk),
         "-device", "virtio-blk-device,drive=hd,bus=virtio-mmio-bus.1",
-        "-device", "virtio-net-device,netdev=net0,bus=virtio-mmio-bus.0",
+        "-device", f"virtio-net-device,netdev={NETDEV},bus=virtio-mmio-bus.0",
         "-netdev", netdev,
         "-chardev", f"socket,id=qmp,path={qmp}",
         "-object", "monitor-qmp,id=qmp-monitor,chardev=qmp",
@@ -121,6 +123,7 @@ class Machine:
         self.qmp = QMPClient(name)
         self._proc: asyncio.subprocess.Process | None = None
         self._tasks: list[asyncio.Task[None]] = []
+        self._stops_expected = 0
         # Scratch lives in a short private directory: a unix socket path must
         # fit in 108 bytes, which a Nix output path can exceed.
         self._scratch = Path(tempfile.mkdtemp(prefix="tb-"))
@@ -193,8 +196,31 @@ class Machine:
     async def _watch(self) -> None:
         listener = EventListener(FATAL_EVENTS)
         with self.qmp.listen(listener):
-            event = await listener.get()
-        await self.console.report(f"QEMU {event['event']} {event.get('data', {})}")
+            async for event in listener:
+                if event["event"] == "STOP" and self._stops_expected:
+                    self._stops_expected -= 1
+                else:
+                    await self.console.report(f"QEMU {event['event']} {event.get('data', {})}")
+                    return
+
+    @contextlib.asynccontextmanager
+    async def paused(self) -> AsyncIterator[None]:
+        """Hold the VM stopped for the body. Guest virtual time stops with it."""
+        self._stops_expected += 1
+        await self.qmp.execute("stop")
+        try:
+            yield
+        finally:
+            await self.qmp.execute("cont")
+
+    @contextlib.asynccontextmanager
+    async def unplugged(self) -> AsyncIterator[None]:
+        """Hold the NIC's link down for the body, as a pulled cable would."""
+        await self.qmp.execute("set_link", {"name": NETDEV, "up": False})
+        try:
+            yield
+        finally:
+            await self.qmp.execute("set_link", {"name": NETDEV, "up": True})
 
     async def power_off(self) -> None:
         """SIGKILL the guest and reap it. Safe to call more than once."""
