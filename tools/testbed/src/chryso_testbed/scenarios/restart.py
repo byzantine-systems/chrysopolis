@@ -9,12 +9,12 @@ same steps on a fresh boot.
 from __future__ import annotations
 
 import asyncio
-import errno
 import re
 from collections.abc import Awaitable, Callable
 from typing import Final
 
 from chryso_testbed import probes
+from chryso_testbed.blkdebug import EIO, Delay, WriteError
 from chryso_testbed.console import Mark
 from chryso_testbed.machine import Machine
 from chryso_testbed.scenario import Context, registry
@@ -264,9 +264,10 @@ async def blk_recovery(ctx: Context) -> None:
         ctx.record("blk-fault-smoke-in-flight", restart_count=4)
 
 
-EIO_ON_WRITE: Final = ({"event": "write_aio", "iotype": "write", "errno": errno.EIO},)
+# The first guest write fails with EIO, then the disk recovers.
+EIO_ONCE: Final = (WriteError(errno=EIO, once=True),)
 # Every guest read waits 1 ms and then succeeds.
-SLOW_READS: Final = ({"event": "read_aio", "iotype": "read", "errno": 0, "delay-ns": 1_000_000},)
+SLOW_READS: Final = (Delay(errno=0, event="read_aio", iotype="read", delay_ns=1_000_000),)
 
 
 @registry.scenario("blk-write-smoke", group=GROUP, timeout=600)
@@ -279,16 +280,16 @@ async def blk_write(ctx: Context) -> None:
         await read(m, "after_write")
 
 
-# On demand until the guest passes it: today the writer sees ok for a write
-# that failed with EIO, and every later read of the volume fails with eperm.
-@registry.scenario("blk-eio-smoke", group="isolated", timeout=600)
+@registry.scenario("blk-eio-smoke", group=GROUP, timeout=600)
 async def blk_eio(ctx: Context) -> None:
-    """Every disk write fails with EIO: reads of the volume must still work."""
-    async with ctx.boot("test-image", blkdebug=EIO_ON_WRITE) as m, asyncio.timeout(400):
+    """One write fails with EIO: the writer sees eio and the volume stays readable."""
+    async with ctx.boot("test-image", blkdebug=EIO_ONCE) as m, asyncio.timeout(400):
         banner = await m.console.wait("Eshell")
         await probes.load_test_modules(m, ctx.settings.test_modules, banner)
-        await probes.call(m, "chryso_fs:write_status('eio').", r"FS_WRITE_EIO\|")
-        await read(m, "after_eio")
+        await probes.call(m, "chryso_fs:write_status('eio').", r"FS_WRITE_EIO\|\{\{error,eio\},")
+        await probes.call(
+            m, "chryso_fs:read_outcome('after_eio', lists).", r"FS_READ_AFTER_EIO\|\{ok,\d+,\d+\}"
+        )
 
 
 @registry.scenario("blk-slow-smoke", group=GROUP, timeout=900)

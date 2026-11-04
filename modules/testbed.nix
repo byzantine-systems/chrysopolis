@@ -76,6 +76,7 @@
             p.hypothesis
             p.hypothesis-jsonschema
             p.pytest-asyncio
+            p.pydantic
             p.qemu-qmp
             p.typer
             p.mypy
@@ -161,6 +162,7 @@
         };
         build-system = [ python.pkgs.setuptools ];
         dependencies = [
+          python.pkgs.pydantic
           python.pkgs.qemu-qmp
           python.pkgs.typer
         ];

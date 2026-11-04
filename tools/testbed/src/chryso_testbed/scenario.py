@@ -11,6 +11,7 @@ from time import perf_counter
 from typing import Any, Final
 
 from chryso_testbed.abi import Abi
+from chryso_testbed.blkdebug import Plan
 from chryso_testbed.machine import Machine, Profile, Tools
 from chryso_testbed.ports import Ports
 
@@ -122,7 +123,7 @@ class Context:
         *,
         hostfwd: tuple[tuple[int, int], ...] = (),
         failures: Iterable[str] | None = None,
-        blkdebug: tuple[dict[str, object], ...] = (),
+        blkdebug: Plan = (),
     ) -> AsyncIterator[Machine]:
         """Boot `image` and power it off on exit. `blkdebug` holds disk fault rules."""
         name = f"{image}-{len(self.machines) + 1}"

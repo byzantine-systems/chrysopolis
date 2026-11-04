@@ -5,7 +5,7 @@ The flags match the Microkit image's needs: the image is loaded at
 on bus 0. Writes go to a qcow2 overlay over the read-only FAT image, so a
 boot costs no copy. A profile's `blkdebug` rules go to a blkdebug node under
 both the overlay and the FAT image, so they see every guest data read and
-write (QEMU's blkdebug `inject-error` options, passed through as given). The
+write (`blkdebug.Plan`, dumped in QEMU's `inject-error` field names). The
 overlay and QMP socket are scratch, removed on exit.
 Only the console logs and QEMU's stderr stay in the work directory.
 
@@ -34,6 +34,7 @@ from typing import Final, Self
 
 from qemu.qmp import EventListener, QMPClient
 
+from chryso_testbed.blkdebug import PLAN, Plan
 from chryso_testbed.console import Console
 
 LOAD_ADDRESS: Final = "0x70000000"
@@ -53,14 +54,14 @@ class Profile:
     disk: Path
     hostfwd: tuple[tuple[int, int], ...] = ()
     extra: tuple[str, ...] = ()
-    blkdebug: tuple[dict[str, object], ...] = ()
+    blkdebug: Plan = ()
 
 
-def debugged(
-    rules: tuple[dict[str, object], ...], path: Path, **extra: object
-) -> dict[str, object]:
+def debugged(rules: Plan, path: Path, **extra: object) -> dict[str, object]:
     image = {"driver": "file", "filename": str(path), **extra}
-    return {"driver": "blkdebug", "inject-error": list(rules), "image": image} if rules else image
+    if not rules:
+        return image
+    return {"driver": "blkdebug", "inject-error": PLAN.dump_python(rules), "image": image}
 
 
 def drive(profile: Profile, overlay: Path) -> list[str]:
