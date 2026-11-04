@@ -16,7 +16,7 @@ from typing import Final
 from chryso_testbed import inject, probes
 from chryso_testbed.blkdebug import EIO, Delay, WriteError
 from chryso_testbed.console import Mark
-from chryso_testbed.faults import Model, Pause, Ping, Unplug
+from chryso_testbed.faults import Arm, Corrupt, Disarm, Get, Model, Pause, Ping, Put, Unplug
 from chryso_testbed.machine import Machine
 from chryso_testbed.scenario import Context, registry
 
@@ -335,7 +335,7 @@ async def net_unplug(ctx: Context) -> None:
     """A pulled cable, then a paused VM: the guest dials the host after each."""
     program = (
         Ping(kind="ping"),
-        Unplug(kind="unplug", ms=3000),
+        Unplug(kind="unplug", ms=1500),
         Ping(kind="ping"),
         Pause(kind="pause", ms=1000),
         Ping(kind="ping"),
@@ -344,9 +344,39 @@ async def net_unplug(ctx: Context) -> None:
     async with ctx.boot(IMAGE) as m:
         await net_ready(ctx, m)
         async with ctx.step("unplug and pause"), asyncio.timeout(300):
-            model = Model(ctx.abi.driver_budget)
+            model = Model.start(ctx.abi.driver_budget)
             await inject.check(m, program, model, abi=ctx.abi, log=outcomes.append)
         ctx.record("net-unplug-smoke", outcomes=outcomes)
+
+
+@registry.scenario("blk-iron-smoke", group=GROUP, timeout=900)
+async def blk_iron(ctx: Context) -> None:
+    """Runtime disk faults aimed at one file: a latent read error on its data
+    is reported every time and lifts when disarmed, corrupted data reads back
+    as different until rewritten, and nothing can be aimed at a missing file."""
+    program = (
+        Put(kind="put", file=1, seed=7),
+        Arm(kind="arm", op="read", region="data", file=1, once=False),
+        Get(kind="get", file=1),
+        Get(kind="get", file=1),
+        Disarm(kind="disarm"),
+        Get(kind="get", file=1),
+        Corrupt(kind="corrupt", region="data", file=1),
+        Get(kind="get", file=1),
+        Put(kind="put", file=1, seed=9),
+        Get(kind="get", file=1),
+        Arm(kind="arm", op="write", region="entry", file=1, once=True),
+        Put(kind="put", file=2, seed=3),
+        Disarm(kind="disarm"),
+        Arm(kind="arm", op="read", region="data", file=3, once=False),
+    )
+    outcomes: list[str] = []
+    async with ctx.boot("test-image") as m:
+        await ready(ctx, m)
+        async with ctx.step("iron"), asyncio.timeout(300):
+            model = Model.start(ctx.abi.driver_budget)
+            await inject.check(m, program, model, abi=ctx.abi, log=outcomes.append)
+        ctx.record("blk-iron-smoke", outcomes=outcomes)
 
 
 @registry.scenario("blk-giveup-smoke", group=GROUP, timeout=1500)
