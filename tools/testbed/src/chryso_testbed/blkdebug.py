@@ -67,12 +67,21 @@ def fails_writes(plan: Iterable[Delay | WriteError]) -> bool:
     return any(isinstance(rule, WriteError) for rule in plan)
 
 
-def shaped(plan: Plan, shape: str) -> Plan:
+type Shape = Literal["clean", "single", "transient", "any"]
+SHAPES: Final[tuple[Shape, ...]] = ("clean", "single", "transient", "any")
+
+
+def shaped(plan: Plan, shape: Shape) -> Plan:
     """Fit a plan to a shape, so every shape is drawn about equally often.
-    A clean plan keeps only delays, a transient one fails each write once."""
+
+    A clean plan keeps only delays, a single one adds exactly one one-shot
+    write error to them, and a transient one fails each write once."""
+    delays = tuple(rule for rule in plan if isinstance(rule, Delay))
     match shape:
         case "clean":
-            return tuple(rule for rule in plan if isinstance(rule, Delay))
+            return delays
+        case "single":
+            return (*delays[:3], WriteError(errno=EIO, once=True))
         case "transient":
             return tuple(
                 rule.model_copy(update={"once": True}) if isinstance(rule, WriteError) else rule

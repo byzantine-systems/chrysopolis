@@ -20,7 +20,7 @@ from hypothesis_jsonschema import from_schema
 
 from chryso_testbed import probes
 from chryso_testbed.__main__ import load
-from chryso_testbed.blkdebug import PLAN, SCHEMA, Expected, Plan, shaped
+from chryso_testbed.blkdebug import PLAN, SCHEMA, SHAPES, Expected, Plan, shaped
 from chryso_testbed.machine import Machine, Profile
 from chryso_testbed.scenario import Settings, default_failures
 
@@ -33,7 +33,7 @@ EXAMPLES = itertools.count(1)
 PLANS = st.builds(
     shaped,
     from_schema(SCHEMA).map(PLAN.validate_python),
-    st.sampled_from(["clean", "transient", "any"]),
+    st.sampled_from(SHAPES),
 )
 
 
@@ -54,7 +54,8 @@ def testbed(tmp_path_factory: pytest.TempPathFactory) -> Settings:
 async def test_disk_faults_are_reported_and_contained(testbed: Settings, plan: Plan) -> None:
     """Under any plan the system boots and no PD faults, and:
 
-    - a write reports eio exactly when the plan fails writes;
+    - write, sync and close report eio, and nothing else, exactly when the
+      plan fails writes;
     - a later read reports what Expected allows, with eio its only error;
     - a read that works returns the bytes it returned before the fault;
     - a write reported as ok reads back exactly as written."""
@@ -77,9 +78,8 @@ async def test_disk_faults_are_reported_and_contained(testbed: Settings, plan: P
             )
             back = await probes.call(m, "chryso_fs:read_back('fuzz').", BACK)
     reported = write.groups[0] or ""
-    # {error, R} from open, or {Write, Sync, Close}. Sync is enosys on this path.
-    steps = re.findall(TERM, reported)
-    write_errors = {e for e in (steps[0], steps[-1]) if e != "ok"}
+    # {error, R} from open, or {Write, Sync, Close}.
+    write_errors = {e for e in re.findall(TERM, reported) if e != "ok"}
     assert write_errors == ({"{error,eio}"} if expected.write_fails else set()), reported
 
     read = after.groups[0] or ""

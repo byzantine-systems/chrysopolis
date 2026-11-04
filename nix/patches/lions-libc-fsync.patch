@@ -1,0 +1,46 @@
+--- a/lib/libc/posix/file.c
++++ b/lib/libc/posix/file.c
+@@ -704,6 +704,32 @@
+     return 0;
+ }
+ 
++// START_CHRYSOPOLIS_MODIFICATION: fsync and fdatasync reach the server's FS_CMD_FILE_SYNC
++static long sys_fsync(va_list ap) {
++    int fd = va_arg(ap, int);
++    fd_entry_t *fd_entry = posix_fd_entry(fd);
++
++    if (fd_entry == NULL) {
++        return -EBADF;
++    }
++    if (fd < 0 || fd >= MAX_FDS || fs_server_fd_map[fd] < 0 || (fd_entry->flags & O_DIRECTORY)) {
++        return -EINVAL;
++    }
++
++    fs_cmpl_t completion = {0};
++    int err = fs_command_blocking(&completion, (fs_cmd_t) {
++                                                   .type = FS_CMD_FILE_SYNC,
++                                                   .params.file_sync.fd = fs_server_fd_map[fd],
++                                               });
++    // No free request slot leaves the completion unwritten.
++    if (err || completion.status >= FS_STATUS_NUM_STATUSES) {
++        return -EIO;
++    }
++
++    return -fs_status_to_errno[completion.status];
++}
++// END_CHRYSOPOLIS_MODIFICATION
++
+ void libc_init_file() {
+     libc_define_syscall(__NR_newfstatat, sys_fstatat);
+     libc_define_syscall(__NR_readlinkat, sys_readlinkat);
+@@ -711,6 +737,10 @@
+     libc_define_syscall(__NR_lseek, sys_lseek);
+     libc_define_syscall(__NR_mkdirat, sys_mkdirat);
+     libc_define_syscall(__NR_unlinkat, sys_unlinkat);
++    // START_CHRYSOPOLIS_MODIFICATION
++    libc_define_syscall(__NR_fsync, sys_fsync);
++    libc_define_syscall(__NR_fdatasync, sys_fsync);
++    // END_CHRYSOPOLIS_MODIFICATION
+ 
+     memset(fs_server_fd_map, -1, sizeof(fs_server_fd_map));
+     memset(fd_path, 0, sizeof(fd_path));

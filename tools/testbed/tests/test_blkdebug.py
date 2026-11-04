@@ -6,13 +6,24 @@ from hypothesis import given
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 
-from chryso_testbed.blkdebug import EIO, PLAN, SCHEMA, Delay, Expected, Plan, WriteError, shaped
+from chryso_testbed.blkdebug import (
+    EIO,
+    PLAN,
+    SCHEMA,
+    SHAPES,
+    Delay,
+    Expected,
+    Plan,
+    Shape,
+    WriteError,
+    shaped,
+)
 
 # Every key QEMU's QAPI BlkdebugInjectErrorOptions accepts.
 QAPI_KEYS = {"event", "state", "iotype", "errno", "delay-ns", "sector", "once", "immediately"}
 
 plans = from_schema(SCHEMA).map(PLAN.validate_python)
-shapes = st.sampled_from(["clean", "transient", "any"])
+shapes = st.sampled_from(SHAPES)
 delays = from_schema(Delay.model_json_schema()).map(Delay.model_validate)
 
 
@@ -26,7 +37,7 @@ def test_a_plan_round_trips_through_its_qemu_form(plan: Plan) -> None:
 
 
 @given(plan=plans, shape=shapes)
-def test_a_shaped_plan_stays_valid(plan: Plan, shape: str) -> None:
+def test_a_shaped_plan_stays_valid(plan: Plan, shape: Shape) -> None:
     """Shaping only drops rules or sets once, so the result still validates."""
     reshaped = shaped(plan, shape)
     assert PLAN.validate_python(PLAN.dump_python(reshaped)) == reshaped
@@ -35,6 +46,18 @@ def test_a_shaped_plan_stays_valid(plan: Plan, shape: str) -> None:
 @given(plan=plans)
 def test_a_clean_plan_expects_everything_to_work(plan: Plan) -> None:
     assert Expected.of(shaped(plan, "clean")) == Expected(False, frozenset({"ok"}))
+
+
+@given(plan=plans)
+def test_a_single_plan_fails_one_write_and_reads_back(plan: Plan) -> None:
+    """One one-shot error fails the write, and FatFs's retry makes later reads work."""
+    assert Expected.of(shaped(plan, "single")) == Expected(True, frozenset({"ok"}))
+
+
+@given(plan=plans, shape=shapes)
+def test_shaping_twice_changes_nothing(plan: Plan, shape: Shape) -> None:
+    """Every shape is a projection, so the fuzz draws each class directly."""
+    assert shaped(shaped(plan, shape), shape) == shaped(plan, shape)
 
 
 @given(plan=plans)

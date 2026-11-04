@@ -276,7 +276,7 @@ async def blk_write(ctx: Context) -> None:
     async with ctx.boot("test-image") as m, asyncio.timeout(400):
         banner = await m.console.wait("Eshell")
         await probes.load_test_modules(m, ctx.settings.test_modules, banner)
-        await probes.call(m, "chryso_fs:write_status('plain').", r"FS_WRITE_PLAIN\|")
+        await probes.call(m, "chryso_fs:write_status('plain').", r"FS_WRITE_PLAIN\|\{ok,ok,ok\}")
         await read(m, "after_write")
 
 
@@ -286,7 +286,12 @@ async def blk_eio(ctx: Context) -> None:
     async with ctx.boot("test-image", blkdebug=EIO_ONCE) as m, asyncio.timeout(400):
         banner = await m.console.wait("Eshell")
         await probes.load_test_modules(m, ctx.settings.test_modules, banner)
-        await probes.call(m, "chryso_fs:write_status('eio').", r"FS_WRITE_EIO\|\{\{error,eio\},")
+        # The failed write leaves nothing dirty, so sync and close may succeed.
+        await probes.call(
+            m,
+            "chryso_fs:write_status('eio').",
+            r"FS_WRITE_EIO\|\{\{error,eio\},(?:ok|\{error,eio\}),(?:ok|\{error,eio\})\}",
+        )
         await probes.call(
             m, "chryso_fs:read_outcome('after_eio', lists).", r"FS_READ_AFTER_EIO\|\{ok,\d+,\d+\}"
         )
