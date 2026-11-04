@@ -99,9 +99,11 @@ nix build .#test-image.tests.testbed-boot -L
 nix run .#testbed -- list
 nix run .#testbed -- run -k shell-smoke
 nix run .#testbed -- shell test-image
+# Hypothesis draws disk fault plans, one boot per example:
+BLK_FUZZ_EXAMPLES=20 nix run .#testbed-fuzz
 ```
 
-All QEMU checks gate the build. The testbed (`tools/testbed`) runs each group's scenarios concurrently in one derivation: `testbed-boot`, `testbed-restart` and `testbed-orch`. Timing-sensitive scenarios (`rng-smoke`, `budget-decay-smoke`, `orch-fallback-smoke`) run alone after the others. The `isolated` scenarios are in no check and run on demand. Host-only checks validate pure runtime logic, ABI values, generated topology, ELF layout, test modules, diagnostics, and formatting.
+All QEMU checks gate the build. The testbed (`tools/testbed`) runs each group's scenarios concurrently in one derivation: `testbed-boot`, `testbed-restart` and `testbed-orch`. Timing-sensitive scenarios (`rng-smoke`, `budget-decay-smoke`, `orch-fallback-smoke`) run alone after the others. The `isolated` scenarios are in no check and run on demand. Profiles can carry blkdebug rules (`tools/testbed/src/chryso_testbed/blkdebug.py`) that delay disk I/O or fail guest writes, and `testbed-fuzz` draws such plans with Hypothesis and shrinks a failure to its smallest plan. Host-only checks validate pure runtime logic, ABI values, generated topology, ELF layout, test modules, diagnostics, and formatting.
 
 A group's output holds `report.json`, `junit.xml`, each scenario's `observations.json`, and each machine's `console.log` (colour stripped) and `console.raw`.
 

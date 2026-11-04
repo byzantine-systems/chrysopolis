@@ -14,7 +14,7 @@ dependencies = ["qemu.qmp>=0.0.6", "typer>=0.25"]
 chryso-testbed = "chryso_testbed.__main__:app"
 
 [project.optional-dependencies]
-test = ["pytest>=9", "hypothesis>=6.150", "hypothesis-jsonschema>=0.23"]
+test = ["pytest>=9", "hypothesis>=6.150", "hypothesis-jsonschema>=0.23", "pytest-asyncio>=1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -35,7 +35,7 @@ strict = true
 warn_unreachable = true
 warn_unused_ignores = true
 show_error_codes = true
-files = ["src", "tests"]
+files = ["src", "tests", "fuzz"]
 
 [[tool.mypy.overrides]]
 module = ["hypothesis.*", "hypothesis_jsonschema.*"]

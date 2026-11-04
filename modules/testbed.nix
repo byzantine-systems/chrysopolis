@@ -67,6 +67,7 @@
             ../tools/testbed/pyproject.toml
             ../tools/testbed/src
             ../tools/testbed/tests
+            ../tools/testbed/fuzz
           ];
         };
         nativeBuildInputs = [
@@ -74,6 +75,7 @@
             p.pytest
             p.hypothesis
             p.hypothesis-jsonschema
+            p.pytest-asyncio
             p.qemu-qmp
             p.typer
             p.mypy
@@ -108,6 +110,30 @@
             text = ''
               export CHRYSO_TESTBED_MANIFEST=''${CHRYSO_TESTBED_MANIFEST:-${manifest}}
               exec chryso-testbed "$@"
+            '';
+          }
+        );
+      };
+
+      # nix run .#testbed-fuzz: Hypothesis draws blkdebug plans and boots the
+      # image once per example. On demand only, since each example is a boot.
+      apps.testbed-fuzz = {
+        type = "app";
+        program = lib.getExe (
+          pkgs.writeShellApplication {
+            name = "chryso-testbed-fuzz";
+            runtimeInputs = [
+              (python.withPackages (p: [
+                config.packages.testbed
+                p.pytest
+                p.pytest-asyncio
+                p.hypothesis
+                p.hypothesis-jsonschema
+              ]))
+            ];
+            text = ''
+              export CHRYSO_TESTBED_MANIFEST=''${CHRYSO_TESTBED_MANIFEST:-${manifest}}
+              exec python -m pytest -p no:cacheprovider --rootdir . ${../tools/testbed/fuzz} "$@"
             '';
           }
         );
