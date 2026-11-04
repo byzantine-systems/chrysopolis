@@ -105,19 +105,29 @@ class FaultRecord:
 class FaultLifecycle(_Chart[FaultRecord]):
     """The runtime disk fault. Arming replaces any fault in place. A one-shot
     fault is `spent` only when it was the sole possible cause of an EIO,
-    otherwise it becomes `maybe_spent` and promises nothing strict, until an
-    EIO only it can explain spends it after all."""
+    otherwise it becomes `maybe_spent`. Rewriting the file may move its data
+    and FAT entry off the faulted sector, leaving the fault `adrift`. Neither
+    promises anything strict."""
 
     disarmed = State(initial=True)
     armed = State()
     maybe_spent = State()
+    adrift = State()
 
     aimed = (
-        disarmed.to(armed, on="aim") | armed.to(armed, on="aim") | maybe_spent.to(armed, on="aim")
+        disarmed.to(armed, on="aim")
+        | armed.to(armed, on="aim")
+        | maybe_spent.to(armed, on="aim")
+        | adrift.to(armed, on="aim")
     )
-    removed = disarmed.to(disarmed) | armed.to(disarmed) | maybe_spent.to(disarmed)
+    removed = (
+        disarmed.to(disarmed) | armed.to(disarmed) | maybe_spent.to(disarmed) | adrift.to(disarmed)
+    )
     spent = armed.to(disarmed, cond="one_shot") | maybe_spent.to(disarmed, cond="one_shot")
-    maybe_fired = armed.to(maybe_spent, cond="one_shot") | maybe_spent.to(maybe_spent)
+    maybe_fired = (
+        armed.to(maybe_spent, cond="one_shot") | maybe_spent.to(maybe_spent) | adrift.to(adrift)
+    )
+    moved = armed.to(adrift) | maybe_spent.to(adrift) | adrift.to(adrift)
 
     def aim(self, op: Literal["read", "write"], region: Region, file: int, once: bool) -> None:
         self.model.op, self.model.region, self.model.file, self.model.once = op, region, file, once

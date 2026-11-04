@@ -124,6 +124,21 @@ def testbed(tmp_path_factory: pytest.TempPathFactory) -> Settings:
 @example(
     run=Run((), "pinned", (Ping(kind="ping"), Unplug(kind="unplug", ms=1500), Ping(kind="ping")))
 )
+# Found by this test: a rewrite may move a file's data off a faulted sector
+# (a gap in the model, not the system).
+@example(
+    run=Run(
+        (),
+        "pinned",
+        (
+            Put(kind="put", file=0, seed=0),
+            Arm(kind="arm", op="read", region="data", file=0, once=False),
+            Get(kind="get", file=0),
+            Put(kind="put", file=0, seed=0),
+            Get(kind="get", file=0),
+        ),
+    )
+)
 # Found by this test: with blk given up on, FatFs still reports a missing
 # file from its cached directory sector (a gap in the model, not the system).
 @example(

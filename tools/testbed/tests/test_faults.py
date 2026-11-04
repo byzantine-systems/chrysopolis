@@ -353,6 +353,29 @@ def test_a_latent_read_error_on_present_data_is_always_reported(
     assert (after.storage.armed is None) == (once and not storage.suspect)
 
 
+@given(
+    start=states(),
+    file=files,
+    seed=st.integers(0, 255),
+    region=st.sampled_from(["data", "fat"]),
+    again=st.integers(0, 255),
+)
+def test_a_rewrite_sets_a_data_fault_adrift(
+    start: Model, file: int, seed: int, region: Literal["data", "fat"], again: int
+) -> None:
+    """Found by the fuzz: rewriting a file may move its data to new clusters,
+    so a sticky read error armed on the old sector need not fail the next
+    read. The model must allow both."""
+    if (model := holding(without_fault(start), file, seed)) is None:
+        return
+    arm = Arm(kind="arm", op="read", region=region, file=file, once=False)
+    armed = model.after(arm, Status.PRESENT)
+    rewritten = armed.after(Put(kind="put", file=file, seed=again), Status.OK)
+    allowed = rewritten.expect(Get(kind="get", file=file))
+    assert Seed(again) in allowed
+    assert Status.EIO in allowed
+
+
 @given(start=states(), file=files, seed=st.integers(0, 255))
 def test_rewriting_corrupted_data_heals_it(start: Model, file: int, seed: int) -> None:
     if (model := holding(without_fault(start), file, seed)) is None:

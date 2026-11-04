@@ -293,7 +293,7 @@ class StorageModel:
             # The strict cases: a read error on a file's data is reported,
             # and a put never reads data, nor a get write.
             case Get(file=f), "read" if same_data:
-                if self.fault.at == "maybe_spent":
+                if self.fault.at in {"maybe_spent", "adrift"}:
                     return base | expect(EIO)
                 return expect(EIO) if self.file(f).at in {"held", "corrupt"} else ANYTHING
             case Get(), "write":
@@ -363,16 +363,24 @@ class StorageModel:
             case Corrupt(), Status.PRESENT:
                 return replace(model, volume=model.volume.evolved("metadata_corrupted"))
             case Put(file=f, seed=s), Status.OK:
-                return model._file(f, "written", seed=s)
+                return model._file(f, "written", seed=s)._moved(f)
             case Put(file=f), _:
                 armed = model.armed
                 dirty = "error" in model.disk.reads or (armed is not None and armed.op == "write")
-                failed = model._file(f, "write_failed")
+                failed = model._file(f, "write_failed")._moved(f)
                 return (
                     replace(failed, window=failed.window.evolved("left_dirty")) if dirty else failed
                 )
             case _:
                 return model
+
+    def _moved(self, f: int) -> StorageModel:
+        """A rewrite of `f` truncates it, so FatFs may give it new clusters:
+        a fault on its data or FAT entry may no longer touch it."""
+        armed = self.armed
+        if armed is None or armed.file != f or armed.region not in {"data", "fat"}:
+            return self
+        return replace(self, fault=self.fault.evolved("moved"))
 
     def _file(self, f: int, event: str, **data: Any) -> StorageModel:
         return replace(self, files={**self.files, f: self.file(f).evolved(event, **data)})
@@ -385,7 +393,8 @@ class StorageModel:
         if outcome != EIO or armed is None or not armed.once:
             return self
         certain = (
-            isinstance(step, Get)
+            self.fault.at != "adrift"
+            and isinstance(step, Get)
             and armed.op == "read"
             and armed.region == "data"
             and armed.file == step.file
