@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 import pytest
@@ -78,3 +78,29 @@ def test_cancellation_kills_the_guest(
     asyncio.run(asyncio.wait_for(scenario(), 15))
     assert pids
     assert not alive(pids[0])
+
+
+def test_a_dead_qemu_fails_at_once(profile: Profile, tmp_path: Path) -> None:
+    """QEMU exiting before QMP connects is reported with its status, not a timeout."""
+    dead = tmp_path / "dead-qemu"
+    dead.write_text("#!/bin/sh\necho 'qemu: bad option' >&2\nexit 3\n")
+    dead.chmod(0o755)
+    qemu_img = tmp_path / "img"
+    qemu_img.write_text('#!/bin/sh\nfor last; do :; done\n: > "$last"\n')
+    qemu_img.chmod(0o755)
+    tools = Tools(str(dead), str(qemu_img))
+
+    async def scenario() -> None:
+        async with Machine("m", profile, tmp_path / "m", tools, ()):
+            pass
+
+    started = asyncio.run(asyncio.wait_for(_timed(scenario()), 10))
+    assert started < 5
+
+
+async def _timed(coro: Coroutine[object, object, None]) -> float:
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(ScenarioFailure, match=r"(?s)status 3 before QMP.*bad option"):
+        await coro
+    return loop.time() - began

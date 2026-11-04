@@ -4,33 +4,14 @@ import json
 import subprocess
 import sys
 
-IMAGES = {
-    "testbed-boot": (
-        "test-image",
-        "default",
-        "cothread-probe-image",
-        "lifecycle-failure-image",
-    ),
-    "testbed-restart": ("restart-image", "budget-decay-image"),
-    "testbed-orch": (
-        "test-image",
-        "spec-commit-image",
-        "command-image",
-        "fallback-image",
-        "fallback-nomap-image",
-    ),
-}
+# The testbed groups guard their images with a dry run in the workflow, so
+# only the topology check still needs this script.
+IMAGES = {"restart-topology": ("default", "restart-image", "budget-decay-image")}
 
-if len(sys.argv) != 2:
-    raise SystemExit("usage: ci-check-image-store.py CHECK")
+if len(sys.argv) != 2 or sys.argv[1] not in IMAGES:
+    raise SystemExit(f"usage: ci-check-image-store.py {{{','.join(IMAGES)}}}")
 
-check = sys.argv[1]
-if check == "restart-topology":
-    names = ["default", "restart-image", "budget-decay-image"]
-else:
-    if check not in IMAGES:
-        raise SystemExit(f"unknown QEMU check: {check}")
-    names = ["disk", *IMAGES[check]]
+names = list(IMAGES[sys.argv[1]])
 
 name_list = "[ " + " ".join(json.dumps(name) for name in names) + " ]"
 expression = (

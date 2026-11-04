@@ -46,13 +46,16 @@
       runner = python.withPackages (_: [ config.packages.testbed ]);
 
       # One derivation per group. Scenarios run concurrently up to the build's
-      # cores, and the report lands in $out.
+      # cores. Reports land in the build directory first, so a failed run
+      # kept with --keep-failed still has its consoles. Then they move to $out.
       group =
         name:
         pkgs.runCommand "chrysopolis-testbed-${name}" { nativeBuildInputs = [ runner ]; } ''
           jobs=''${NIX_BUILD_CORES:-1}
           [ "$jobs" -gt 0 ] || jobs=$(nproc)
-          chryso-testbed run --manifest ${manifest} --group ${name} --out $out --jobs "$jobs"
+          reports="$NIX_BUILD_TOP/reports"
+          chryso-testbed run --manifest ${manifest} --group ${name} --out "$reports" --jobs "$jobs"
+          cp -r "$reports" $out
         '';
       # Lint, strict types and tests. The Python reader must match every
       # Erlang vector.

@@ -141,9 +141,30 @@ class Machine:
             raise RuntimeError("QEMU started without console pipes")
         self.console.attach(stdin)
         self._tasks.append(asyncio.create_task(self.console.pump(stdout)))
-        async with asyncio.timeout(QMP_TIMEOUT):
-            await self.qmp.accept()
+        await self._connected(self._proc)
         self._tasks.append(asyncio.create_task(self._watch()))
+
+    async def _connected(self, proc: asyncio.subprocess.Process) -> None:
+        """Wait for QEMU's QMP connection, failing at once if QEMU exits first."""
+        accept = asyncio.create_task(self.qmp.accept())
+        exited = asyncio.create_task(proc.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {accept, exited}, timeout=QMP_TIMEOUT, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            for task in (accept, exited):
+                task.cancel()
+            await asyncio.gather(accept, exited, return_exceptions=True)
+        if accept in done:
+            accept.result()
+            return
+        stderr = (self.workdir / "qemu.stderr").read_text(errors="replace")[-2000:]
+        if exited in done:
+            raise self.console.fail(
+                f"QEMU exited with status {exited.result()} before QMP connected\n{stderr}"
+            )
+        raise self.console.fail(f"QEMU did not connect to QMP within {QMP_TIMEOUT:g}s\n{stderr}")
 
     async def _watch(self) -> None:
         listener = EventListener(FATAL_EVENTS)
