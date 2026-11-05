@@ -10,7 +10,7 @@ import asyncio
 import itertools
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
 
@@ -72,6 +72,7 @@ class Run:
     plan: Plan
     scenario: str
     program: Program
+    crash_seed: int = 0  # which writes of each cut epoch survive, 0 keeps none
 
 
 STEERED = st.tuples(PLANS, st.sampled_from(sorted(SCENARIOS))).flatmap(
@@ -79,7 +80,8 @@ STEERED = st.tuples(PLANS, st.sampled_from(sorted(SCENARIOS))).flatmap(
 )
 # Programs `chryso-testbed ldfi` found failing, replayed every campaign.
 CORPUS = tuple(Run((), "corpus", p) for p in load_corpus(Path(__file__).with_name("corpus.json")))
-RUNS = st.one_of(STEERED, st.sampled_from(CORPUS)) if CORPUS else STEERED
+_BASE = st.one_of(STEERED, st.sampled_from(CORPUS)) if CORPUS else STEERED
+RUNS = st.builds(lambda run, seed: replace(run, crash_seed=seed), _BASE, st.integers(0, 2**32 - 1))
 
 
 def abstract(model: Model) -> tuple[object, ...]:
@@ -114,12 +116,10 @@ CRASH_POINTS = 4
 
 
 def crash_checks(
-    raw: bytes, spans: list[Span], base: Path, scratch: Path
+    raw: bytes, spans: list[Span], base: Path, scratch: Path, seed: int
 ) -> tuple[list[str], list[str]]:
-    """Crash images at up to CRASH_POINTS flushes, evenly spaced, each held to
-    what the writes finished before it promised. Returns the problems, and
-    events (fsck's verdict on the first and last, since FatFs promises no
-    clean volume) for the caller to record: this runs off the test's thread."""
+    """Judge crash images at up to CRASH_POINTS flushes, each with a seeded part
+    of the next epoch. Returns problems and events for the test thread."""
     log = crashlog.parse(raw)
     flushes = len(log.flushes)
     if not flushes:
@@ -128,9 +128,15 @@ def crash_checks(
     found, events = [], [f"crash points checked: {len(chosen)}"]
     for k in chosen:
         t0 = perf_counter()
-        image = crashlog.replay(log, base, scratch / f"crash-{k}.img", crashlog.state(log, k + 1))
+        part = crashlog.persisted(log, k + 1, seed)
+        size = len(log.epochs[k + 1]) if k + 1 < len(log.epochs) else 0
+        share = "none" if not part else "all" if len(part) == size else "part"
+        events.append(f"crash kept {share} of its epoch")
+        kept = crashlog.state(log, k + 1, part)
+        image = crashlog.replay(log, base, scratch / f"crash-{k}.img", kept)
         t1 = perf_counter()
-        promised = crashcheck.durable(spans, crashlog.stable(log, k + 1))
+        crash = crashlog.crashed_at(log, k + 1, part)
+        promised = crashcheck.allowed(spans, crashlog.stable(log, k + 1), crash)
         verdict = crashcheck.judge(image, promised)
         t2 = perf_counter()
         found += [f"crash after flush {k}: {p} (image {image})" for p in verdict.problems]
@@ -138,7 +144,10 @@ def crash_checks(
         if verdict.diverged:
             events.append("crash left the two FATs different")
         if k in (chosen[0], chosen[-1]):
-            events.append(f"crash fsck exit {crashcheck.fsck(image, scratch)}")
+            code = crashcheck.fsck(image, scratch)
+            events.append(f"crash fsck exit {code}")
+            if code > 1:  # 1 reports lost clusters, which a crash may leave
+                found.append(f"crash after flush {k}: fsck.fat exited {code} (image {image})")
         if not verdict.problems:
             image.unlink()  # 100 MB each: keep only an image that broke a promise
         log_.debug("crash.point", flush=k, replay_s=t1 - t0, judge_s=t2 - t1,
@@ -179,8 +188,24 @@ def testbed(tmp_path_factory: pytest.TempPathFactory) -> Settings:
         ),
     )
 )
-# Found by this test: with blk given up on, FatFs still reports a missing
-# file from its cached directory sector (a gap in the model, not the system).
+# Found by this test: a crash state holding part of a rewrite (crash_seed 1)
+# was held to the old seed (an oracle mistake: started is judged at the crash).
+@example(
+    run=Run(
+        (),
+        "pinned",
+        (
+            Put(kind="put", file=0, seed=0),
+            Corrupt(kind="corrupt", region="data", file=0),
+            Get(kind="get", file=0),
+            Put(kind="put", file=0, seed=0),
+            Get(kind="get", file=0),
+        ),
+        crash_seed=1,
+    )
+)
+# Found by this test: with blk given up on, FatFs reported a missing file
+# from its cached window. Now the FAT server fails every request instead.
 @example(
     run=Run(
         (),
@@ -231,7 +256,9 @@ async def test_the_system_does_what_its_model_allows(testbed: Settings, run: Run
             await probes.call(m, "chryso_test:alive(fuzz).", r"FUZZ_ALIVE\|42")
         # The log lives in the machine's scratch, which leaving the context removes.
         raw = await asyncio.to_thread(m.write_log.read_bytes)
-    broken, seen = await asyncio.to_thread(crash_checks, raw, spans, testbed.disk, workdir)
+    broken, seen = await asyncio.to_thread(
+        crash_checks, raw, spans, testbed.disk, workdir, run.crash_seed
+    )
     for name in seen:
         event(name)
     assert not broken, broken

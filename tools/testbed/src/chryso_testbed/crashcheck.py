@@ -1,5 +1,6 @@
-"""What a crash at a point in the write log must have kept, and the check of a
-crash image against it. A write reported ok before the point must read back.
+"""What a crash at a point in the write log may have left, and the check of a
+crash image against it. A write reported ok before the point must read back,
+and no crash may leave a broken chain.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from pyfatfs import PyFATException
 
@@ -32,33 +33,72 @@ class Span:
     end: int
 
 
-def durable(spans: Iterable[Span], point: int) -> Mapping[int, int | None]:
-    """Each written file's seed a crash at log offset `point` must keep, or
-    None where anything may survive: a write still in flight at the point, or
-    a last write that failed or was cut short."""
-    files: dict[int, int | None] = {}
+# What a crash image holds for one file: a whole file of one seed, no entry,
+# an empty entry, other bytes, or an entry on clusters the FAT lacks.
+type Content = int | Literal["absent", "empty", "garbage", "broken"]
+
+
+def allowed(
+    spans: Iterable[Span], stable: int, crash: int | None = None
+) -> Mapping[int, frozenset[Content] | None]:
+    """What each file may hold after a crash, or None for anything. A write ok
+    by `stable` is what it holds. One started by `crash` but not stable leaves
+    it as before, empty or new. A failed write leaves anything."""
+    crash = stable if crash is None else crash
+    files: dict[int, frozenset[Content] | None] = {}
     for span in spans:
-        if span.start >= point or not isinstance(span.step, Put | CrashPut):
+        if span.start >= crash or not isinstance(span.step, Put | CrashPut):
             continue
-        done = span.end <= point and isinstance(span.step, Put) and span.outcome == Status.OK
-        files[span.step.file] = span.step.seed if done else None
+        f, seed = span.step.file, span.step.seed
+        before = files.get(f, frozenset({"absent"}))
+        if isinstance(span.step, Put) and span.outcome != Status.OK:
+            files[f] = None
+        elif isinstance(span.step, Put) and span.end <= stable:
+            files[f] = frozenset({seed})
+        else:
+            files[f] = None if before is None else before | {"empty", seed}
     return files
+
+
+def durable(
+    spans: Iterable[Span], stable: int, crash: int | None = None
+) -> Mapping[int, int | None]:
+    """Each file's seed a crash must keep: `allowed` narrowed to one seed."""
+    promised: dict[int, int | None] = {}
+    for f, may in allowed(spans, stable, crash).items():
+        only = next(iter(may)) if may is not None and len(may) == 1 else None
+        promised[f] = only if isinstance(only, int) else None
+    return promised
+
+
+def held(found: Mapping[bytes, bytes | None], file: int) -> Content:
+    """What the image holds for fuzz file `file`."""
+    name = short_name(f"fuzz{file}.bin")
+    if name not in found:
+        return "absent"
+    match found[name]:
+        case None:
+            return "broken"
+        case b"":
+            return "empty"
+        case data if len(data) == FUZZ_SIZE and data == bytes([data[0]]) * FUZZ_SIZE:
+            return data[0]
+        case _:
+            return "garbage"
 
 
 @dataclass(frozen=True, slots=True)
 class Verdict:
-    """A crash image against what it must hold: broken promises, and the files
-    whose chain a crash broke, which only a promise turns into a problem.
-    `diverged` says the crash fell between the writes to the two FAT copies."""
+    """A crash image's problems, its broken chains, and whether its FAT copies
+    differ."""
 
     problems: tuple[str, ...]
     broken: tuple[str, ...]
     diverged: bool = False
 
 
-def judge(image: Path, expected: Mapping[int, int | None]) -> Verdict:
-    """Where a crash image breaks `expected`: an unreadable volume, or a file
-    a finished write promised that is missing, different or broken."""
+def judge(image: Path, expected: Mapping[int, frozenset[Content] | None]) -> Verdict:
+    """Where a crash image breaks `expected`, as `allowed` gives it."""
     try:
         with warnings.catch_warnings(record=True) as warned:
             warnings.simplefilter("always")
@@ -67,15 +107,13 @@ def judge(image: Path, expected: Mapping[int, int | None]) -> Verdict:
         return Verdict((f"volume unreadable: {error!r}",), ())
     diverged = any("FATs differ" in str(w.message) for w in warned)
     broken = tuple(name.decode() for name, data in found.items() if data is None)
-    wrong = []
-    for file, seed in expected.items():
-        if seed is None:
-            continue
-        held = found.get(short_name(f"fuzz{file}.bin"))
-        if held != bytes([seed]) * FUZZ_SIZE:
-            got = "missing" if held is None else f"{len(held)} bytes, not all {seed}"
-            wrong.append(f"fuzz{file}.bin: {got}")
-    return Verdict(tuple(wrong), broken, diverged)
+    problems = [f"{name}: entry on clusters the FAT does not hold" for name in broken]
+    if diverged:  # packages.disk has one FAT, so two copies that disagree are a fault
+        problems.append("the FAT copies differ")
+    for file, may in expected.items():
+        if may is not None and (got := held(found, file)) not in may:
+            problems.append(f"fuzz{file}.bin: holds {got!r}, allowed {sorted(map(str, may))}")
+    return Verdict(tuple(problems), broken, diverged)
 
 
 def fsck(image: Path, scratch: Path) -> int:

@@ -6,6 +6,7 @@ state is every earlier epoch in full plus any subset of one epoch.
 
 from __future__ import annotations
 
+import random
 import shutil
 import struct
 from collections.abc import Iterable
@@ -73,7 +74,9 @@ def parse(raw: bytes) -> Log:
     if not raw:
         return Log(512, ())  # nothing written yet: blklogwrites starts lazily
     magic, version, _, sectorsize = SUPER.unpack_from(raw, 0)
-    if magic != MAGIC or version != VERSION:
+    if (magic, version) == (0, 0):
+        sectorsize = 512  # never flushed: blklogwrites writes the superblock on a flush
+    elif magic != MAGIC or version != VERSION:
         raise ValueError(f"not a write log: magic {magic:#x}, version {version}")
     entries, pos = [], sectorsize
     while pos + sectorsize <= len(raw):
@@ -95,6 +98,24 @@ def state(log: Log, epoch: int, subset: Iterable[int] = ()) -> frozenset[int]:
     """Every write of the epochs before `epoch`, plus `subset` of that one."""
     done = (i for writes in log.epochs[:epoch] for i in writes)
     return frozenset(done) | (frozenset(subset) & frozenset(log.epochs[epoch]))
+
+
+def persisted(log: Log, epoch: int, seed: int) -> frozenset[int]:
+    """A seeded subset of `epoch`'s writes that a crash let reach the disk, in
+    any order. Seed 0 keeps none, so shrinking settles on the boundary."""
+    if seed == 0 or epoch >= len(log.epochs):
+        return frozenset()
+    rng = random.Random(f"{seed}:{epoch}")
+    writes = log.epochs[epoch]
+    return frozenset(rng.sample(writes, rng.randint(0, len(writes))))
+
+
+def crashed_at(log: Log, epoch: int, subset: Iterable[int] = ()) -> int:
+    """Where the crash fell: the end of the last kept write, or the stable point."""
+    if epoch >= len(log.epochs):
+        return stable(log, epoch)
+    kept = frozenset(subset) & frozenset(log.epochs[epoch])
+    return max((log.entries[i].end for i in kept), default=stable(log, epoch))
 
 
 def stable(log: Log, epoch: int) -> int:

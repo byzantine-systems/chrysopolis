@@ -105,7 +105,7 @@ def shaped(plan: Plan, shape: Shape) -> Plan:
         case "clean":
             return delays
         case "single":
-            return (*delays[:3], WriteError(errno=EIO, once=True))
+            return (WriteError(errno=EIO, once=True), *delays[:3])  # first, so no delay shadows it
         case "transient":
             return tuple(
                 rule.model_copy(update={"once": True}) if isinstance(rule, WriteError) else rule
@@ -129,8 +129,18 @@ class Expected:
 
     @classmethod
     def of(cls, plan: Iterable[Delay | WriteError]) -> Expected:
-        failing = [rule for rule in plan if isinstance(rule, WriteError)]
-        if any(not rule.once for rule in failing):
+        rules = list(plan)
+        failing = [rule for rule in rules if isinstance(rule, WriteError)]
+        # blkdebug's first matching rule decides, and an errno-0 write delay
+        # before a write error lets writes through (checked with qemu-io).
+        first = next((i for i, r in enumerate(rules) if isinstance(r, WriteError)), len(rules))
+        shadowed = any(
+            isinstance(r, Delay) and r.event == "write_aio" and r.iotype == "write"
+            for r in rules[:first]
+        )
+        if shadowed and failing:
+            reads = frozenset({"ok", "error"})
+        elif any(not rule.once for rule in failing):
             reads = frozenset({"error"})
         else:
             reads = frozenset({"ok"} if len(failing) <= 1 else {"ok", "error"})

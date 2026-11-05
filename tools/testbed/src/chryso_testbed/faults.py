@@ -329,18 +329,13 @@ class StorageModel:
         match self.file(f).at:
             case "absent":
                 return expect(Status.ABSENT)
-            case "unknown":
+            case "unknown" | "torn":
                 return expect(Status.PRESENT, Status.ABSENT)
             case _:
                 return expect(Status.PRESENT)
 
     def _unfaulted(self, step: StorageStep, *, up: bool) -> Expect:
         match step:
-            # With the block driver gone, FatFs can still answer a lookup
-            # from the directory sector in its window: a missing file is
-            # still reported missing. Reading data needs the disk.
-            case Get(file=f) if not up and self.file(f).at == "absent":
-                return expect(Status.ENOENT, EIO, ERROR)
             case Put() | Get() if not up:
                 return expect(EIO, ERROR)
             case Put() if not self.disk.write_fails:
@@ -355,6 +350,10 @@ class StorageModel:
                         held = expect(Status.ENOENT)
                     case "unknown":
                         held = ANYTHING
+                    case "torn":
+                        held = expect(
+                            *chart.model.before, Status.DIFFERS, Seed(chart.model.seed or 0)
+                        )
                     case "corrupt":
                         held = expect(Status.DIFFERS)
                     case _:
@@ -389,9 +388,20 @@ class StorageModel:
             case _:
                 return model
 
-    def crashed(self, f: int) -> StorageModel:
-        """A write of `f` cut short by a reset: its contents are unknown."""
-        return self._file(f, "write_failed")
+    def crashed(self, f: int, seed: int) -> StorageModel:
+        """A rewrite of `f` cut by a reset: it reads as before, empty or new."""
+        chart = self.file(f)
+        before: Outcome
+        match chart.at:
+            case "absent":
+                before = Status.ENOENT
+            case "held":
+                before = Seed(chart.model.seed or 0)
+            case "corrupt":
+                before = Status.DIFFERS
+            case _:  # unknown or torn: the chart drops to unknown and ignores it
+                before = Status.ERROR
+        return self._file(f, "cut", seed=seed, before=frozenset({before}))
 
     def rebooted(self) -> StorageModel:
         """After a reset: the disk keeps its files and any damage, while the
@@ -428,9 +438,11 @@ class StorageModel:
 
     def key(self) -> tuple[object, ...]:
         armed = self.armed
+        # File numbers are unique, so sorting never compares past the first field.
+        files = sorted((f, c.at, c.model.seed, c.model.before) for f, c in self.files.items())
         return (
             self.disk,
-            tuple(sorted((f, c.at, c.model.seed) for f, c in self.files.items())),
+            tuple(files),
             self.fault.at,
             None if armed is None else (armed.op, armed.region, armed.file, armed.once),
             self.volume.at,
@@ -529,8 +541,8 @@ class Model:
         match step:
             case Reset():
                 return self.rebooted()
-            case CrashPut(file=f):
-                return replace(self, storage=self.storage.crashed(f)).rebooted()
+            case CrashPut(file=f, seed=s):
+                return replace(self, storage=self.storage.crashed(f, s)).rebooted()
         recovering = {d for d in DRIVERS if self.root.recovering(d)}
         if isinstance(step, Fault | Restart) and not step.settle:
             recovering.discard(step.driver)

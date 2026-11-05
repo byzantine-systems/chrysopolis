@@ -99,7 +99,7 @@
           ruff check --no-cache .
           ruff format --check --no-cache .
           mypy --cache-dir=$TMPDIR/mypy
-          python -m pytest -n "$NIX_BUILD_CORES"
+          python -m pytest -n "$NIX_BUILD_CORES" --hypothesis-profile=gate
           touch $out
           runHook postBuild
         '';

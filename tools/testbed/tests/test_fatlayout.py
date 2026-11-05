@@ -130,6 +130,7 @@ def test_a_freed_cluster_breaks_only_its_file(
             assert found[short_name(name)] == payload
     verdict = judge(image, {})
     assert verdict.broken == (short_name(victim).decode(),)
+    assert verdict.problems, "a broken chain is a problem whatever was promised"
     assert not verdict.diverged
 
 
@@ -147,7 +148,9 @@ def test_a_crash_between_the_fat_copies_is_reported(
     image, target = volume(tmp_path, files)
     victim = data.draw(st.sampled_from(sorted(files)))
     free_first_cluster(image, target, victim, every_copy=False)
-    assert judge(image, {}).diverged
+    verdict = judge(image, {})
+    assert verdict.diverged
+    assert verdict.problems
 
 
 def free_first_cluster(image: Path, target: str, victim: str, *, every_copy: bool) -> None:

@@ -14,6 +14,7 @@ state they need instead of waiting for it. Each caught a planted defect:
 | a ping leaves FatFs's window dirty | test_steps_of_different_components_commute |
 | a reset keeps Root's budgets or the armed fault | test_a_reset_forgets_root_and_keeps_the_disk |
 | a crashed write leaves its file held | test_a_crashed_write_changes_only_its_file |
+| a crashed rewrite may read as anything | test_a_crashed_write_changes_only_its_file |
 | a reset is offered on a damaged volume | test_steer.test_no_reset_is_offered_on_a_damaged_volume |
 
 The pre-split model ran in lockstep with this one before it was deleted.
@@ -50,6 +51,7 @@ from chryso_testbed.faults import (
     Reset,
     Restart,
     Step,
+    expect,
     owner,
     trim,
 )
@@ -241,18 +243,16 @@ def test_a_driver_is_restarted_budget_times_then_given_up_on(
 def test_without_the_block_driver_no_data_reads_back(
     start: Model, held_file: int, other: int, seed: int
 ) -> None:
-    """Once Root gives up on blk, reading a file's data fails, though a
-    lookup FatFs can answer from its cached directory sector still finds a
-    missing file missing."""
+    """Once Root gives up on blk, every read fails, a missing file's included:
+    the FAT server answers nothing from its cached window."""
     if (model := holding(without_fault(start), held_file, seed)) is None:
         return
     blk = Fault(kind="fault", driver="blk")
     while model.root.up("blk"):
         (only,) = model.expect(blk).outcomes
         model = model.after(blk, only)
-    assert model.expect(Get(kind="get", file=held_file)).outcomes == {Status.EIO, Status.ERROR}
-    if model.storage.file(other).at == "absent":
-        assert Status.ENOENT in model.expect(Get(kind="get", file=other))
+    for f in (held_file, other):
+        assert model.expect(Get(kind="get", file=f)).outcomes == {Status.EIO, Status.ERROR}
 
 
 # --- the recovery window -----------------------------------------------------------
@@ -317,13 +317,26 @@ def test_a_reset_forgets_root_and_keeps_the_disk(start: Model, file: int, seed: 
 def test_a_crashed_write_changes_only_its_file(
     model: Model, file: int, seed: int, after: int
 ) -> None:
+    """A crash mid-rewrite tears only its own file, which then reads as before,
+    empty (differs) or whole with the new seed, and nothing else."""
+    was = model.storage.file(file)
     crashed = model.after(
         CrashPut(kind="crash-put", file=file, seed=seed, after_ms=after), Status.OK
     )
     rebooted = model.after(reset, Status.OK)
-    assert crashed.storage.file(file).at == "unknown"
+    chart = crashed.storage.file(file)
+    assert chart.at == ("unknown" if was.at in {"unknown", "torn"} else "torn")
     for other in set(range(4)) - {file}:
         assert crashed.storage.file(other).at == rebooted.storage.file(other).at
+    if chart.at == "torn" and not crashed.storage.damaged:
+        before: dict[str, Outcome] = {
+            "absent": Status.ENOENT,
+            "held": Seed(was.model.seed or 0),
+            "corrupt": Status.DIFFERS,
+        }
+        assert crashed.expect(Get(kind="get", file=file)) == expect(
+            before[was.at], Status.DIFFERS, Seed(seed)
+        )
 
 
 # --- storage -------------------------------------------------------------------------

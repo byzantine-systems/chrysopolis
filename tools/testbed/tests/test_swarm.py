@@ -69,7 +69,7 @@ def test_a_failing_worker_stops_the_others(
         swarm([marker, "slow" if fails is not None else "fast"], workers, out, seed,
               command=(sys.executable, str(script)))
     )  # fmt: skip
-    assert perf_counter() - began < 30
+    assert perf_counter() - began < 60  # the others sleep 60 s, so a wait shows
     assert [(f.worker, f.code) for f in failed] == ([] if fails is None else [(fails, 3)])
     # A worker stopped early may not have written its seed yet.
     seeds = {n: int(p.read_text()) for n in range(workers) if (p := out / f"w{n}.seed").exists()}

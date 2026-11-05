@@ -6,11 +6,17 @@ Planted defects caught:
 | parse stops at nr_entries | test_parse_reads_every_entry_whatever_the_superblock_counts |
 | replay applies the newest write first | test_replay_applies_exactly_the_kept_writes |
 | a crash state drops earlier epochs | test_crash_states_grow_epoch_by_epoch |
+| persisted keeps all or none of an epoch | test_crash_subsets_reach_between_the_boundaries |
+| persisted samples outside its epoch | test_a_crash_persists_some_of_one_epoch_and_nothing_else |
+| persisted seeds from hash() | test_a_crash_subset_replays_in_another_process |
 """
 
 from __future__ import annotations
 
+import os
 import struct
+import subprocess
+import sys
 from pathlib import Path
 from typing import Final
 
@@ -18,7 +24,18 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from chryso_testbed.crashlog import DISCARD, FLUSH, MAGIC, Log, parse, replay, stable, state
+from chryso_testbed.crashlog import (
+    DISCARD,
+    FLUSH,
+    MAGIC,
+    Log,
+    crashed_at,
+    parse,
+    persisted,
+    replay,
+    stable,
+    state,
+)
 
 SECTOR: Final = 512
 DISK_SECTORS: Final = 64
@@ -34,6 +51,17 @@ writes = st.builds(
 ops = st.lists(
     st.one_of(writes, st.just(("flush", 0, b"")), st.just(("discard", 3, b""))), max_size=24
 )
+FLUSH_OP: Final[Op] = ("flush", 0, b"")
+
+
+@st.composite
+def busy(draw: st.DrawFn) -> tuple[list[Op], int]:
+    """A log with an epoch of two or more writes, built in rather than hoped
+    for, and that epoch's index."""
+    before, after = draw(ops), draw(ops)
+    middle = draw(st.lists(writes, min_size=2, max_size=8))
+    epoch = sum(k == "flush" for k, _, _ in before) + 1
+    return [*before, FLUSH_OP, *middle, FLUSH_OP, *after], epoch
 
 
 def encode(log_ops: list[Op], *, counted: int | None = None) -> bytes:
@@ -69,7 +97,7 @@ def test_a_torn_last_entry_is_dropped(log_ops: list[Op], cut: int) -> None:
 
 def test_a_foreign_file_is_not_a_log() -> None:
     with pytest.raises(ValueError, match="not a write log"):
-        parse(bytes(SECTOR * 2))
+        parse(b"\xff" * SECTOR * 2)
 
 
 @given(log_ops=ops, data=st.data())
@@ -83,6 +111,77 @@ def test_crash_states_grow_epoch_by_epoch(log_ops: list[Op], data: st.DataObject
         )
         assert state(log, epoch) <= state(log, epoch, subset) <= state(log, epoch + 1)
         assert state(log, epoch, log.epochs[epoch]) == state(log, epoch + 1)
+
+
+@given(log_ops=ops, data=st.data())
+def test_a_crash_comes_after_every_write_it_kept(log_ops: list[Op], data: st.DataObject) -> None:
+    """The crash point is the stable point for an empty subset, and otherwise
+    the end of the last kept write, so no kept write lies past it."""
+    log = parse(encode(log_ops))
+    epoch = data.draw(st.integers(0, len(log.epochs) - 1))
+    subset = data.draw(st.sets(st.sampled_from(log.epochs[epoch]))) if log.epochs[epoch] else set()
+    crash = crashed_at(log, epoch, subset)
+    assert crash >= stable(log, epoch)
+    assert all(log.entries[i].end <= crash for i in subset)
+    assert (
+        crash == stable(log, epoch) if not subset else crash in {log.entries[i].end for i in subset}
+    )
+
+
+@given(log_ops=ops, seed=st.integers(0, 2**32 - 1))
+def test_a_crash_persists_some_of_one_epoch_and_nothing_else(log_ops: list[Op], seed: int) -> None:
+    """The seeded subset holds only the epoch's own writes, and seed 0 keeps
+    none. Being a subset of its epoch, it inherits the bounds of
+    test_crash_states_grow_epoch_by_epoch. This law alone admits a persisted
+    that keeps nothing or everything: the next one rules both out."""
+    log = parse(encode(log_ops))
+    for epoch, epoch_writes in enumerate(log.epochs):
+        kept = persisted(log, epoch, seed)
+        assert kept <= set(epoch_writes)
+        assert seed or not kept
+
+
+@given(case=busy())
+def test_crash_subsets_reach_between_the_boundaries(case: tuple[list[Op], int]) -> None:
+    """For an epoch of two or more writes some seed keeps part of it, so the
+    check reaches states no flush boundary shows."""
+    log_ops, epoch = case
+    log = parse(encode(log_ops))
+    n = len(log.epochs[epoch])
+    sizes = {len(persisted(log, epoch, seed)) for seed in range(1, 200)}
+    assert sizes & set(range(1, n)), sizes
+
+
+REPLAY = """
+import sys
+from pathlib import Path
+from chryso_testbed.crashlog import parse, persisted
+log = parse(Path(sys.argv[1]).read_bytes())
+print(sorted(persisted(log, int(sys.argv[2]), int(sys.argv[3]))))
+"""
+
+
+@settings(
+    max_examples=10, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(case=busy(), seed=st.integers(1, 2**32 - 1))
+def test_a_crash_subset_replays_in_another_process(
+    tmp_path: Path, case: tuple[list[Op], int], seed: int
+) -> None:
+    """A fuzz failure names its seed, and a later run must rebuild the same
+    crash state from it: two processes with different hash seeds agree."""
+    log_ops, epoch = case
+    path = tmp_path / "writes.log"
+    path.write_bytes(encode(log_ops))
+    picks = {
+        subprocess.run(
+            [sys.executable, "-c", REPLAY, str(path), str(epoch), str(seed)],
+            env={**os.environ, "PYTHONHASHSEED": str(hash_seed)},
+            capture_output=True, text=True, check=True,
+        ).stdout
+        for hash_seed in (1, 2)
+    }  # fmt: skip
+    assert len(picks) == 1, picks
 
 
 @given(log_ops=ops, data=st.data())

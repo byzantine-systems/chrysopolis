@@ -66,13 +66,21 @@ def test_a_transient_plan_never_expects_reads_to_fail_for_good(plan: Plan) -> No
     assert "ok" in Expected.of(shaped(plan, "transient")).reads
 
 
-@given(plan=plans, extra=st.lists(delays, max_size=3), at=st.integers(0, 4))
-def test_delays_never_change_what_is_expected(plan: Plan, extra: list[Delay], at: int) -> None:
-    """A delay succeeds after waiting, so adding one anywhere changes nothing
-    the guest may report."""
-    assert Expected.of((*plan[:at], *extra, *plan[at:])) == Expected.of(plan)
+@given(plan=plans, extra=st.lists(delays, max_size=3))
+def test_delays_after_the_rules_change_nothing(plan: Plan, extra: list[Delay]) -> None:
+    """A delay that comes after every rule never decides a write, so adding it
+    changes nothing the guest may report."""
+    assert Expected.of((*plan, *extra)) == Expected.of(plan)
+
+
+def test_a_write_delay_before_a_write_error_lets_writes_through() -> None:
+    """blkdebug's first matching rule decides (checked with qemu-io): a write
+    delay ahead of a sticky write error lets writes succeed."""
+    delay = Delay(errno=0, event="write_aio", iotype="write", delay_ns=0)
+    expected = Expected.of((delay, WriteError(errno=EIO)))
+    assert expected.reads == {"ok", "error"}
 
 
 @given(plan=plans)
 def test_a_permanent_write_error_fails_writes_and_reads(plan: Plan) -> None:
-    assert Expected.of((*plan, WriteError(errno=EIO))) == Expected(True, frozenset({"error"}))
+    assert Expected.of((WriteError(errno=EIO), *plan)) == Expected(True, frozenset({"error"}))

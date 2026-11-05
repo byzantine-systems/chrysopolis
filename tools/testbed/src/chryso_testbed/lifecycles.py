@@ -13,6 +13,7 @@ from typing import Any, Literal, Self
 from statemachine import State, StateChart
 
 from chryso_testbed.fatlayout import Region
+from chryso_testbed.outcomes import Outcome
 
 
 class _Chart[R](StateChart[R]):
@@ -67,30 +68,56 @@ class DriverLifecycle(_Chart[DriverRecord]):
 class FileRecord:
     seed: int | None = None
     state: str | None = None
+    before: frozenset[Outcome] = frozenset()  # what a torn file read as before
 
 
 class FileLifecycle(_Chart[FileRecord]):
-    """One fuzz file as the volume holds it. `held` reads back its seed,
-    `unknown` follows a failed write, `corrupt` a data sector overwritten
-    behind the guest. A write reported ok always makes it `held`."""
+    """One fuzz file on the volume: `held` reads its seed, `unknown` follows a
+    failed write, `corrupt` an overwrite behind the guest, `torn` a rewrite a
+    crash cut, which reads as before, empty or new."""
 
     absent = State(initial=True)
     held = State()
     unknown = State()
     corrupt = State()
+    torn = State()
 
     written = (
         absent.to(held, on="keep")
         | held.to(held, on="keep")
         | unknown.to(held, on="keep")
         | corrupt.to(held, on="keep")
+        | torn.to(held, on="keep")
     )
-    write_failed = absent.to(unknown) | held.to(unknown) | unknown.to(unknown) | corrupt.to(unknown)
+    write_failed = (
+        absent.to(unknown)
+        | held.to(unknown)
+        | unknown.to(unknown)
+        | corrupt.to(unknown)
+        | torn.to(unknown)
+    )
+    # A second cut, or one of a file already unknown, leaves nothing to promise.
+    cut = (
+        absent.to(torn, on="tear")
+        | held.to(torn, on="tear")
+        | corrupt.to(torn, on="tear")
+        | unknown.to(unknown)
+        | torn.to(unknown)
+    )
     # On a damaged volume a file the model holds absent can still be found.
-    corrupted = held.to(corrupt) | corrupt.to(corrupt) | unknown.to(unknown) | absent.to(unknown)
+    corrupted = (
+        held.to(corrupt)
+        | corrupt.to(corrupt)
+        | unknown.to(unknown)
+        | absent.to(unknown)
+        | torn.to(unknown)
+    )
 
     def keep(self, seed: int) -> None:
         self.model.seed = seed
+
+    def tear(self, seed: int, before: frozenset[Outcome]) -> None:
+        self.model.seed, self.model.before = seed, before
 
 
 @dataclass(slots=True)
