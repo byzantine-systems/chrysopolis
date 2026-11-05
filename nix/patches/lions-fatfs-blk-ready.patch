@@ -1,0 +1,21 @@
+--- a/components/fs/fat/event.c
++++ b/components/fs/fat/event.c
+@@ -257,6 +257,18 @@
+                 continue;
+             }
+ 
++            /* START_CHRYSOPOLIS_MODIFICATION: with the disk gone for good, fail
++             * at once rather than answer from FatFs's cached window. */
++            if (!blk_storage_is_ready(blk_storage_info) && client_req.cmd.type != FS_CMD_INITIALISE
++                && client_req.cmd.type != FS_CMD_DEINITIALISE) {
++                fs_msg_t *reply = fs_queue_idx_empty(fs_completion_queue, fs_response_enqueued);
++                reply->cmpl = (fs_cmpl_t) { .id = client_req.cmd.id, .status = FS_STATUS_ERROR };
++                fs_response_enqueued++;
++                completion_queue_size++;
++                continue;
++            }
++            /* END_CHRYSOPOLIS_MODIFICATION */
++
+             // Get request from the head of the queue
+             setup_request(index, &client_req);
+             LOG_FATFS("FS dequeue request:CMD type: %lu\n", request_pool[index].cmd);
