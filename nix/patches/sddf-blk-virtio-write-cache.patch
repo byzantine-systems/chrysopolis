@@ -1,0 +1,123 @@
+--- a/drivers/blk/virtio/block.c
++++ b/drivers/blk/virtio/block.c
+@@ -18,6 +18,9 @@
+ #include <os/sddf.h>
+ #include <sddf/util/util.h>
+ #include <sddf/util/ialloc.h>
++// START_CHRYSOPOLIS_MODIFICATION: wwmb()
++#include <sddf/util/fence.h>
++// END_CHRYSOPOLIS_MODIFICATION
+ #include <sddf/virtio/transport/common.h>
+ #include <sddf/virtio/transport/pci.h>
+ #include <sddf/virtio/queue.h>
+@@ -57,6 +60,10 @@
+ 
+ uint16_t last_seen_used = 0;
+ 
++// START_CHRYSOPOLIS_MODIFICATION: device caches writes, so flushes must reach it
++static bool flush_negotiated;
++// END_CHRYSOPOLIS_MODIFICATION
++
+ /* Block device configuration, populated during initiliastion. */
+ volatile struct virtio_blk_config *virtio_config;
+ 
+@@ -84,6 +91,22 @@
+         // END_CHRYSOPOLIS_MODIFICATION
+         virtio_blk_print_req(hdr);
+ 
++        // START_CHRYSOPOLIS_MODIFICATION: a flush has no data descriptor
++        if (hdr->type == VIRTIO_BLK_T_FLUSH) {
++            uint16_t flush_footer_idx = virtq.desc[hdr_used.id].next;
++            blk_resp_status_t flush_status = hdr->status == VIRTIO_BLK_S_OK ? BLK_RESP_OK : BLK_RESP_ERR_UNSPEC;
++            int ferr = blk_enqueue_resp(&blk_queue, flush_status, 0, virtio_header_to_id[hdr_used.id]);
++            assert(!ferr);
++            ferr = ialloc_free(&ialloc_desc, hdr_used.id);
++            assert(!ferr);
++            ferr = ialloc_free(&ialloc_desc, flush_footer_idx);
++            assert(!ferr);
++            i += 1;
++            notify = true;
++            continue;
++        }
++        // END_CHRYSOPOLIS_MODIFICATION
++
+         uint16_t data_desc_idx = virtq.desc[hdr_used.id].next;
+         struct virtq_desc data_desc = virtq.desc[data_desc_idx % virtq.num];
+         uint32_t data_len = data_desc.len;
+@@ -230,6 +253,9 @@
+             };
+ 
+             virtq.avail->ring[virtq.avail->idx % virtq.num] = hdr_desc_idx;
++            // START_CHRYSOPOLIS_MODIFICATION: chain and slot before the index
++            wwmb();
++            // END_CHRYSOPOLIS_MODIFICATION
+             virtq.avail->idx++;
+             virtio_queue_notify = true;
+ 
+@@ -238,6 +264,41 @@
+             break;
+         }
+         case BLK_REQ_FLUSH: {
++            // START_CHRYSOPOLIS_MODIFICATION: send the flush, which covers
++            // completed writes. It takes 2 of the 3 free descriptors.
++            if (flush_negotiated) {
++                uint32_t hdr_desc_idx = UINT32_MAX;
++                uint32_t footer_desc_idx = UINT32_MAX;
++                int ferr = ialloc_alloc(&ialloc_desc, &hdr_desc_idx);
++                assert(!ferr && hdr_desc_idx != UINT32_MAX);
++                ferr = ialloc_alloc(&ialloc_desc, &footer_desc_idx);
++                assert(!ferr && footer_desc_idx != UINT32_MAX);
++
++                struct virtio_blk_req *hdr = &virtio_headers[hdr_desc_idx];
++                hdr->type = VIRTIO_BLK_T_FLUSH;
++                hdr->sector = 0;
++                hdr->status = VIRTIO_BLK_S_IOERR;
++
++                virtq.desc[hdr_desc_idx] = (struct virtq_desc) {
++                    .addr = virtio_headers_paddr + (hdr_desc_idx * sizeof(struct virtio_blk_req)),
++                    .len = VIRTIO_BLK_REQ_HDR_SIZE,
++                    .flags = VIRTQ_DESC_F_NEXT,
++                    .next = footer_desc_idx,
++                };
++                virtq.desc[footer_desc_idx] = (struct virtq_desc) {
++                    .addr = virtq.desc[hdr_desc_idx].addr + VIRTIO_BLK_REQ_HDR_SIZE,
++                    .len = 1,
++                    .flags = VIRTQ_DESC_F_WRITE,
++                };
++
++                virtq.avail->ring[virtq.avail->idx % virtq.num] = hdr_desc_idx;
++                wwmb();
++                virtq.avail->idx++;
++                virtio_queue_notify = true;
++                virtio_header_to_id[hdr_desc_idx] = id;
++                break;
++            }
++            // END_CHRYSOPOLIS_MODIFICATION
+             int err = blk_enqueue_resp(&blk_queue, BLK_RESP_OK, 0, id);
+             assert(!err);
+             sddf_notify(config.virt.id);
+@@ -337,7 +398,11 @@
+     virtio_blk_print_features(features);
+ #endif
+     /* Select features we want from the device */
+-    virtio_transport_set_driver_features(&dev, 0, 0);
++    // START_CHRYSOPOLIS_MODIFICATION: take the write cache when offered
++    uint32_t flush_bit = (uint32_t)1 << VIRTIO_BLK_F_FLUSH;
++    flush_negotiated = (virtio_transport_get_device_features(&dev, 0) & flush_bit) != 0;
++    virtio_transport_set_driver_features(&dev, 0, flush_negotiated ? flush_bit : 0);
++    // END_CHRYSOPOLIS_MODIFICATION
+     virtio_transport_set_driver_features(&dev, 1, 0);
+ 
+     virtio_transport_set_status(&dev, VIRTIO_DEVICE_STATUS_FEATURES_OK);
+--- a/drivers/blk/virtio/block.h
++++ b/drivers/blk/virtio/block.h
+@@ -47,6 +47,9 @@
+ #define VIRTIO_BLK_F_GEOMETRY        4  /* Legacy geometry available  */
+ #define VIRTIO_BLK_F_RO              5  /* Disk is read-only */
+ #define VIRTIO_BLK_F_BLK_SIZE        6  /* Block size of disk is available*/
++// START_CHRYSOPOLIS_MODIFICATION: QEMU calls it WCE
++#define VIRTIO_BLK_F_FLUSH           9  /* Cache flush command support */
++// END_CHRYSOPOLIS_MODIFICATION
+ #define VIRTIO_BLK_F_TOPOLOGY       10  /* Topology information is available */
+ #define VIRTIO_BLK_F_MQ             12  /* support more than one vq */
+ #define VIRTIO_BLK_F_DISCARD        13  /* DISCARD is supported */
