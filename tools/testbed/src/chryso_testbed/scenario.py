@@ -126,11 +126,20 @@ class Context:
         hostfwd: tuple[tuple[int, int], ...] = (),
         failures: Iterable[str] | None = None,
         blkdebug: Plan = (),
+        disk: Path | None = None,
+        crashlog: bool = False,
+        reboot: bool = False,
     ) -> AsyncIterator[Machine]:
-        """Boot `image` and power it off on exit. `blkdebug` holds disk fault rules."""
+        """Boot `image` and power it off on exit. `blkdebug` holds disk fault
+        rules, and `disk` replaces the store FAT image, a crash image say."""
         name = f"{image}-{len(self.machines) + 1}"
         profile = Profile(
-            self.settings.images[image], self.settings.disk, hostfwd, blkdebug=blkdebug
+            self.settings.images[image],
+            disk or self.settings.disk,
+            hostfwd,
+            blkdebug=blkdebug,
+            crashlog=crashlog,
+            reboot=reboot,
         )
         watched = default_failures(self.abi) if failures is None else failures
         async with Machine(

@@ -67,6 +67,7 @@ async def execute(settings: Settings, program: Program, workdir: Path) -> Run:
                     program,
                     Model.start(settings.abi.driver_budget),
                     abi=settings.abi,
+                    modules=settings.test_modules,
                     observe=lambda step, seen, before: trace.append((step, seen, before)),
                 )
                 events, _ = rootlog.read(

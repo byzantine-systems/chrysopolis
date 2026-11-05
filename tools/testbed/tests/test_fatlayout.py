@@ -15,7 +15,8 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from chryso_testbed.fatlayout import SECTOR, layout, partition_start, short_name
+from chryso_testbed.crashcheck import judge
+from chryso_testbed.fatlayout import SECTOR, contents, layout, partition_start, short_name
 
 START_LBA: Final = 2048
 VOLUME_BYTES: Final = 40 * 1024 * 1024  # mkfs.fat needs about 33 MiB for FAT32
@@ -26,7 +27,7 @@ needs_tools = pytest.mark.skipif(
     reason="needs dosfstools and mtools",
 )
 names = st.from_regex(r"[a-z][a-z0-9]{0,7}\.bin", fullmatch=True)
-contents = st.binary(min_size=1, max_size=4 * SECTOR)
+file_bytes = st.binary(min_size=1, max_size=4 * SECTOR)
 
 
 def mbr(start_lba: int, sectors: int) -> bytes:
@@ -74,7 +75,7 @@ def test_a_sector_without_the_signature_is_not_an_mbr(sector: bytes) -> None:
 @settings(
     max_examples=15, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
 )
-@given(files=st.dictionaries(names, contents, min_size=1, max_size=4))
+@given(files=st.dictionaries(names, file_bytes, min_size=1, max_size=4))
 def test_each_extent_is_where_mtools_and_the_bpb_put_it(
     tmp_path: Path, files: dict[str, bytes]
 ) -> None:
@@ -104,3 +105,61 @@ def test_each_extent_is_where_mtools_and_the_bpb_put_it(
         assert short_name(name) in at(entry)
         assert at(data_sector)[: len(data)] == data[:SECTOR]
     assert found.sector("data", "absent.bin") is None
+    assert contents(image) == {short_name(name): data for name, data in files.items()}
+
+
+@needs_tools
+@settings(
+    max_examples=10, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(files=st.dictionaries(names, file_bytes, min_size=2, max_size=4), data=st.data())
+def test_a_freed_cluster_breaks_only_its_file(
+    tmp_path: Path, files: dict[str, bytes], data: st.DataObject
+) -> None:
+    """A crash can leave an entry pointing at a freed cluster. That file
+    reads as broken, and every other file still reads back."""
+    for old in tmp_path.iterdir():
+        old.unlink()
+    image, target = volume(tmp_path, files)
+    victim = data.draw(st.sampled_from(sorted(files)))
+    free_first_cluster(image, target, victim, every_copy=True)
+    found = contents(image)
+    assert found[short_name(victim)] is None
+    for name, payload in files.items():
+        if name != victim:
+            assert found[short_name(name)] == payload
+    verdict = judge(image, {})
+    assert verdict.broken == (short_name(victim).decode(),)
+    assert not verdict.diverged
+
+
+@needs_tools
+@settings(
+    max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(files=st.dictionaries(names, file_bytes, min_size=1, max_size=3), data=st.data())
+def test_a_crash_between_the_fat_copies_is_reported(
+    tmp_path: Path, files: dict[str, bytes], data: st.DataObject
+) -> None:
+    """A change to the first FAT alone reads as diverged copies."""
+    for old in tmp_path.iterdir():
+        old.unlink()
+    image, target = volume(tmp_path, files)
+    victim = data.draw(st.sampled_from(sorted(files)))
+    free_first_cluster(image, target, victim, every_copy=False)
+    assert judge(image, {}).diverged
+
+
+def free_first_cluster(image: Path, target: str, victim: str, *, every_copy: bool) -> None:
+    """Mark `victim`'s first cluster free in the first FAT, or in every copy
+    as FatFs's mirrored writes would."""
+    boot = START_LBA * SECTOR
+    raw = image.read_bytes()
+    (reserved,) = struct.unpack_from("<H", raw, boot + 0x0E)
+    (copies,) = struct.unpack_from("<B", raw, boot + 0x10)
+    (per_fat,) = struct.unpack_from("<I", raw, boot + 0x24)
+    entry = first_cluster(target, victim) * 4
+    with image.open("r+b") as disk:
+        for copy in range(copies if every_copy else 1):
+            disk.seek((START_LBA + reserved + copy * per_fat) * SECTOR + entry)
+            disk.write(bytes(4))  # FREE_CLUSTER

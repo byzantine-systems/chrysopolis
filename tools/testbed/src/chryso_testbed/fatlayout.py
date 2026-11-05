@@ -6,12 +6,13 @@ from __future__ import annotations
 
 import contextlib
 import struct
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Literal
 
+from pyfatfs import PyFATException
 from pyfatfs.PyFat import PyFat
 
 SECTOR: Final = 512
@@ -67,19 +68,53 @@ class Layout:
                 return extent.entry
 
 
-def layout(image: Path) -> Layout:
-    """Read a FAT32 disk image's layout. Only FAT32 is read, because that is
-    what `packages.disk` formats."""
-    with image.open("rb") as disk:
-        start = partition_start(disk.read(SECTOR))
+@contextlib.contextmanager
+def _volume(image: Path) -> Iterator[tuple[Any, Any, bytes, int]]:
+    """The open FAT32 volume, its root directory, the raw image and the
+    partition's byte offset."""
     raw = image.read_bytes()
+    start = partition_start(raw[:SECTOR])
     with contextlib.closing(PyFat(offset=start)) as volume:
         volume.open(str(image), read_only=True)
         if volume.fat_type != PyFat.FAT_TYPE_FAT32:
             raise ValueError(f"{image}: FAT{volume.fat_type}, expected FAT32")
         if (root := volume.root_dir) is None:
             raise ValueError(f"{image}: no root directory")
+        yield volume, root, raw, start
+
+
+def layout(image: Path) -> Layout:
+    """Read a FAT32 disk image's layout. Only FAT32 is read, because that is
+    what `packages.disk` formats."""
+    with _volume(image) as (volume, root, raw, start):
         return Layout(MappingProxyType(dict(_extents(volume, root, raw, start))))
+
+
+def contents(image: Path) -> Mapping[bytes, bytes | None]:
+    """Each root-level file's bytes, keyed by 8.3 name, read along its cluster
+    chain, or None where the chain is broken, as a crash can leave a file
+    whose entry still points at clusters already freed."""
+    with _volume(image) as (volume, root, raw, start):
+        view, size = memoryview(raw), volume.bytes_per_cluster
+
+        def cluster(c: int) -> memoryview:
+            at = start + volume.get_data_cluster_address(c)
+            return view[at : at + size]  # a view: the join below is the one copy
+
+        _, files, _ = root.get_entries()
+        found: dict[bytes, bytes | None] = {}
+        for entry in files:
+            name = short_name(entry.get_short_name())
+            if (first := entry.get_cluster()) < 2:
+                found[name] = b""
+                continue
+            try:
+                data = b"".join(map(cluster, volume.get_cluster_chain(first)))
+            except PyFATException:
+                found[name] = None
+                continue
+            found[name] = data[: entry.filesize]
+        return MappingProxyType(found)
 
 
 def _extents(volume: Any, root: Any, raw: bytes, start: int) -> list[tuple[bytes, Extent]]:

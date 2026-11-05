@@ -13,9 +13,10 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Final
 
-from chryso_testbed import inject, probes, rootlog
+from chryso_testbed import crashcheck, crashlog, inject, probes, rootlog
 from chryso_testbed.blkdebug import EIO, Delay, WriteError
 from chryso_testbed.console import Mark
+from chryso_testbed.crashcheck import Span
 from chryso_testbed.faults import (
     Arm,
     Corrupt,
@@ -26,12 +27,14 @@ from chryso_testbed.faults import (
     Model,
     Pause,
     Ping,
+    Program,
     Put,
+    Reset,
     Step,
     Unplug,
 )
 from chryso_testbed.machine import Machine
-from chryso_testbed.outcomes import Outcome, render
+from chryso_testbed.outcomes import Outcome, Seed, render
 from chryso_testbed.scenario import Context, registry
 
 GROUP = "restart"
@@ -368,7 +371,14 @@ async def net_unplug(ctx: Context) -> None:
         await net_ready(ctx, m)
         async with ctx.step("unplug and pause"), asyncio.timeout(300):
             model = Model.start(ctx.abi.driver_budget)
-            await inject.check(m, program, model, abi=ctx.abi, observe=record_into(outcomes))
+            await inject.check(
+                m,
+                program,
+                model,
+                abi=ctx.abi,
+                modules=ctx.settings.test_modules,
+                observe=record_into(outcomes),
+            )
         ctx.record("net-unplug-smoke", outcomes=outcomes)
 
 
@@ -398,7 +408,14 @@ async def blk_iron(ctx: Context) -> None:
         await ready(ctx, m)
         async with ctx.step("iron"), asyncio.timeout(300):
             model = Model.start(ctx.abi.driver_budget)
-            await inject.check(m, program, model, abi=ctx.abi, observe=record_into(outcomes))
+            await inject.check(
+                m,
+                program,
+                model,
+                abi=ctx.abi,
+                modules=ctx.settings.test_modules,
+                observe=record_into(outcomes),
+            )
         ctx.record("blk-iron-smoke", outcomes=outcomes)
 
 
@@ -429,7 +446,9 @@ async def root_lineage(ctx: Context) -> None:
                 await probes.run(m, "chryso_ctl:events(start, 0).", "CTL_EVENTS.START")
             )
             model = Model.start(ctx.abi.driver_budget)
-            await inject.check(m, program, model, abi=ctx.abi, observe=observe)
+            await inject.check(
+                m, program, model, abi=ctx.abi, modules=ctx.settings.test_modules, observe=observe
+            )
             events, _ = rootlog.read(
                 await probes.run(m, f"chryso_ctl:events(finish, {ring.head}).", "CTL_EVENTS.FINISH")
             )
@@ -438,6 +457,73 @@ async def root_lineage(ctx: Context) -> None:
         if problems := rootlog.disagreements(decisions, events, children):
             raise m.console.fail(f"Root's ring disagrees with its console: {problems}")
         ctx.record("root-lineage-smoke", outcomes=outcomes, events=len(events))
+
+
+@registry.scenario("reboot-smoke", group=GROUP, timeout=900)
+async def reboot(ctx: Context) -> None:
+    """A whole-system reset keeps what a sync wrote and gives Root its budgets
+    back: the file reads back, and the next fault is the first restart."""
+    program: Program = (
+        Put(kind="put", file=1, seed=9),
+        *[Fault(kind="fault", driver="blk")] * 3,
+        Reset(kind="reset"),
+        Get(kind="get", file=1),
+        Fault(kind="fault", driver="blk"),
+    )
+    outcomes: list[str] = []
+    async with ctx.boot(IMAGE, reboot=True) as m:
+        await net_ready(ctx, m)
+        async with ctx.step("reset"), asyncio.timeout(400):
+            model = Model.start(ctx.abi.driver_budget)
+            await inject.check(
+                m, program, model, abi=ctx.abi, modules=ctx.settings.test_modules,
+                observe=record_into(outcomes),
+            )  # fmt: skip
+    if outcomes[-1] != "fault: restart:1":
+        raise AssertionError(f"Root kept its budget across the reset: {outcomes}")
+    ctx.record("reboot-smoke", outcomes=outcomes)
+
+
+@registry.scenario("crash-boot-smoke", group=GROUP, timeout=900)
+async def crash_boot(ctx: Context) -> None:
+    """Power lost while a second file is written: the crash image, rebuilt
+    from the write log, still holds the first file, offline and on the guest."""
+    first, second = Put(kind="put", file=1, seed=5), Put(kind="put", file=2, seed=6)
+    spans: list[Span] = []
+    async with ctx.boot("test-image", crashlog=True) as m:
+        await ready(ctx, m)
+        async with ctx.step("write and log"), asyncio.timeout(300):
+
+            def observe(step: Step, seen: Outcome, _: Model) -> None:
+                spans.append(Span(step, seen, spans[-1].end if spans else 0, m.logged()))
+
+            await inject.check(
+                m, (first, second), Model.start(ctx.abi.driver_budget), abi=ctx.abi,
+                modules=ctx.settings.test_modules, observe=observe,
+            )  # fmt: skip
+            raw = await asyncio.to_thread(m.write_log.read_bytes)
+    log = crashlog.parse(raw)
+    during = [k for k, f in enumerate(log.flushes) if spans[0].end <= f.end < spans[1].end]
+    if not during:
+        raise AssertionError(f"no flush inside the second write: {spans}")
+    point = during[-1] + 1
+    image = ctx.workdir / "crash.img"
+    await asyncio.to_thread(
+        crashlog.replay, log, ctx.settings.disk, image, crashlog.state(log, point)
+    )
+    expected = crashcheck.durable(spans, crashlog.stable(log, point))
+    if expected.get(1) != 5:
+        raise AssertionError(f"the first write should be durable here: {expected}")
+    verdict = await asyncio.to_thread(crashcheck.judge, image, expected)
+    if verdict.problems:
+        raise AssertionError(f"crash image offline: {verdict.problems}")
+    async with ctx.boot("test-image", disk=image) as m:
+        await ready(ctx, m)
+        async with ctx.step("boot the crash image"), asyncio.timeout(300):
+            hit = await probes.call(m, "chryso_fs:get(crashed, 1).", r"FS_GET_CRASHED\|(\S+)")
+            if inject.get_outcome(hit.groups[0] or "") != Seed(5):
+                raise m.console.fail(f"the durable file read back as {hit.groups[0]}")
+    ctx.record("crash-boot-smoke", flush=point, entries=len(log.entries))
 
 
 @registry.scenario("blk-giveup-smoke", group=GROUP, timeout=1500)

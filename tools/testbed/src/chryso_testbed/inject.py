@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Final
 
 import structlog
@@ -19,6 +19,7 @@ from chryso_testbed.fatlayout import Region, layout
 from chryso_testbed.faults import (
     Arm,
     Corrupt,
+    CrashPut,
     Disarm,
     Driver,
     Fault,
@@ -28,6 +29,7 @@ from chryso_testbed.faults import (
     Ping,
     Program,
     Put,
+    Reset,
     Restart,
     Step,
     Unplug,
@@ -154,8 +156,27 @@ async def locate(m: Machine, region: Region, file: int) -> int | None:
     return found.sector(region, f"fuzz{file}.bin")
 
 
-async def perform(m: Machine, step: Step, *, tag: str, abi: Abi, port: int) -> Outcome:
-    """Do `step` and return its outcome. `tag` is a fresh lower-case atom."""
+DHCP: Final = r"SOCKET_SMOKE\|DHCP:"
+
+
+async def reboot(m: Machine, modules: Sequence[str]) -> None:
+    """Reset the system and wait until the shell is ready again: the lease,
+    if the first boot had one, then the prompt, then the probes reloaded."""
+    await m.disarm()
+    leased = m.console.search(DHCP) is not None
+    mark = m.console.mark()
+    await m.reset()
+    if leased:
+        await m.console.wait(DHCP, since=mark)
+    banner = await m.console.wait("Eshell", since=mark)
+    await probes.load_test_modules(m, modules, banner)
+
+
+async def perform(
+    m: Machine, step: Step, *, tag: str, abi: Abi, port: int, modules: Sequence[str]
+) -> Outcome:
+    """Do `step` and return its outcome. `tag` is a fresh lower-case atom, and
+    `modules` are the probes a reboot reloads."""
     match step:
         case Fault(driver=d) | Restart(driver=d):
             mark = m.console.mark()
@@ -197,6 +218,14 @@ async def perform(m: Machine, step: Step, *, tag: str, abi: Abi, port: int) -> O
                 return Status.ABSENT
             await m.overwrite(sector, 1, CORRUPTION)
             return Status.PRESENT
+        case Reset():
+            await reboot(m, modules)
+            return Status.OK
+        case CrashPut(file=f, seed=s, after_ms=ms):
+            await m.console.send(f"chryso_fs:put({tag}, {f}, {s}).")
+            await asyncio.sleep(ms / 1000)
+            await reboot(m, modules)
+            return Status.OK
 
 
 async def check(
@@ -205,6 +234,7 @@ async def check(
     model: Model,
     *,
     abi: Abi,
+    modules: Sequence[str],
     observe: Callable[[Step, Outcome, Model], object] | None = None,
     step_timeout: float = 300,
 ) -> Model:
@@ -221,7 +251,9 @@ async def check(
     for n, step in enumerate(program):
         allowed = model.expect(step)
         async with asyncio.timeout(step_timeout):
-            seen = await perform(m, step, tag=f"s{n}", abi=abi, port=ports.take())
+            seen = await perform(m, step, tag=f"s{n}", abi=abi, port=ports.take(), modules=modules)
+            if isinstance(step, Reset | CrashPut):
+                pending.clear()  # a reboot starts every driver afresh
             unsettled: Driver | None = None
             if isinstance(step, Fault | Restart) and not step.settle:
                 unsettled = step.driver

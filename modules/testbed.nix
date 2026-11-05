@@ -73,6 +73,7 @@
         nativeBuildInputs = [
           (python.withPackages (p: [
             p.pytest
+            p.pytest-xdist
             p.hypothesis
             p.hypothesis-jsonschema
             p.pytest-asyncio
@@ -98,7 +99,7 @@
           ruff check --no-cache .
           ruff format --check --no-cache .
           mypy --cache-dir=$TMPDIR/mypy
-          python -m pytest
+          python -m pytest -n "$NIX_BUILD_CORES"
           touch $out
           runHook postBuild
         '';
@@ -129,7 +130,9 @@
         program = lib.getExe (
           pkgs.writeShellApplication {
             name = "chryso-testbed-fuzz";
+            # fsck.fat checks the crash images the fuzz replays.
             runtimeInputs = [
+              pkgs.dosfstools
               (python.withPackages (p: [
                 config.packages.testbed
                 p.pytest
@@ -140,7 +143,8 @@
             ];
             text = ''
               export CHRYSO_TESTBED_MANIFEST=''${CHRYSO_TESTBED_MANIFEST:-${manifest}}
-              exec python -m pytest -p no:cacheprovider -p chryso_testbed.fuzzing --rootdir . ${../tools/testbed/fuzz} "$@"
+              # CHRYSO_FUZZ_WORKERS=N runs N pytest workers in parallel (chryso_testbed.swarm).
+              exec python -m chryso_testbed.swarm -p no:cacheprovider -p chryso_testbed.fuzzing --rootdir . ${../tools/testbed/fuzz} "$@"
             '';
           }
         );

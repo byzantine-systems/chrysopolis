@@ -9,7 +9,19 @@ from hypothesis import strategies as st
 from test_faults import BUDGET, disks, states, steps
 
 from chryso_testbed.blkdebug import Expected
-from chryso_testbed.faults import PROGRAM, Arm, Corrupt, Fault, Model, Restart, Step, trim
+from chryso_testbed.faults import (
+    PROGRAM,
+    Arm,
+    Corrupt,
+    CrashPut,
+    Fault,
+    Model,
+    Put,
+    Reset,
+    Restart,
+    Step,
+    trim,
+)
 from chryso_testbed.outcomes import Status
 from chryso_testbed.steer import (
     MAX_STEPS,
@@ -91,3 +103,18 @@ def test_aimed_faults_find_their_target(name: str, disk: Expected, data: st.Data
             hits.append(model.storage.damaged or model.expect(step).outcomes == {Status.PRESENT})
         model = advance(model, step)
     assert any(hits)
+
+
+@given(model=states(), file=st.integers(0, 3), seed=st.integers(0, 255), data=st.data())
+def test_no_reset_is_offered_on_a_damaged_volume(
+    model: Model, file: int, seed: int, data: st.DataObject
+) -> None:
+    """A damaged volume may not mount, and then the run could not continue."""
+    put = Put(kind="put", file=file, seed=seed)
+    if Status.OK not in model.expect(put) or model.storage.damaged:
+        return
+    corrupt = Corrupt(kind="corrupt", region="fat", file=file)
+    damaged = model.after(put, Status.OK).after(corrupt, Status.PRESENT)
+    assert damaged.storage.damaged
+    for _ in range(20):
+        assert not isinstance(data.draw(enabled(damaged)), Reset | CrashPut)

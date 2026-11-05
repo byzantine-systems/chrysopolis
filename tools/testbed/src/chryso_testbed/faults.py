@@ -119,8 +119,23 @@ class Corrupt(_Step):
     file: int = Field(ge=0, lt=FILES)
 
 
+class Reset(_Step):
+    """Reset the whole system, as a power cycle that keeps the disk."""
+
+    kind: Literal["reset"]
+
+
+class CrashPut(_Step):
+    """Start writing a file, and reset after `after_ms` without waiting."""
+
+    kind: Literal["crash-put"]
+    file: int = Field(ge=0, lt=FILES)
+    seed: int = Field(ge=0, le=255)
+    after_ms: int = Field(ge=0, le=200)
+
+
 type Step = Annotated[
-    Fault | Restart | Unplug | Pause | Put | Get | Ping | Arm | Disarm | Corrupt,
+    Fault | Restart | Unplug | Pause | Put | Get | Ping | Arm | Disarm | Corrupt | Reset | CrashPut,
     Field(discriminator="kind"),
 ]
 # Generation draws at most 16 steps. Lineage cuts may insert a driver's whole
@@ -374,6 +389,15 @@ class StorageModel:
             case _:
                 return model
 
+    def crashed(self, f: int) -> StorageModel:
+        """A write of `f` cut short by a reset: its contents are unknown."""
+        return self._file(f, "write_failed")
+
+    def rebooted(self) -> StorageModel:
+        """After a reset: the disk keeps its files and any damage, while the
+        armed fault (disarmed first) and FatFs's window are gone."""
+        return replace(self, fault=_fault(), window=_window())
+
     def _moved(self, f: int) -> StorageModel:
         """A rewrite of `f` truncates it, so FatFs may give it new clusters:
         a fault on its data or FAT entry may no longer touch it."""
@@ -437,7 +461,7 @@ class NetModel:
         return ()
 
 
-type Component = Literal["root", "storage", "net"]
+type Component = Literal["root", "storage", "net", "system"]
 
 
 def owner(step: Step) -> Component:
@@ -449,6 +473,8 @@ def owner(step: Step) -> Component:
             return "storage"
         case Ping() | Unplug() | Pause():
             return "net"
+        case Reset() | CrashPut():
+            return "system"
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -464,6 +490,10 @@ class Model:
     @classmethod
     def start(cls, budget: int, disk: Expected = CLEAN_DISK) -> Model:
         return cls(RootModel(budget), StorageModel(disk))
+
+    def rebooted(self) -> Model:
+        """Root, every driver and the BEAM start over on the same disk."""
+        return replace(self, root=RootModel(self.root.budget), storage=self.storage.rebooted())
 
     def key(self) -> tuple[object, ...]:
         """Equal keys mean equal lifecycles and data: the model's identity."""
@@ -488,11 +518,19 @@ class Model:
                 )
             case Unplug() | Pause():
                 return self.net.expect(step, up=self.root.up("eth"))
+            case Reset() | CrashPut():
+                # A damaged volume may not mount, and then nothing boots.
+                return ANYTHING if self.storage.damaged else expect(OK)
 
     def after(self, step: Step, outcome: Outcome) -> Model:
         """The step's own effect, then every driver that was recovering before
         it settles, as the interpreter waits for them after each step. An
         unsettled request to a recovering driver keeps it recovering."""
+        match step:
+            case Reset():
+                return self.rebooted()
+            case CrashPut(file=f):
+                return replace(self, storage=self.storage.crashed(f)).rebooted()
         recovering = {d for d in DRIVERS if self.root.recovering(d)}
         if isinstance(step, Fault | Restart) and not step.settle:
             recovering.discard(step.driver)

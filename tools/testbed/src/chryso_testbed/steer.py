@@ -19,6 +19,7 @@ from chryso_testbed.faults import (
     KEPT,
     Arm,
     Corrupt,
+    CrashPut,
     Disarm,
     Driver,
     Fault,
@@ -28,6 +29,7 @@ from chryso_testbed.faults import (
     Ping,
     Program,
     Put,
+    Reset,
     Restart,
     Step,
     Unplug,
@@ -130,7 +132,19 @@ def enabled(model: Model) -> st.SearchStrategy[Step]:
         st.builds(Unplug, kind=st.just("unplug"), ms=st.integers(0, 1500)),
         st.builds(Pause, kind=st.just("pause"), ms=st.integers(0, 1000)),
     ]
+    if not model.storage.damaged:  # a damaged volume may not mount again
+        choices += [st.just(Reset(kind="reset")), _crash_put(model)]
     return st.one_of(choices)
+
+
+def _crash_put(model: Model) -> st.SearchStrategy[Step]:
+    return st.builds(
+        CrashPut,
+        kind=st.just("crash-put"),
+        file=_file(model),
+        seed=st.integers(0, 255),
+        after_ms=st.integers(0, 200),
+    )
 
 
 # --- scenarios ----------------------------------------------------------------------
@@ -294,6 +308,13 @@ SCENARIOS: Final[dict[str, Scenario]] = {
         anything(2),
     ),
     "exhaust": chain(reach(gone("blk"), faults_to(("blk",)), 10), _repeat(then(_workload), 3)),
+    "reboot": chain(
+        reach(has_file, writes, 4),
+        _repeat(then(faults_to(("blk",))), 2),
+        then(lambda _: st.just(Reset(kind="reset"))),
+        _repeat(then(_workload), 2),
+        then(faults_to(("blk",))),
+    ),
     "mixed": anything(12),
 }
 

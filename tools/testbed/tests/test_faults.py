@@ -12,6 +12,9 @@ state they need instead of waiting for it. Each caught a planted defect:
 | a rewrite leaves a corrupt file corrupt | test_rewriting_corrupted_data_heals_it |
 | Root restarts once past the budget | test_a_driver_is_restarted_budget_times_... |
 | a ping leaves FatFs's window dirty | test_steps_of_different_components_commute |
+| a reset keeps Root's budgets or the armed fault | test_a_reset_forgets_root_and_keeps_the_disk |
+| a crashed write leaves its file held | test_a_crashed_write_changes_only_its_file |
+| a reset is offered on a damaged volume | test_steer.test_no_reset_is_offered_on_a_damaged_volume |
 
 The pre-split model ran in lockstep with this one before it was deleted.
 """
@@ -36,6 +39,7 @@ from chryso_testbed.faults import (
     STEP,
     Arm,
     Corrupt,
+    CrashPut,
     Disarm,
     Expect,
     Fault,
@@ -43,6 +47,7 @@ from chryso_testbed.faults import (
     Model,
     Program,
     Put,
+    Reset,
     Restart,
     Step,
     owner,
@@ -173,26 +178,39 @@ def test_every_step_allows_something(trace: Trace) -> None:
 # --- Root ----------------------------------------------------------------------------
 
 
+def between_resets(trace: Trace) -> list[Trace]:
+    """The trace cut at every reset, since Root starts over at each."""
+    stretches: list[Trace] = [[]]
+    for entry in trace:
+        if isinstance(entry[0], Reset | CrashPut):
+            stretches.append([])
+        else:
+            stretches[-1].append(entry)
+    return stretches
+
+
 @given(trace=runs())
 def test_restarts_count_up_then_give_up_once_then_stay_gone(trace: Trace) -> None:
-    """Per driver: restarts numbered 1 to the budget, then one give-up, then
-    gone forever. Faults and debug restarts share the count, and each takes
-    the path its request names."""
-    seen: dict[str, list[Outcome]] = {}
-    for step, _, result, _ in trace:
-        if isinstance(step, Fault | Restart):
-            seen.setdefault(step.driver, []).append(result)
-            if isinstance(result, Restarted):
-                assert result.path == ("restart" if isinstance(step, Fault) else "debug-restart")
-    for outcomes in seen.values():
-        restarts = [o for o in outcomes if isinstance(o, Restarted)]
-        assert [r.count for r in restarts] == list(range(1, len(restarts) + 1))
-        expected: list[Outcome] = [
-            *restarts,
-            *[GaveUp("budget-exhausted")] * (len(outcomes) > BUDGET),
-            *[Status.GONE] * max(0, len(outcomes) - BUDGET - 1),
-        ]
-        assert outcomes == expected
+    """Per driver, between resets: restarts numbered 1 to the budget, then one
+    give-up, then gone. Faults and debug restarts share the count, and each
+    takes the path its request names."""
+    for stretch in between_resets(trace):
+        seen: dict[str, list[Outcome]] = {}
+        for step, _, result, _ in stretch:
+            if isinstance(step, Fault | Restart):
+                seen.setdefault(step.driver, []).append(result)
+                if isinstance(result, Restarted):
+                    path = "restart" if isinstance(step, Fault) else "debug-restart"
+                    assert result.path == path
+        for outcomes in seen.values():
+            restarts = [o for o in outcomes if isinstance(o, Restarted)]
+            assert [r.count for r in restarts] == list(range(1, len(restarts) + 1))
+            expected: list[Outcome] = [
+                *restarts,
+                *[GaveUp("budget-exhausted")] * (len(outcomes) > BUDGET),
+                *[Status.GONE] * max(0, len(outcomes) - BUDGET - 1),
+            ]
+            assert outcomes == expected
 
 
 @given(
@@ -270,18 +288,57 @@ def test_an_unsettled_request_only_widens_the_next_step(
         assert waited.after(then, outcome).key() == hurried.after(then, outcome).key()
 
 
+# --- resets --------------------------------------------------------------------------
+
+reset = Reset(kind="reset")
+
+
+@given(model=states())
+def test_a_reset_is_idempotent(model: Model) -> None:
+    once = model.after(reset, Status.OK)
+    assert once.after(reset, Status.OK).key() == once.key()
+
+
+@given(start=states(), file=st.integers(0, 3), seed=st.integers(0, 255))
+def test_a_reset_forgets_root_and_keeps_the_disk(start: Model, file: int, seed: int) -> None:
+    """Budgets, give-ups, the armed fault and FatFs's window start over. What
+    a sync put on disk stays."""
+    if (written := holding(start, file, seed)) is None:
+        return
+    model = with_fault(written, "read", "fat", file, once=False)
+    rebooted = model.after(reset, Status.OK)
+    assert rebooted.root.key() == ()
+    assert rebooted.storage.armed is None
+    assert not rebooted.storage.suspect
+    assert rebooted.expect(Get(kind="get", file=file)) == Expect(frozenset({Seed(seed)}))
+
+
+@given(model=states(), file=st.integers(0, 3), seed=st.integers(0, 255), after=st.integers(0, 200))
+def test_a_crashed_write_changes_only_its_file(
+    model: Model, file: int, seed: int, after: int
+) -> None:
+    crashed = model.after(
+        CrashPut(kind="crash-put", file=file, seed=seed, after_ms=after), Status.OK
+    )
+    rebooted = model.after(reset, Status.OK)
+    assert crashed.storage.file(file).at == "unknown"
+    for other in set(range(4)) - {file}:
+        assert crashed.storage.file(other).at == rebooted.storage.file(other).at
+
+
 # --- storage -------------------------------------------------------------------------
 
 
 @given(trace=runs())
 def test_a_file_written_ok_reads_back_until_something_disturbs_it(trace: Trace) -> None:
-    """With the disk up, no fault armed and nothing left dirty, a read returns
+    """With the disk up and settled, no fault armed and nothing left dirty, a read returns
     the last seed written to that file, or enoent if none was."""
     for step, allowed, _, before in trace:
         storage = before.storage
         if (
             not isinstance(step, Get)
             or not before.root.up("blk")
+            or before.root.recovering("blk")
             or storage.suspect
             or storage.damaged
             or storage.armed is not None

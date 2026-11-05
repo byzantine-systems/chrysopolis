@@ -12,17 +12,20 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import pytest
+import structlog
 from hypothesis import HealthCheck, event, example, given, note, settings, target
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 
-from chryso_testbed import inject, probes
+from chryso_testbed import crashcheck, crashlog, inject, probes
 from chryso_testbed.__main__ import load
 from chryso_testbed.abi import Abi
 from chryso_testbed.blkdebug import PLAN, Expected, Plan, shaped
 from chryso_testbed.blkdebug import SCHEMA as PLAN_SCHEMA
+from chryso_testbed.crashcheck import Span
 from chryso_testbed.faults import (
     FILES,
     PROGRAM,
@@ -43,6 +46,7 @@ from chryso_testbed.outcomes import Outcome, render
 from chryso_testbed.scenario import Settings, default_failures
 from chryso_testbed.steer import SCENARIOS, programs
 
+log_ = structlog.get_logger()
 IMAGE = "restart-image"
 EXAMPLES = itertools.count(1)
 MANIFEST = Path(os.environ["CHRYSO_TESTBED_MANIFEST"])
@@ -106,6 +110,42 @@ def reaction(step: Step, seen: Outcome, model: Model) -> str | None:
     return f"{fault}: {step.kind} -> {render(seen)}"
 
 
+CRASH_POINTS = 4
+
+
+def crash_checks(
+    raw: bytes, spans: list[Span], base: Path, scratch: Path
+) -> tuple[list[str], list[str]]:
+    """Crash images at up to CRASH_POINTS flushes, evenly spaced, each held to
+    what the writes finished before it promised. Returns the problems, and
+    events (fsck's verdict on the first and last, since FatFs promises no
+    clean volume) for the caller to record: this runs off the test's thread."""
+    log = crashlog.parse(raw)
+    flushes = len(log.flushes)
+    if not flushes:
+        return [], ["crash points checked: 0"]
+    chosen = sorted({round(i * (flushes - 1) / (CRASH_POINTS - 1)) for i in range(CRASH_POINTS)})
+    found, events = [], [f"crash points checked: {len(chosen)}"]
+    for k in chosen:
+        t0 = perf_counter()
+        image = crashlog.replay(log, base, scratch / f"crash-{k}.img", crashlog.state(log, k + 1))
+        t1 = perf_counter()
+        promised = crashcheck.durable(spans, crashlog.stable(log, k + 1))
+        verdict = crashcheck.judge(image, promised)
+        t2 = perf_counter()
+        found += [f"crash after flush {k}: {p} (image {image})" for p in verdict.problems]
+        events += [f"crash left a broken chain in {name}" for name in verdict.broken]
+        if verdict.diverged:
+            events.append("crash left the two FATs different")
+        if k in (chosen[0], chosen[-1]):
+            events.append(f"crash fsck exit {crashcheck.fsck(image, scratch)}")
+        if not verdict.problems:
+            image.unlink()  # 100 MB each: keep only an image that broke a promise
+        log_.debug("crash.point", flush=k, replay_s=t1 - t0, judge_s=t2 - t1,
+                   fsck_s=perf_counter() - t2)  # fmt: skip
+    return found, events
+
+
 @pytest.fixture(scope="session")
 def testbed(tmp_path_factory: pytest.TempPathFactory) -> Settings:
     manifest = Path(os.environ["CHRYSO_TESTBED_MANIFEST"])
@@ -156,29 +196,42 @@ async def test_the_system_does_what_its_model_allows(testbed: Settings, run: Run
     model = Model.start(testbed.abi.driver_budget, Expected.of(plan))
     event(f"scenario {run.scenario}")
     covered: set[tuple[object, str]] = set()
-
-    def observe(step: Step, seen: Outcome, before: Model) -> None:
-        note(f"{step!r}: {render(seen)}")
-        covered.add((abstract(before), step.kind))
-        if (row := reaction(step, seen, before)) is not None:
-            event(row)
-        if isinstance(step, Arm | Corrupt):
-            event(f"aim {step.kind} -> {render(seen)}")
-
+    spans: list[Span] = []
     workdir = testbed.out / f"example-{next(EXAMPLES)}"
     note(f"plan={PLAN.dump_python(plan)} console={workdir}")
     note(f"program={PROGRAM.dump_python(program)}")
-    profile = Profile(testbed.images[IMAGE], testbed.disk, blkdebug=plan)
+    profile = Profile(
+        testbed.images[IMAGE], testbed.disk, blkdebug=plan, crashlog=True, reboot=True
+    )
     async with Machine(
         "system", profile, workdir, testbed.tools, default_failures(testbed.abi)
     ) as m:
+
+        def observe(step: Step, seen: Outcome, before: Model) -> None:
+            start = spans[-1].end if spans else 0
+            spans.append(Span(step, seen, start, m.logged()))
+            note(f"{step!r}: {render(seen)}")
+            covered.add((abstract(before), step.kind))
+            if (row := reaction(step, seen, before)) is not None:
+                event(row)
+            if isinstance(step, Arm | Corrupt):
+                event(f"aim {step.kind} -> {render(seen)}")
+
         async with asyncio.timeout(400):
             await m.console.wait(r"SOCKET_SMOKE\|DHCP:")
             banner = await m.console.wait("Eshell")
             await probes.load_test_modules(m, testbed.test_modules, banner)
-        model = await inject.check(m, program, model, abi=testbed.abi, observe=observe)
+        model = await inject.check(
+            m, program, model, abi=testbed.abi, modules=testbed.test_modules, observe=observe
+        )
         for driver in model.root.gone:
             event(f"gave up {driver}")
         target(len(covered), label="state-step pairs covered")
         async with asyncio.timeout(60):
             await probes.call(m, "chryso_test:alive(fuzz).", r"FUZZ_ALIVE\|42")
+        # The log lives in the machine's scratch, which leaving the context removes.
+        raw = await asyncio.to_thread(m.write_log.read_bytes)
+    broken, seen = await asyncio.to_thread(crash_checks, raw, spans, testbed.disk, workdir)
+    for name in seen:
+        event(name)
+    assert not broken, broken
