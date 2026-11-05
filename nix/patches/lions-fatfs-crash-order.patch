@@ -1,0 +1,58 @@
+--- a/dep/ff15/ff.c
++++ b/dep/ff15/ff.c
+@@ -1141,6 +1141,20 @@
+ 	return res;
+ }
+ 
++
++/* START_CHRYSOPOLIS_MODIFICATION: write the window back and flush. A caching
++ * disk may persist writes between flushes in any order. */
++static FRESULT barrier (	/* Returns FR_OK or FR_DISK_ERR */
++	FATFS* fs		/* Filesystem object */
++)
++{
++	FRESULT res = sync_window(fs);
++
++	if (res == FR_OK && disk_ioctl(fs->pdrv, CTRL_SYNC, 0) != RES_OK) res = FR_DISK_ERR;
++	return res;
++}
++/* END_CHRYSOPOLIS_MODIFICATION */
++
+ #endif
+ 
+ 
+@@ -4193,7 +4207,10 @@
+ 			} else
+ #endif
+ 			{
+-				res = move_window(fs, fp->dir_sect);
++				/* START_CHRYSOPOLIS_MODIFICATION: data and chain before the entry */
++				res = barrier(fs);
++				if (res == FR_OK) res = move_window(fs, fp->dir_sect);
++				/* END_CHRYSOPOLIS_MODIFICATION */
+ 				if (res == FR_OK) {
+ 					dir = fp->dir_ptr;
+ 					dir[DIR_Attr] |= AM_ARC;						/* Set archive attribute to indicate that the file has been changed */
+@@ -4931,6 +4948,22 @@
+ 	if (!(fp->flag & FA_WRITE)) LEAVE_FF(fs, FR_DENIED);	/* Check access mode */
+ 
+ 	if (fp->fptr < fp->obj.objsize) {	/* Process when fptr is not on the eof */
++		/* START_CHRYSOPOLIS_MODIFICATION: shrink the entry before freeing,
++		 * as f_open(FA_CREATE_ALWAYS) does. */
++#if FF_FS_EXFAT
++		if (fs->fs_type != FS_EXFAT)
++#endif
++		{
++			res = move_window(fs, fp->dir_sect);
++			if (res == FR_OK) {
++				if (fp->fptr == 0) st_clust(fs, fp->dir_ptr, 0);
++				st_dword(fp->dir_ptr + DIR_FileSize, (DWORD)fp->fptr);
++				fs->wflag = 1;
++				res = barrier(fs);
++			}
++			if (res != FR_OK) ABORT(fs, res);
++		}
++		/* END_CHRYSOPOLIS_MODIFICATION */
+ 		if (fp->fptr == 0) {	/* When set file size to zero, remove entire cluster chain */
+ 			res = remove_chain(&fp->obj, fp->obj.sclust, 0);
+ 			fp->obj.sclust = 0;
