@@ -648,7 +648,14 @@
               # Build a populated FAT32 partition image.
               part=part.fat
               truncate -s 96M $part
-              mkfs.fat --invariant -F 32 -n CHRYSO $part
+              # One FAT: a crash between FatFs's two unordered copy writes would
+              # leave them different, and FatFs only reads the first.
+              mkfs.fat --invariant -F 32 -f 1 -n CHRYSO $part
+              fats=$(od -An -tu1 -j16 -N1 $part | tr -d ' ')
+              if [ "$fats" != 1 ]; then
+                echo "disk: BPB_NumFATs is $fats, expected 1" >&2
+                exit 1
+              fi
               export MTOOLS_SKIP_CHECK=1
 
               mmd -i $part ::/dev ::/bin ::/lib ::/releases "::/releases/$rel"

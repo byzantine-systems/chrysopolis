@@ -7,6 +7,11 @@ on:
     branches: [main]
   pull_request:
 
+# The image job purges the Nix store caches it replaces.
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   format:
     name: "[treefmt] Check formatting"
@@ -78,6 +83,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
+        with:
+          save: true
       # Everything the smoke tests boot: the ERTS-linked image, the bring-up
       # image, every test variant, and their FAT disk. Export their closure to
       # /nix, which has space for it on the CI runner.
@@ -115,6 +122,30 @@ jobs:
       - run: bash nix/ci-transfer-images.sh import /nix/ci-image-transfer
       - run: python3 nix/ci-check-image-store.py restart-topology
       - run: nix build .#checks.x86_64-linux.restart-topology --print-build-logs
+
+  # The fuzz's pinned examples only (found bugs kept as regressions). The
+  # random campaign runs nightly in fuzz.yml.
+  fuzz-examples:
+    name: "[QEMU] fuzz examples"
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-nix
+      - run: sudo install -d -o "$USER" -g "$USER" /nix/ci-image-transfer
+      - name: Download image closure
+        uses: actions/download-artifact@v8
+        with:
+          name: ci-image-closure
+          path: /nix/ci-image-transfer
+      - run: bash nix/ci-transfer-images.sh import /nix/ci-image-transfer
+      - run: nix run .#testbed-fuzz -- --hypothesis-profile=explicit --basetemp=fuzz-out
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: fuzz-examples-consoles
+          path: fuzz-out
+          retention-days: 7
 
   test:
     name: "[QEMU] ${{ matrix.check }}"

@@ -102,3 +102,8 @@ __pycache__/
 
 ## QEMU stuff
 *.img
+
+## Testbed runs
+fuzz-out/
+testbed-out/
+.hypothesis/

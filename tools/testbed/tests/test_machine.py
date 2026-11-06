@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
 from collections.abc import Callable, Coroutine
@@ -13,7 +14,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 
-from chryso_testbed.blkdebug import RULES
+from chryso_testbed.blkdebug import PLAN, SCHEMA, Plan
 from chryso_testbed.console import ScenarioFailure
 from chryso_testbed.machine import Machine, Profile, Tools, drive
 
@@ -116,22 +117,34 @@ paths = st.builds(
 )
 
 
-@given(rules=from_schema(RULES), overlay=paths, disk=paths)
+@given(
+    plan=from_schema(SCHEMA).map(PLAN.validate_python),
+    overlay=paths,
+    disk=paths,
+    crashlog=st.booleans(),
+)
 @settings(max_examples=200, deadline=None)
-def test_blockdev_puts_the_rules_under_both_layers(
-    rules: list[dict[str, object]], overlay: Path, disk: Path
+def test_blockdev_puts_the_plan_above_qcow2_and_the_log(
+    plan: Plan, overlay: Path, disk: Path, crashlog: bool
 ) -> None:
-    """The overlay holds the guest's writes over a read-only image, and the
-    rules, verbatim, wrap both or neither."""
-    flag, value = drive(Profile(Path("/img"), disk, blkdebug=tuple(rules)), overlay)
-    node = json.loads(value)
-    assert (flag, node["driver"], node["node-name"]) == ("-blockdev", "qcow2", "hd")
-    backing = node["backing"]
-    assert backing["driver"] == "raw"
-    for layer, path, readonly in ((node["file"], overlay, False), (backing["file"], disk, True)):
-        image = layer["image"] if rules else layer
-        assert layer.get("inject-error", []) == rules
-        assert (layer["driver"] == "blkdebug") == bool(rules)
-        assert image == {"driver": "file", "filename": str(path)} | (
-            {"read-only": True} if readonly else {}
-        )
+    """Bottom up: the overlay over a read-only image, the write log, the plan
+    in QEMU's form, then `top`. Each node reads the one below it, so the plan
+    faults guest I/O only and a write it fails never reaches the log."""
+    profile = Profile(Path("/img"), disk, blkdebug=plan, crashlog=crashlog)
+    args = drive(profile, overlay, Path("/log") if crashlog else None)
+    assert args[::2] == ["-blockdev"] * (len(args) // 2)
+    nodes = [json.loads(value) for value in args[1::2]]
+    hd, *middle, top = nodes
+    assert hd == {
+        "driver": "qcow2", "node-name": "hd",
+        "file": {"driver": "file", "filename": str(overlay)},
+        "backing": {"driver": "raw",
+                    "file": {"driver": "file", "filename": str(disk), "read-only": True}},
+    }  # fmt: skip
+    assert [n["driver"] for n in middle] == ["blklogwrites"] * crashlog + ["blkdebug"] * bool(plan)
+    for below, node in itertools.pairwise(nodes):
+        assert node.get("file", node.get("image")) == below["node-name"]
+    if plan:
+        assert PLAN.validate_python(middle[-1]["inject-error"]) == plan
+    assert top == {"driver": "raw", "node-name": "top", "file": profile.base}
+    assert profile.base == nodes[-2]["node-name"]

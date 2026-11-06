@@ -1,7 +1,18 @@
-# Shared Nix setup for all CI jobs. The image and VM jobs configure the
-# GitHub cache separately, so this action only installs Nix.
+# Shared Nix setup for all CI jobs: reclaim disk, install Nix, and restore the
+# Nix store from the GitHub Actions cache (nix-community/cache-nix-action).
+#
+# The key hashes flake.lock and the Nix and patch sources, so it moves only
+# when the toolchain, ERTS, LionsOS or a patch does. A source-only change
+# restores the last store and builds just what changed, without saving a new
+# copy. Only a job with `save: true` (the image job, which builds the whole
+# closure) writes the cache, and it purges the older entries it replaces.
+# Caches are per ref, and a PR also reads its base branch's.
 name: "Setup Nix"
-description: "Reclaim disk space and install Nix"
+description: "Reclaim disk space, install Nix and restore the Nix store cache"
+inputs:
+  save:
+    description: "Save the store to the cache after the job"
+    default: "false"
 runs:
   using: "composite"
   steps:
@@ -18,3 +29,15 @@ runs:
     - uses: cachix/install-nix-action@v31
       with:
         set_as_trusted_user: true
+        extra_nix_config: |
+          keep-outputs = true
+
+    - uses: nix-community/cache-nix-action@v7
+      with:
+        primary-key: nix-store-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'nix/patches/**', 'build.zig', 'build.zig.zon', 'tools/**/build.zig.zon') }}
+        restore-prefixes-first-match: nix-store-${{ runner.os }}-
+        save: ${{ inputs.save }}
+        purge: ${{ inputs.save }}
+        purge-prefixes: nix-store-${{ runner.os }}-
+        purge-created: 0
+        purge-primary-key: never

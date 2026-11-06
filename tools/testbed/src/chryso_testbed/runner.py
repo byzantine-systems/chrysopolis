@@ -17,9 +17,12 @@ from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
+import structlog
+
 from chryso_testbed.ports import Ports
 from chryso_testbed.scenario import Context, Scenario, Settings, Step
 
+log = structlog.get_logger(__name__)
 type Status = Literal["pass", "fail", "error"]
 
 
@@ -34,6 +37,14 @@ class Result:
 
 
 async def execute(scenario: Scenario, settings: Settings, ports: Ports) -> Result:
+    with structlog.contextvars.bound_contextvars(scenario=scenario.name, group=scenario.group):
+        log.info("scenario.start")
+        result = await _execute(scenario, settings, ports)
+        log.info("scenario.end", status=result.status, seconds=round(result.seconds, 1))
+        return result
+
+
+async def _execute(scenario: Scenario, settings: Settings, ports: Ports) -> Result:
     ctx = Context(scenario, settings, ports)
     started = perf_counter()
     status: Status = "pass"

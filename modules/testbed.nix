@@ -73,14 +73,22 @@
         nativeBuildInputs = [
           (python.withPackages (p: [
             p.pytest
+            p.pytest-xdist
             p.hypothesis
             p.hypothesis-jsonschema
             p.pytest-asyncio
+            p.pydantic
             p.qemu-qmp
             p.typer
             p.mypy
+            p.pyfatfs
+            p.python-statemachine
+            p.structlog
           ]))
           pkgs.ruff
+          # Build FAT32 volumes for the layout reader's oracle.
+          pkgs.dosfstools
+          pkgs.mtools
         ];
         dontConfigure = true;
         dontInstall = true;
@@ -91,7 +99,7 @@
           ruff check --no-cache .
           ruff format --check --no-cache .
           mypy --cache-dir=$TMPDIR/mypy
-          python -m pytest
+          python -m pytest -n "$NIX_BUILD_CORES" --hypothesis-profile=gate
           touch $out
           runHook postBuild
         '';
@@ -122,7 +130,9 @@
         program = lib.getExe (
           pkgs.writeShellApplication {
             name = "chryso-testbed-fuzz";
+            # fsck.fat checks the crash images the fuzz replays.
             runtimeInputs = [
+              pkgs.dosfstools
               (python.withPackages (p: [
                 config.packages.testbed
                 p.pytest
@@ -133,7 +143,8 @@
             ];
             text = ''
               export CHRYSO_TESTBED_MANIFEST=''${CHRYSO_TESTBED_MANIFEST:-${manifest}}
-              exec python -m pytest -p no:cacheprovider --rootdir . ${../tools/testbed/fuzz} "$@"
+              # CHRYSO_FUZZ_WORKERS=N runs N pytest workers in parallel (chryso_testbed.swarm).
+              exec python -m chryso_testbed.swarm -p no:cacheprovider -p chryso_testbed.fuzzing --rootdir . ${../tools/testbed/fuzz} "$@"
             '';
           }
         );
@@ -161,7 +172,11 @@
         };
         build-system = [ python.pkgs.setuptools ];
         dependencies = [
+          python.pkgs.pydantic
+          python.pkgs.pyfatfs
+          python.pkgs.python-statemachine
           python.pkgs.qemu-qmp
+          python.pkgs.structlog
           python.pkgs.typer
         ];
         pythonImportsCheck = [ "chryso_testbed" ];

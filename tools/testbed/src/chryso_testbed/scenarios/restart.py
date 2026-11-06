@@ -9,14 +9,34 @@ same steps on a fresh boot.
 from __future__ import annotations
 
 import asyncio
-import errno
 import re
+from collections import Counter
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Final
 
-from chryso_testbed import probes
+from chryso_testbed import crashcheck, crashlog, fatlayout, inject, probes, rootlog
+from chryso_testbed.blkdebug import EIO, Delay, WriteError
 from chryso_testbed.console import Mark
+from chryso_testbed.crashcheck import Span
+from chryso_testbed.faults import (
+    Arm,
+    Corrupt,
+    Disarm,
+    Driver,
+    Fault,
+    Get,
+    Model,
+    Pause,
+    Ping,
+    Program,
+    Put,
+    Reset,
+    Step,
+    Unplug,
+)
 from chryso_testbed.machine import Machine
+from chryso_testbed.outcomes import Outcome, Seed, Status, render
 from chryso_testbed.scenario import Context, registry
 
 GROUP = "restart"
@@ -264,9 +284,11 @@ async def blk_recovery(ctx: Context) -> None:
         ctx.record("blk-fault-smoke-in-flight", restart_count=4)
 
 
-EIO_ON_WRITE: Final = ({"event": "write_aio", "iotype": "write", "errno": errno.EIO},)
+# The first guest write fails with EIO, then the disk recovers.
+EIO_ONCE: Final = (WriteError(errno=EIO, once=True),)
 # Every guest read waits 1 ms and then succeeds.
-SLOW_READS: Final = ({"event": "read_aio", "iotype": "read", "errno": 0, "delay-ns": 1_000_000},)
+CLUSTER: Final = 512  # bytes per cluster on packages.disk (mkfs.fat's default for 96 MiB)
+SLOW_READS: Final = (Delay(errno=0, event="read_aio", iotype="read", delay_ns=1_000_000),)
 
 
 @registry.scenario("blk-write-smoke", group=GROUP, timeout=600)
@@ -275,20 +297,25 @@ async def blk_write(ctx: Context) -> None:
     async with ctx.boot("test-image") as m, asyncio.timeout(400):
         banner = await m.console.wait("Eshell")
         await probes.load_test_modules(m, ctx.settings.test_modules, banner)
-        await probes.call(m, "chryso_fs:write_status('plain').", r"FS_WRITE_PLAIN\|")
+        await probes.call(m, "chryso_fs:write_status('plain').", r"FS_WRITE_PLAIN\|\{ok,ok,ok\}")
         await read(m, "after_write")
 
 
-# On demand until the guest passes it: today the writer sees ok for a write
-# that failed with EIO, and every later read of the volume fails with eperm.
-@registry.scenario("blk-eio-smoke", group="isolated", timeout=600)
+@registry.scenario("blk-eio-smoke", group=GROUP, timeout=600)
 async def blk_eio(ctx: Context) -> None:
-    """Every disk write fails with EIO: reads of the volume must still work."""
-    async with ctx.boot("test-image", blkdebug=EIO_ON_WRITE) as m, asyncio.timeout(400):
+    """One write fails with EIO: the writer sees eio and the volume stays readable."""
+    async with ctx.boot("test-image", blkdebug=EIO_ONCE) as m, asyncio.timeout(400):
         banner = await m.console.wait("Eshell")
         await probes.load_test_modules(m, ctx.settings.test_modules, banner)
-        await probes.call(m, "chryso_fs:write_status('eio').", r"FS_WRITE_EIO\|")
-        await read(m, "after_eio")
+        # The failed write leaves nothing dirty, so sync and close may succeed.
+        await probes.call(
+            m,
+            "chryso_fs:write_status('eio').",
+            r"FS_WRITE_EIO\|\{\{error,eio\},(?:ok|\{error,eio\}),(?:ok|\{error,eio\})\}",
+        )
+        await probes.call(
+            m, "chryso_fs:read_outcome('after_eio', lists).", r"FS_READ_AFTER_EIO\|\{ok,\d+,\d+\}"
+        )
 
 
 @registry.scenario("blk-slow-smoke", group=GROUP, timeout=900)
@@ -321,6 +348,288 @@ async def net_recovery(ctx: Context) -> None:
             await eth_fault(m, eth, 4)
             await probes.ping(m, "fault_after2", ctx.ports.take())
         ctx.record("net-fault-smoke", restart_count=4)
+
+
+def record_into(outcomes: list[str]) -> Callable[[Step, Outcome, Model], None]:
+    """An `inject.check` observer keeping each step's outcome for the facts."""
+
+    def observe(step: Step, seen: Outcome, _: Model) -> None:
+        outcomes.append(f"{step.kind}: {render(seen)}")
+
+    return observe
+
+
+@registry.scenario("net-unplug-smoke", group=GROUP, timeout=900)
+async def net_unplug(ctx: Context) -> None:
+    """A pulled cable, then a paused VM: the guest dials the host after each."""
+    program = (
+        Ping(kind="ping"),
+        Unplug(kind="unplug", ms=1500),
+        Ping(kind="ping"),
+        Pause(kind="pause", ms=1000),
+        Ping(kind="ping"),
+    )
+    outcomes: list[str] = []
+    async with ctx.boot(IMAGE) as m:
+        await net_ready(ctx, m)
+        async with ctx.step("unplug and pause"), asyncio.timeout(300):
+            model = Model.start(ctx.abi.driver_budget)
+            await inject.check(
+                m,
+                program,
+                model,
+                abi=ctx.abi,
+                modules=ctx.settings.test_modules,
+                observe=record_into(outcomes),
+            )
+        ctx.record("net-unplug-smoke", outcomes=outcomes)
+
+
+@registry.scenario("blk-iron-smoke", group=GROUP, timeout=900)
+async def blk_iron(ctx: Context) -> None:
+    """Runtime disk faults aimed at one file: a latent read error on its data
+    is reported every time and lifts when disarmed, corrupted data reads back
+    as different until rewritten, and nothing can be aimed at a missing file."""
+    program = (
+        Put(kind="put", file=1, seed=7),
+        Arm(kind="arm", op="read", region="data", file=1, once=False),
+        Get(kind="get", file=1),
+        Get(kind="get", file=1),
+        Disarm(kind="disarm"),
+        Get(kind="get", file=1),
+        Corrupt(kind="corrupt", region="data", file=1),
+        Get(kind="get", file=1),
+        Put(kind="put", file=1, seed=9),
+        Get(kind="get", file=1),
+        Arm(kind="arm", op="write", region="entry", file=1, once=True),
+        Put(kind="put", file=2, seed=3),
+        Disarm(kind="disarm"),
+        Arm(kind="arm", op="read", region="data", file=3, once=False),
+    )
+    outcomes: list[str] = []
+    async with ctx.boot("test-image") as m:
+        await ready(ctx, m)
+        async with ctx.step("iron"), asyncio.timeout(300):
+            model = Model.start(ctx.abi.driver_budget)
+            await inject.check(
+                m,
+                program,
+                model,
+                abi=ctx.abi,
+                modules=ctx.settings.test_modules,
+                observe=record_into(outcomes),
+            )
+        ctx.record("blk-iron-smoke", outcomes=outcomes)
+
+
+@registry.scenario("root-lineage-smoke", group=GROUP, timeout=900)
+async def root_lineage(ctx: Context) -> None:
+    """A second fault inside a driver's recovery window, for blk and eth: the
+    workload after it gets an outcome the model allows, and Root's event ring
+    records every decision its console printed."""
+    program = (
+        Put(kind="put", file=1, seed=5),
+        Fault(kind="fault", driver="blk", settle=False),
+        Fault(kind="fault", driver="blk"),
+        Get(kind="get", file=1),
+        Fault(kind="fault", driver="eth", settle=False),
+        Ping(kind="ping"),
+    )
+    decisions: list[tuple[Step, Outcome]] = []
+    outcomes: list[str] = []
+
+    def observe(step: Step, seen: Outcome, before: Model) -> None:
+        decisions.append((step, seen))
+        outcomes.append(f"{step.kind}: {render(seen)}")
+
+    async with ctx.boot(IMAGE) as m:
+        await net_ready(ctx, m)
+        async with ctx.step("faults in the window"), asyncio.timeout(400):
+            _, ring = rootlog.read(
+                await probes.run(m, "chryso_ctl:events(start, 0).", "CTL_EVENTS.START")
+            )
+            model = Model.start(ctx.abi.driver_budget)
+            await inject.check(
+                m, program, model, abi=ctx.abi, modules=ctx.settings.test_modules, observe=observe
+            )
+            events, _ = rootlog.read(
+                await probes.run(m, f"chryso_ctl:events(finish, {ring.head}).", "CTL_EVENTS.FINISH")
+            )
+        recoverable: tuple[Driver, ...] = ("blk", "eth")
+        children = {d: ctx.abi.child(d) for d in recoverable}
+        if problems := rootlog.disagreements(decisions, events, children):
+            raise m.console.fail(f"Root's ring disagrees with its console: {problems}")
+        ctx.record("root-lineage-smoke", outcomes=outcomes, events=len(events))
+
+
+@registry.scenario("reboot-smoke", group=GROUP, timeout=900)
+async def reboot(ctx: Context) -> None:
+    """A whole-system reset keeps what a sync wrote and gives Root its budgets
+    back: the file reads back, and the next fault is the first restart."""
+    program: Program = (
+        Put(kind="put", file=1, seed=9),
+        *[Fault(kind="fault", driver="blk")] * 3,
+        Reset(kind="reset"),
+        Get(kind="get", file=1),
+        Fault(kind="fault", driver="blk"),
+    )
+    outcomes: list[str] = []
+    async with ctx.boot(IMAGE, reboot=True) as m:
+        await net_ready(ctx, m)
+        async with ctx.step("reset"), asyncio.timeout(400):
+            model = Model.start(ctx.abi.driver_budget)
+            await inject.check(
+                m, program, model, abi=ctx.abi, modules=ctx.settings.test_modules,
+                observe=record_into(outcomes),
+            )  # fmt: skip
+    if outcomes[-1] != "fault: restart:1":
+        raise AssertionError(f"Root kept its budget across the reset: {outcomes}")
+    ctx.record("reboot-smoke", outcomes=outcomes)
+
+
+@registry.scenario("crash-boot-smoke", group=GROUP, timeout=900)
+async def crash_boot(ctx: Context) -> None:
+    """Power lost while a second file is written: the crash image, rebuilt
+    from the write log, still holds the first file, offline and on the guest."""
+    first, second = Put(kind="put", file=1, seed=5), Put(kind="put", file=2, seed=6)
+    spans: list[Span] = []
+    async with ctx.boot("test-image", crashlog=True) as m:
+        await ready(ctx, m)
+        async with ctx.step("write and log"), asyncio.timeout(300):
+
+            def observe(step: Step, seen: Outcome, _: Model) -> None:
+                spans.append(Span(step, seen, spans[-1].end if spans else 0, m.logged()))
+
+            await inject.check(
+                m, (first, second), Model.start(ctx.abi.driver_budget), abi=ctx.abi,
+                modules=ctx.settings.test_modules, observe=observe,
+            )  # fmt: skip
+            raw = await asyncio.to_thread(m.write_log.read_bytes)
+    log = crashlog.parse(raw)
+    during = [k for k, f in enumerate(log.flushes) if spans[0].end <= f.end < spans[1].end]
+    if not during:
+        raise AssertionError(f"no flush inside the second write: {spans}")
+    point = during[-1] + 1
+    image = ctx.workdir / "crash.img"
+    await asyncio.to_thread(
+        crashlog.replay, log, ctx.settings.disk, image, crashlog.state(log, point)
+    )
+    expected = crashcheck.allowed(spans, crashlog.stable(log, point))  # a boundary: crash == stable
+    if expected.get(1) != frozenset({5}):
+        raise AssertionError(f"the first write should be durable here: {expected}")
+    verdict = await asyncio.to_thread(crashcheck.judge, image, expected)
+    if verdict.problems:
+        raise AssertionError(f"crash image offline: {verdict.problems}")
+    async with ctx.boot("test-image", disk=image) as m:
+        await ready(ctx, m)
+        async with ctx.step("boot the crash image"), asyncio.timeout(300):
+            hit = await probes.call(m, "chryso_fs:get(crashed, 1).", r"FS_GET_CRASHED\|(\S+)")
+            if inject.get_outcome(hit.groups[0] or "") != Seed(5):
+                raise m.console.fail(f"the durable file read back as {hit.groups[0]}")
+    ctx.record("crash-boot-smoke", flush=point, entries=len(log.entries))
+
+
+CUTS_PER_EPOCH: Final = 8  # seeded subsets checked per epoch, besides its boundary
+
+
+def rewrite_states(
+    log: crashlog.Log, spans: list[Span], base: Path, scratch: Path
+) -> tuple[list[str], Counter[str], Path | None]:
+    """Judge every crash state the rewrite crosses: each epoch's boundary plus
+    CUTS_PER_EPOCH subsets. Returns problems, contents seen, one torn image."""
+    rewrite = spans[1]
+
+    def crosses(e: int) -> bool:
+        whole = crashlog.crashed_at(log, e, log.epochs[e])
+        return crashlog.stable(log, e) < rewrite.end and whole > rewrite.start
+
+    epochs = [e for e in range(len(log.epochs)) if crosses(e)]
+    problems: list[str] = []
+    seen: Counter[str] = Counter()
+    keep: Path | None = None
+    for e in epochs:
+        for seed in range(CUTS_PER_EPOCH + 1):
+            part = crashlog.persisted(log, e, seed)
+            image = crashlog.replay(
+                log, base, scratch / "rewrite.img", crashlog.state(log, e, part)
+            )
+            expected = crashcheck.allowed(
+                spans, crashlog.stable(log, e), crashlog.crashed_at(log, e, part)
+            )
+            verdict = crashcheck.judge(image, expected)
+            problems += [f"epoch {e} seed {seed}: {p}" for p in verdict.problems]
+            found = crashcheck.held(fatlayout.contents(image), 1)
+            seen[str(found)] += 1
+            if keep is None and found != 6:
+                keep = image.rename(scratch / "torn.img")
+    (scratch / "rewrite.img").unlink(missing_ok=True)  # 100 MB, the last state checked
+    return problems, seen, keep
+
+
+@registry.scenario("rewrite-crash-smoke", group=GROUP, timeout=900)
+async def rewrite_crash(ctx: Context) -> None:
+    """A crash anywhere in a rewrite leaves the file old, empty or new, never on
+    freed clusters: offline for every crash state, on the guest for one."""
+    first, again = Put(kind="put", file=1, seed=5), Put(kind="put", file=1, seed=6)
+    spans: list[Span] = []
+    async with ctx.boot("test-image", crashlog=True) as m:
+        await ready(ctx, m)
+        async with ctx.step("write, rewrite and log"), asyncio.timeout(300):
+
+            def observe(step: Step, seen: Outcome, _: Model) -> None:
+                spans.append(Span(step, seen, spans[-1].end if spans else 0, m.logged()))
+
+            await inject.check(
+                m, (first, again), Model.start(ctx.abi.driver_budget), abi=ctx.abi,
+                modules=ctx.settings.test_modules, observe=observe,
+            )  # fmt: skip
+            raw = await asyncio.to_thread(m.write_log.read_bytes)
+    log = crashlog.parse(raw)
+    problems, seen, torn = await asyncio.to_thread(
+        rewrite_states, log, spans, ctx.settings.disk, ctx.workdir
+    )
+    if problems:
+        raise AssertionError(f"crash states of a rewrite: {problems}")
+    if torn is None:
+        raise AssertionError(f"no crash state cut the rewrite short: {dict(seen)}")
+    reads = {"5": Seed(5), "empty": Status.DIFFERS}
+    async with ctx.boot("test-image", disk=torn) as m:
+        await ready(ctx, m)
+        async with ctx.step("boot a torn image"), asyncio.timeout(300):
+            hit = await probes.call(m, "chryso_fs:get(torn, 1).", r"FS_GET_TORN\|(\S+)")
+            offline = str(crashcheck.held(fatlayout.contents(torn), 1))
+            if inject.get_outcome(hit.groups[0] or "") != reads.get(offline):
+                raise m.console.fail(f"offline {offline}, guest read {hit.groups[0]}")
+    ctx.record("rewrite-crash-smoke", contents=dict(seen), entries=len(log.entries))
+
+
+@registry.scenario("flush-smoke", group=GROUP, timeout=600)
+async def flush(ctx: Context) -> None:
+    """Only a sync flushes the disk: one put logs its writes and at most two
+    flushes, where a write-through disk flushes after every write."""
+    put = Put(kind="put", file=1, seed=7)
+    spans: list[Span] = []
+    async with ctx.boot("test-image", crashlog=True) as m:
+        await ready(ctx, m)
+        async with ctx.step("write and log"), asyncio.timeout(300):
+
+            def observe(step: Step, seen: Outcome, _: Model) -> None:
+                spans.append(Span(step, seen, spans[-1].end if spans else 0, m.logged()))
+
+            await inject.check(
+                m, (put,), Model.start(ctx.abi.driver_budget), abi=ctx.abi,
+                modules=ctx.settings.test_modules, observe=observe,
+            )  # fmt: skip
+            raw = await asyncio.to_thread(m.write_log.read_bytes)
+    log = crashlog.parse(raw)
+    (span,) = spans
+    mine = [e for e in log.entries if span.start <= e.start < span.end]
+    flushes = sum(1 for e in mine if e.flush)
+    writes = sum(1 for e in mine if e.write)
+    data = crashcheck.FUZZ_SIZE // CLUSTER  # FatFs writes a file cluster by cluster
+    if not 1 <= flushes <= 2 or writes < data:
+        raise AssertionError(f"put reached the disk as {writes} writes, {flushes} flushes")
+    ctx.record("flush-smoke", writes=writes, flushes=flushes)
 
 
 @registry.scenario("blk-giveup-smoke", group=GROUP, timeout=1500)
@@ -393,6 +702,10 @@ async def blk_giveup(ctx: Context) -> None:
                 raise m.console.fail(f"requests for the stopped driver caused {failed}")
             if await read_status(m, "gone", "orddict") not in ("error", "EXIT"):
                 raise m.console.fail("fs read reached a stopped driver")
+            # No file 3 was ever written: a lookup must fail, not say enoent.
+            hit = await probes.call(m, "chryso_fs:get(missing, 3).", r"FS_GET_MISSING\|(\S+)")
+            if inject.get_outcome(hit.groups[0] or "") != Status.EIO:
+                raise m.console.fail(f"a lookup on a stopped disk gave {hit.groups[0]}")
             await probes.call(m, "chryso_test:alive('blkgone').", r"BLKGONE_ALIVE\|42")
 
 

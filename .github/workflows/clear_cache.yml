@@ -1,3 +1,10 @@
+# Delete GitHub Actions caches that no ref can use any more, never main's.
+#
+# A PR's caches (ref refs/pull/N/merge) are only readable by that PR. When it
+# merges they wait until the main run of the merge commit has finished and
+# passed, so main holds a fresh Nix store before the PR's copy goes. A PR
+# closed without merging is cleaned up at once. The weekly sweep catches
+# whatever a failed main run left behind.
 name: "[Cron] Clear cache"
 
 on:
@@ -7,55 +14,63 @@ on:
   pull_request:
     types:
       - closed
+  workflow_run:
+    workflows: ["[Nix] Build & Test"]
+    branches: [main]
+    types: [completed]
 
 permissions:
   actions: write
+  pull-requests: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  REPO: ${{ github.repository }}
 
 jobs:
-  # https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#force-deleting-cache-entries
-  pr-cleanup:
-    if: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' }}
+  closed-unmerged:
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.merged }}
     runs-on: ubuntu-latest
     steps:
-      - name: Closed PR Cleanup
-        run: |
-          gh extension install actions/gh-actions-cache
-
-          echo "Fetching list of cache key"
-          cacheKeysForPR=$(gh actions-cache list -R $REPO -B $BRANCH -L 100 | cut -f 1 )
-
-          ## Setting this to not fail the workflow while deleting cache keys.
-          set +e
-          echo "Deleting caches..."
-          for cacheKey in $cacheKeysForPR
-          do
-              gh actions-cache delete $cacheKey -R $REPO -B $BRANCH --confirm
-          done
-          echo "Done"
+      - name: Delete the closed PR's caches
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          BRANCH: refs/pull/${{ github.event.pull_request.number }}/merge
+          PR: ${{ github.event.pull_request.number }}
+        run: gh cache delete --all --succeed-on-no-caches --ref "refs/pull/$PR/merge" -R "$REPO"
 
-  scheduled-cleanup:
+  after-main:
+    if: >-
+      ${{ github.event_name == 'workflow_run'
+          && github.event.workflow_run.event == 'push'
+          && github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the caches of the PRs this main run merged
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          # An assignment, so a failed API call stops the step under -e.
+          prs=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[] | select(.merged_at != null) | .number')
+          while IFS= read -r pr; do
+            case $pr in '' | *[!0-9]*) continue ;; esac
+            printf 'main passed at %s, deleting caches of PR #%s\n' "$SHA" "$pr"
+            gh cache delete --all --succeed-on-no-caches --ref "refs/pull/$pr/merge" -R "$REPO"
+          done <<< "$prs"
+
+  sweep:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Clear Cache
-        uses: actions/github-script@v9
-        with:
-          script: |
-            console.log("About to clear")
-            const caches = await github.rest.actions.getActionsCacheList({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-            })
-            for (const cache of caches.data.actions_caches) {
-              console.log(cache)
-              github.rest.actions.deleteActionsCacheById({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                cache_id: cache.id,
-              })
-            }
-            console.log("Clear completed")
+      - name: Delete caches of closed PRs
+        run: |
+          refs=$(gh cache list -R "$REPO" --limit 1000 --json ref --jq '.[].ref')
+          prs=$(printf '%s\n' "$refs" | sed -n 's#^refs/pull/\([0-9][0-9]*\)/merge$#\1#p' | sort -un)
+          while IFS= read -r pr; do
+            [ -n "$pr" ] || continue
+            # Separate from the test: a failed lookup must stop the step, not
+            # read as "closed" and delete an open PR's caches.
+            state=$(gh pr view "$pr" -R "$REPO" --json state --jq .state)
+            if [ "$state" != OPEN ]; then
+              printf 'PR #%s is %s, deleting its caches\n' "$pr" "$state"
+              gh cache delete --all --succeed-on-no-caches --ref "refs/pull/$pr/merge" -R "$REPO"
+            fi
+          done <<< "$prs"

@@ -8,8 +8,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from hypothesis import settings
 
 from chryso_testbed.machine import Profile, Tools
+
+# The Nix gate runs the suite on every build core at once, where a deadline
+# measures contention, not the code. Local runs keep the default deadline.
+settings.register_profile("gate", deadline=None)
 
 FAKE = Path(__file__).with_name("fake_qemu.py")
 

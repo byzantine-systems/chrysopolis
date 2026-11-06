@@ -19,7 +19,17 @@ These modules are loaded into memory before any test damages the disk (see
 reporting after the device they probe is gone.
 """.
 
--export([read_tagged/2, read_status/2, read_inflight/1, read_during_fault/0, write_status/1]).
+-export([
+    read_tagged/2,
+    read_status/2,
+    read_inflight/1,
+    read_during_fault/0,
+    write_status/1,
+    read_outcome/2,
+    read_back/1,
+    put/3,
+    get/2
+]).
 
 -doc """
 blk-restart-smoke: report the size read, so a successful round trip is
@@ -85,20 +95,113 @@ read_during_fault() ->
         chryso_test:emit("FS_INFLIGHT", element(1, R))
     end).
 
+-define(PROBE_FILE, "/eio-probe.bin").
+
 -doc """
-blk-eio-smoke: write a file, sync it and close it, reporting each step's
-result. `file:write_file/2` would hide a failed close, and FatFs only reaches
-the disk on sync or close, so each step is reported on its own.
+blk-eio-smoke and the disk fuzz: write 64 KiB, sync and close, reporting each
+step. 64 KiB spans whole sectors, so FatFs writes them during the write
+itself and a disk error belongs to that call. `file:write_file/2` would hide
+a failed close, so each step is reported on its own.
 """.
 -spec write_status(atom()) -> ok.
 write_status(Tag) ->
     Outcome =
-        case file:open("/eio-probe.txt", [write, raw, binary]) of
+        case file:open(?PROBE_FILE, [write, raw, binary]) of
             {ok, Fd} ->
-                Written = file:write(Fd, <<"chryso">>),
+                Written = file:write(Fd, payload()),
                 Synced = file:sync(Fd),
                 {Written, Synced, file:close(Fd)};
             {error, _} = Error ->
                 Error
         end,
     chryso_test:emit("FS_WRITE_" ++ chryso_test:tag(Tag), Outcome).
+
+-doc """
+The disk fuzz: read the probe file back and report `same` when it holds
+exactly what `write_status/1` wrote, `differs` when it does not, or
+`{error, Reason}`.
+""".
+-spec read_back(atom()) -> ok.
+read_back(Tag) ->
+    Outcome =
+        case file:read_file(?PROBE_FILE) of
+            {ok, Bin} -> back(Bin);
+            {error, _} = Error -> Error
+        end,
+    chryso_test:emit("FS_BACK_" ++ chryso_test:tag(Tag), Outcome).
+
+-doc """
+blk-eio-smoke and the disk fuzz: read a module's file and report
+`{ok, Size, Hash}` or `{error, Reason}`. The hash lets the caller check that
+a fault elsewhere left existing data unchanged, and a refused read is a
+result, not a crashed probe.
+""".
+-spec read_outcome(atom(), module()) -> ok.
+read_outcome(Tag, Module) ->
+    Outcome =
+        case file:read_file(code:which(Module)) of
+            {ok, Bin} -> {ok, byte_size(Bin), erlang:phash2(Bin)};
+            {error, _} = Error -> Error
+        end,
+    chryso_test:emit("FS_READ_" ++ chryso_test:tag(Tag), Outcome).
+
+-define(FUZZ_SIZE, 8192).
+
+-doc """
+The system fuzz: write file `File` as 8 KiB of the byte `Seed`, then sync
+and close, and report `FS_PUT_<TAG>|{Write, Sync, Close}` or
+`{error, Reason}`. Below one FatFs cluster, so a disk error may surface at
+any of the three steps.
+""".
+-spec put(atom(), 0..255, byte()) -> ok.
+put(Tag, File, Seed) ->
+    Outcome =
+        case catch file:open(fuzz_path(File), [write, raw, binary]) of
+            {ok, Fd} ->
+                Written = file:write(Fd, binary:copy(<<Seed>>, ?FUZZ_SIZE)),
+                Synced = file:sync(Fd),
+                {Written, Synced, file:close(Fd)};
+            {error, _} = Error ->
+                Error;
+            {'EXIT', _} ->
+                {error, exit}
+        end,
+    chryso_test:emit("FS_PUT_" ++ chryso_test:tag(Tag), Outcome).
+
+-doc """
+The system fuzz: read file `File` back and report `{ok, Seed}` when it is
+whole and every byte is `Seed`, `differs` when it is not, or
+`{error, Reason}`.
+""".
+-spec get(atom(), 0..255) -> ok.
+get(Tag, File) ->
+    Outcome =
+        case catch file:read_file(fuzz_path(File)) of
+            {ok, <<Seed, _/binary>> = Bin} when byte_size(Bin) =:= ?FUZZ_SIZE ->
+                case binary:copy(<<Seed>>, ?FUZZ_SIZE) of
+                    Bin -> {ok, Seed};
+                    _ -> differs
+                end;
+            {ok, _} ->
+                differs;
+            {error, _} = Error ->
+                Error;
+            {'EXIT', _} ->
+                {error, exit}
+        end,
+    chryso_test:emit("FS_GET_" ++ chryso_test:tag(Tag), Outcome).
+
+-spec fuzz_path(0..255) -> string().
+fuzz_path(File) ->
+    "/fuzz" ++ integer_to_list(File) ++ ".bin".
+
+-spec back(binary()) -> same | differs.
+back(Bin) ->
+    case Bin =:= payload() of
+        true -> same;
+        false -> differs
+    end.
+
+-spec payload() -> binary().
+payload() ->
+    binary:copy(<<"chryso">>, 65536 div 6).

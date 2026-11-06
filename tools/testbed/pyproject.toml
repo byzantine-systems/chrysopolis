@@ -8,7 +8,14 @@ build-backend = "setuptools.build_meta"
 name = "chryso-testbed"
 version = "0.1.0"
 requires-python = ">=3.14"
-dependencies = ["qemu.qmp>=0.0.6", "typer>=0.25"]
+dependencies = [
+    "pydantic>=2.11",
+    "pyfatfs>=1.1",
+    "python-statemachine>=3.2",
+    "qemu.qmp>=0.0.6",
+    "structlog>=26",
+    "typer>=0.25",
+]
 
 [project.scripts]
 chryso-testbed = "chryso_testbed.__main__:app"
@@ -40,6 +47,12 @@ files = ["src", "tests", "fuzz"]
 [[tool.mypy.overrides]]
 module = ["hypothesis.*", "hypothesis_jsonschema.*"]
 follow_untyped_imports = true
+
+# pyfatfs has no annotations, and following it infers its attributes from
+# their None initialisers. fatlayout.py is the typed boundary instead.
+[[tool.mypy.overrides]]
+module = ["pyfatfs.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

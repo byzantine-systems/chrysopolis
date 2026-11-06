@@ -23,7 +23,7 @@ which uses only the probe's own inputs.
 
 -include("orchestrator_abi.hrl").
 
--export([stat/2, stat_errors/1, ctl_script/2, reconcile/5, latency/3, bench/2]).
+-export([stat/2, stat_errors/1, events/2, ctl_script/2, reconcile/5, latency/3, bench/2]).
 
 -define(STAT, "/dev/chrysostat").
 -define(CTL, "/dev/chrysoctl").
@@ -64,6 +64,65 @@ stat(Tag, Child) ->
                 [{error, Reason}]
         end,
     chryso_test:emit_run("CTL_STAT." ++ Name, [{stat, Fields}], 0).
+
+-doc """
+Root's own record of what happened: one `event` record per ring entry from
+head `Since` to the current head, each with its ring `index`, `ticks`,
+`kind`, `child`, `detail`, `a` and `b`, then a `ring` record with the
+`head`, Root's `dropped` overwrites and the entries since `Since` this read
+already `lost`. The fault fuzz reads it as the lineage of a run.
+""".
+-spec events(atom(), non_neg_integer()) -> ok.
+events(Tag, Since) ->
+    Name = chryso_test:tag(Tag),
+    Records =
+        case read_page() of
+            {ok, Page} ->
+                Head = field(Page, ?CHRYSO_ROOT_STATUS_HEADER_EVENT_HEAD_OFFSET, 64),
+                Dropped = field(Page, ?CHRYSO_ROOT_STATUS_HEADER_EVENT_DROPPED_OFFSET, 64),
+                First = max(Since, Head - ?CHRYSO_EVENT_COUNT),
+                Ring = [{head, Head}, {dropped, Dropped}, {lost, First - min(Since, First)}],
+                [named_event(I, event(Page, I)) || I <- lists:seq(First, Head - 1)] ++
+                    [{ring, Ring}];
+            {error, Reason} ->
+                [{ring, [{error, Reason}]}]
+        end,
+    chryso_test:emit_run("CTL_EVENTS." ++ Name, Records, 0).
+
+%% A ring entry as a record, its kind named through the generated macros so
+%% the reader never hard-codes the ABI's numbers.
+-spec named_event(non_neg_integer(), #{atom() => non_neg_integer()}) -> chryso_frame:record().
+named_event(Index, #{kind := Kind, detail := Detail} = Event) ->
+    Fields = maps:to_list(maps:without([kind, detail], Event)),
+    {event, [
+        {index, Index},
+        {kind, kind_name(Kind)},
+        {detail, detail_name(Kind, Detail)}
+        | lists:sort(Fields)
+    ]}.
+
+-spec kind_name(non_neg_integer()) -> atom().
+kind_name(?CHRYSO_ROOT_EVENT_KIND_BOOT) -> boot;
+kind_name(?CHRYSO_ROOT_EVENT_KIND_FAULT) -> fault;
+kind_name(?CHRYSO_ROOT_EVENT_KIND_RESTART) -> restart;
+kind_name(?CHRYSO_ROOT_EVENT_KIND_STOP) -> stop;
+kind_name(?CHRYSO_ROOT_EVENT_KIND_GIVEUP) -> giveup;
+kind_name(?CHRYSO_ROOT_EVENT_KIND_QUARANTINE) -> quarantine;
+kind_name(?CHRYSO_ROOT_EVENT_KIND_RECLAIM) -> reclaim;
+kind_name(?CHRYSO_ROOT_EVENT_KIND_CONTROL) -> control;
+kind_name(?CHRYSO_ROOT_EVENT_KIND_SPEC_REJECT) -> spec_reject;
+kind_name(_) -> unset.
+
+%% The detail of the kinds the fuzz reads, named. Others pass as numbers.
+-spec detail_name(non_neg_integer(), non_neg_integer()) -> atom() | non_neg_integer().
+detail_name(?CHRYSO_ROOT_EVENT_KIND_GIVEUP, ?CHRYSO_ROOT_GIVEUP_REASON_BUDGET_EXHAUSTED) ->
+    budget_exhausted;
+detail_name(?CHRYSO_ROOT_EVENT_KIND_CONTROL, ?CHRYSO_ROOT_CONTROL_KIND_FAULT_INJECT) ->
+    fault_inject;
+detail_name(?CHRYSO_ROOT_EVENT_KIND_CONTROL, ?CHRYSO_ROOT_CONTROL_KIND_RESTART_CHILD) ->
+    restart_child;
+detail_name(_, Detail) ->
+    Detail.
 
 -doc "Exercise the status device's local failures. None involves Root.".
 -spec stat_errors(atom()) -> ok.
@@ -327,7 +386,9 @@ event(Page, Index) ->
         ticks => field(Page, Base + ?CHRYSO_ROOT_EVENT_TICKS_OFFSET, 64),
         kind => field(Page, Base + ?CHRYSO_ROOT_EVENT_KIND_OFFSET, 8),
         child => field(Page, Base + ?CHRYSO_ROOT_EVENT_CHILD_OFFSET, 8),
-        detail => field(Page, Base + ?CHRYSO_ROOT_EVENT_DETAIL_OFFSET, 32)
+        detail => field(Page, Base + ?CHRYSO_ROOT_EVENT_DETAIL_OFFSET, 32),
+        a => field(Page, Base + ?CHRYSO_ROOT_EVENT_A_OFFSET, 64),
+        b => field(Page, Base + ?CHRYSO_ROOT_EVENT_B_OFFSET, 64)
     }.
 
 %% The flooding process for Mode = flood, or none.
