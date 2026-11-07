@@ -16,6 +16,13 @@ state they need instead of waiting for it. Each caught a planted defect:
 | a crashed write leaves its file held | test_a_crashed_write_changes_only_its_file |
 | a crashed rewrite may read as anything | test_a_crashed_write_changes_only_its_file |
 | a reset is offered on a damaged volume | test_steer.test_no_reset_is_offered_on_a_damaged_volume |
+| the rename scenario aims at a held target | test_steer.test_the_rename_scenario_moves_... |
+| a rename leaves its source held | test_a_renamed_file_reads_under_its_new_name |
+| a rename onto a present name replaces it | test_a_rename_onto_a_present_name_is_refused_... |
+| a rename leaves a data fault on the old name | test_a_read_error_follows_its_file_through_... |
+| a rename drops every other file | test_changes_to_distinct_files_commute |
+| a remove keeps the fault on the freed data | test_a_removed_file_reads_as_absent |
+| an overwrite expects a get's read errors | test_an_overwrite_never_reads_file_data |
 
 The pre-split model ran in lockstep with this one before it was deleted.
 """
@@ -34,7 +41,9 @@ from chryso_testbed.blkdebug import PLAN, Expected
 from chryso_testbed.blkdebug import SCHEMA as PLAN_SCHEMA
 from chryso_testbed.fatlayout import Region
 from chryso_testbed.faults import (
+    CLEAN_DISK,
     DRIVERS,
+    FILES,
     KEPT,
     PROGRAM,
     STEP,
@@ -46,8 +55,11 @@ from chryso_testbed.faults import (
     Fault,
     Get,
     Model,
+    Overwrite,
     Program,
     Put,
+    Remove,
+    Rename,
     Reset,
     Restart,
     Step,
@@ -465,6 +477,211 @@ def test_nothing_can_be_aimed_at_a_missing_file(
     arm = Arm(kind="arm", op=op, region=region, file=file, once=False)
     assert model.expect(arm) == Expect(frozenset({Status.ABSENT}))
     assert model.after(arm, Status.ABSENT).storage.armed is None
+
+
+# --- remove, rename and overwrite ----------------------------------------------------
+
+
+def reads(model: Model) -> tuple[Expect, ...]:
+    """The observation these laws compare: what a get of each file may return."""
+    return tuple(model.expect(Get(kind="get", file=f)) for f in range(FILES))
+
+
+def plain(model: Model) -> Model | None:
+    """`model` with no armed fault, a clean boot plan and Root settled, or
+    None where the block driver is gone or the volume damaged."""
+    if not model.root.up("blk") or model.storage.damaged:
+        return None
+    storage = replace(model.storage, fault=FaultLifecycle(FaultRecord()), disk=CLEAN_DISK)
+    return replace(model, root=model.root.settled(DRIVERS), storage=storage)
+
+
+def absent(model: Model, file: int) -> Model:
+    """A plain `model` with `file` removed, if it may be there."""
+    remove = Remove(kind="remove", file=file)
+    return model.after(remove, Status.OK) if Status.OK in model.expect(remove) else model
+
+
+pairs = st.lists(files, min_size=2, max_size=2, unique=True)
+seeds = st.integers(0, 255)
+
+
+def change(file: int, other: int) -> st.SearchStrategy[Step]:
+    """A data step on `file`, a rename onto `other` among them, each kind
+    equally likely. The schema's own strategy rarely draws a rename."""
+    return st.one_of(
+        seeds.map(lambda s: Put(kind="put", file=file, seed=s)),
+        seeds.map(lambda s: Overwrite(kind="overwrite", file=file, seed=s)),
+        st.just(Get(kind="get", file=file)),
+        st.just(Remove(kind="remove", file=file)),
+        st.just(Rename(kind="rename", src=file, dst=other)),
+    )
+
+
+@st.composite
+def disjoint_changes(draw: st.DrawFn) -> tuple[Step, Step]:
+    """Two data steps touching disjoint files, built rather than filtered."""
+    order = draw(st.permutations(range(FILES)))
+    return draw(change(order[0], order[1])), draw(change(order[2], order[3]))
+
+
+@given(start=states(), file=files)
+def test_removing_an_absent_file_is_the_identity(start: Model, file: int) -> None:
+    if (model := plain(start)) is None:
+        return
+    model = absent(model, file)
+    remove = Remove(kind="remove", file=file)
+    assert model.expect(remove) == Expect(frozenset({Status.ENOENT}))
+    assert reads(model.after(remove, Status.ENOENT)) == reads(model)
+
+
+@given(start=states(), file=files, seed=st.integers(0, 255))
+def test_a_removed_file_reads_as_absent(start: Model, file: int, seed: int) -> None:
+    """Even with a sticky read error on its old data: the freed clusters are
+    no longer the file's, so a get finds no entry and reads nothing."""
+    if (plain_start := plain(start)) is None or (model := holding(plain_start, file, seed)) is None:
+        return
+    armed = model.after(Arm(kind="arm", op="read", region="data", file=file, once=False),
+                        Status.PRESENT)  # fmt: skip
+    removed = armed.after(Remove(kind="remove", file=file), Status.OK)
+    allowed = removed.expect(Get(kind="get", file=file))
+    assert not allowed.anything
+    assert allowed.outcomes <= {Status.ENOENT, Status.EIO}
+    assert Status.ENOENT in allowed.outcomes
+
+
+@given(start=states(), file=files, seed=st.integers(0, 255))
+def test_remove_is_idempotent(start: Model, file: int, seed: int) -> None:
+    """remove; remove = remove, the second reporting ENOENT."""
+    if (plain_start := plain(start)) is None or (model := holding(plain_start, file, seed)) is None:
+        return
+    remove = Remove(kind="remove", file=file)
+    once = model.after(remove, Status.OK)
+    assert once.expect(remove) == Expect(frozenset({Status.ENOENT}))
+    assert reads(once.after(remove, Status.ENOENT)) == reads(once)
+
+
+@given(start=states(), pair=pairs, seed=st.integers(0, 255))
+def test_a_rename_moves_what_a_get_reads(start: Model, pair: list[int], seed: int) -> None:
+    """After a → b, b reads what a read, a reads as never written, and
+    every other file reads as before."""
+    src, dst = pair
+    if (plain_start := plain(start)) is None:
+        return
+    if (model := holding(absent(plain_start, dst), src, seed)) is None:
+        return
+    rename = Rename(kind="rename", src=src, dst=dst)
+    assert model.expect(rename) == Expect(frozenset({Status.OK}))
+    before, after = reads(model), reads(model.after(rename, Status.OK))
+    gone = model.expect(Get(kind="get", file=dst))  # dst was absent
+    assert after[dst] == before[src]
+    assert after[src] == gone
+    assert all(after[f] == before[f] for f in range(FILES) if f not in pair)
+
+
+@given(start=states(), pair=pairs, seed=st.integers(0, 255))
+def test_renaming_there_and_back_is_the_identity(start: Model, pair: list[int], seed: int) -> None:
+    """a → b; b → a, observed through every get and the fault's target."""
+    src, dst = pair
+    if (plain_start := plain(start)) is None:
+        return
+    if (model := holding(absent(plain_start, dst), src, seed)) is None:
+        return
+    model = model.after(Arm(kind="arm", op="read", region="data", file=src, once=False),
+                        Status.PRESENT)  # fmt: skip
+    there = model.after(Rename(kind="rename", src=src, dst=dst), Status.OK)
+    back = Rename(kind="rename", src=dst, dst=src)
+    assert there.expect(back) == Expect(frozenset({Status.OK}))
+    returned = there.after(back, Status.OK)
+    assert reads(returned) == reads(model)
+    assert returned.storage.armed == model.storage.armed
+
+
+@given(start=states(), pair=pairs, seeds=st.tuples(st.integers(0, 255), st.integers(0, 255)))
+def test_a_rename_onto_a_present_name_is_refused_and_changes_nothing(
+    start: Model, pair: list[int], seeds: tuple[int, int]
+) -> None:
+    src, dst = pair
+    if (plain_start := plain(start)) is None:
+        return
+    if (held := holding(plain_start, dst, seeds[1])) is None:
+        return
+    if (model := holding(held, src, seeds[0])) is None:
+        return
+    rename = Rename(kind="rename", src=src, dst=dst)
+    assert model.expect(rename) == Expect(frozenset({Status.EEXIST}))
+    assert reads(model.after(rename, Status.EEXIST)) == reads(model)
+
+
+@given(start=states(), pair=pairs, seed=st.integers(0, 255), once=st.booleans())
+def test_a_read_error_follows_its_file_through_a_rename(
+    start: Model, pair: list[int], seed: int, once: bool
+) -> None:
+    """The chain does not move, so a latent error on the data stays strict."""
+    src, dst = pair
+    if (plain_start := plain(start)) is None:
+        return
+    if (model := holding(absent(plain_start, dst), src, seed)) is None or model.storage.suspect:
+        return
+    armed = model.after(Arm(kind="arm", op="read", region="data", file=src, once=once),
+                        Status.PRESENT)  # fmt: skip
+    renamed = armed.after(Rename(kind="rename", src=src, dst=dst), Status.OK)
+    assert renamed.expect(Get(kind="get", file=dst)) == Expect(frozenset({Status.EIO}))
+
+
+@given(start=states(), file=files, seed=st.integers(0, 255), again=st.integers(0, 255),
+       once=st.booleans())  # fmt: skip
+def test_an_overwrite_never_reads_file_data(
+    start: Model, file: int, seed: int, again: int, once: bool
+) -> None:
+    """Whole sectors in place: a read error on the file's data cannot fail it."""
+    if (plain_start := plain(start)) is None or (model := holding(plain_start, file, seed)) is None:
+        return
+    overwrite = Overwrite(kind="overwrite", file=file, seed=again)
+    faulted = with_fault(model, "read", "data", file, once)
+    assert faulted.expect(overwrite) == model.expect(overwrite) == Expect(frozenset({Status.OK}))
+    rewritten = faulted.after(overwrite, Status.OK)
+    assert rewritten.storage.armed == faulted.storage.armed, "the data kept its clusters"
+
+
+@given(
+    start=states(),
+    held=st.sets(files),
+    ready=st.booleans(),
+    pair=disjoint_changes(),
+    data=st.data(),
+)
+def test_changes_to_distinct_files_commute(
+    start: Model, held: set[int], ready: bool, pair: tuple[Step, Step], data: st.DataObject
+) -> None:
+    """With no fault and a clean disk, two storage steps on disjoint files
+    run in either order to the same model. `held` files are written first.
+    When `ready`, every rename's source is written and its target removed,
+    or a rename would seldom succeed."""
+    a, b = pair
+    if (model := plain(start)) is None:
+        return
+    renames = [s for s in pair if isinstance(s, Rename)] if ready else []
+    for f in held | {s.src for s in renames}:
+        model = holding(model, f, f) or model
+    for s in renames:
+        model = absent(model, s.dst)
+    seen_a = data.draw(outcome(model.expect(a)))
+    seen_b = data.draw(outcome(model.expect(b)))
+    assert model.after(b, seen_b).expect(a) == model.expect(a)
+    assert model.after(a, seen_a).expect(b) == model.expect(b)
+    assert (
+        model.after(a, seen_a).after(b, seen_b).key()
+        == model.after(b, seen_b).after(a, seen_a).key()
+    )
+
+
+def test_a_renamed_file_reads_under_its_new_name() -> None:
+    """The anchor: identity laws alone pass for a model that ignores renames."""
+    model = Model.start(BUDGET).after(Put(kind="put", file=1, seed=5), Status.OK)
+    model = model.after(Rename(kind="rename", src=1, dst=2), Status.OK)
+    assert model.expect(Get(kind="get", file=2)) == Expect(frozenset({Seed(5)}))
+    assert model.expect(Get(kind="get", file=1)) == Expect(frozenset({Status.ENOENT}))
 
 
 # --- the interpreter's parsing -------------------------------------------------------

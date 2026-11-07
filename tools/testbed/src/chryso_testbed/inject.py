@@ -25,10 +25,13 @@ from chryso_testbed.faults import (
     Fault,
     Get,
     Model,
+    Overwrite,
     Pause,
     Ping,
     Program,
     Put,
+    Remove,
+    Rename,
     Reset,
     Restart,
     Step,
@@ -60,6 +63,26 @@ def put_outcome(reported: str) -> Outcome:
     if reported == "{ok,ok,ok}":
         return Status.OK
     return Status.EIO if errors == {"eio"} else Status.ERROR
+
+
+def overwrite_outcome(reported: str) -> Outcome:
+    """As `put_outcome`, plus ENOENT for a missing file."""
+    return Status.ENOENT if reported == "{error,enoent}" else put_outcome(reported)
+
+
+def change_outcome(reported: str) -> Outcome:
+    """A remove's or rename's `ok` or `{error,R}` as OK, ENOENT, EEXIST, EIO or ERROR."""
+    match reported:
+        case "ok":
+            return Status.OK
+        case "{error,enoent}":
+            return Status.ENOENT
+        case "{error,eexist}":
+            return Status.EEXIST
+        case "{error,eio}":
+            return Status.EIO
+        case _:
+            return Status.ERROR
 
 
 def get_outcome(reported: str) -> Outcome:
@@ -196,6 +219,21 @@ async def perform(
                 m, f"chryso_fs:put({tag}, {f}, {s}).", rf"FS_PUT_{tag.upper()}\|(\S+)"
             )
             return put_outcome(hit.groups[0] or "")
+        case Overwrite(file=f, seed=s):
+            hit = await probes.call(
+                m, f"chryso_fs:overwrite({tag}, {f}, {s}).", rf"FS_OW_{tag.upper()}\|(\S+)"
+            )
+            return overwrite_outcome(hit.groups[0] or "")
+        case Remove(file=f):
+            hit = await probes.call(
+                m, f"chryso_fs:remove({tag}, {f}).", rf"FS_RM_{tag.upper()}\|(\S+)"
+            )
+            return change_outcome(hit.groups[0] or "")
+        case Rename(src=a, dst=b):
+            hit = await probes.call(
+                m, f"chryso_fs:rename({tag}, {a}, {b}).", rf"FS_MV_{tag.upper()}\|(\S+)"
+            )
+            return change_outcome(hit.groups[0] or "")
         case Get(file=f):
             hit = await probes.call(
                 m, f"chryso_fs:get({tag}, {f}).", rf"FS_GET_{tag.upper()}\|(\S+)"

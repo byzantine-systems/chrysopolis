@@ -82,6 +82,31 @@ class Put(_Step):
     seed: int = Field(ge=0, le=255)
 
 
+class Overwrite(_Step):
+    """Write 8 KiB of one byte over a file in place, without truncating it,
+    then sync and close it. Whole sectors, so nothing is read first."""
+
+    kind: Literal["overwrite"]
+    file: int = Field(ge=0, lt=FILES)
+    seed: int = Field(ge=0, le=255)
+
+
+class Remove(_Step):
+    """Delete a file."""
+
+    kind: Literal["remove"]
+    file: int = Field(ge=0, lt=FILES)
+
+
+class Rename(_Step):
+    """Rename file `src` to `dst`. FatFs refuses a `dst` that exists, and
+    renaming a file onto its own name succeeds and changes nothing."""
+
+    kind: Literal["rename"]
+    src: int = Field(ge=0, lt=FILES)
+    dst: int = Field(ge=0, lt=FILES)
+
+
 class Get(_Step):
     """Read a file back."""
 
@@ -135,7 +160,21 @@ class CrashPut(_Step):
 
 
 type Step = Annotated[
-    Fault | Restart | Unplug | Pause | Put | Get | Ping | Arm | Disarm | Corrupt | Reset | CrashPut,
+    Fault
+    | Restart
+    | Unplug
+    | Pause
+    | Put
+    | Overwrite
+    | Get
+    | Remove
+    | Rename
+    | Ping
+    | Arm
+    | Disarm
+    | Corrupt
+    | Reset
+    | CrashPut,
     Field(discriminator="kind"),
 ]
 # Generation draws at most 16 steps. Lineage cuts may insert a driver's whole
@@ -252,7 +291,7 @@ class RootModel:
         return tuple(sorted((d, c.at, c.model.spent) for d, c in self.drivers.items()))
 
 
-type StorageStep = Put | Get | Arm | Disarm | Corrupt
+type StorageStep = Put | Overwrite | Get | Remove | Rename | Arm | Disarm | Corrupt
 
 
 def _fault() -> FaultLifecycle:
@@ -299,10 +338,15 @@ class StorageModel:
     def expect(self, step: StorageStep, *, up: bool) -> Expect:
         """`up` is whether Root still runs the block driver."""
         base = self._unfaulted(step, up=up)
-        if isinstance(step, Put | Get) and self.damaged and up:
+        if isinstance(step, Put | Overwrite | Get | Remove | Rename) and self.damaged and up:
             return ANYTHING
-        if (armed := self.armed) is None or not isinstance(step, Put | Get):
+        if (armed := self.armed) is None or not isinstance(
+            step, Put | Overwrite | Get | Remove | Rename
+        ):
             return base
+        if isinstance(step, Remove | Rename):
+            # Neither reads data, but both read FAT and directory sectors.
+            return base if armed.region == "data" else base | expect(EIO)
         same_data = armed.region == "data" and armed.file == step.file
         match step, armed.op:
             # The strict cases: a read error on a file's data is reported,
@@ -315,7 +359,7 @@ class StorageModel:
                 return base
             case Get(), "read" if armed.region == "data":
                 return base
-            case Put(), "read" if armed.region == "data":
+            case Put() | Overwrite(), "read" if armed.region == "data":
                 return base
             # FAT and directory sectors are shared and cached, so a fault
             # there may or may not surface.
@@ -334,15 +378,55 @@ class StorageModel:
             case _:
                 return expect(Status.PRESENT)
 
+    def _presence(self, f: int) -> frozenset[bool]:
+        """Whether file `f` may be on the volume."""
+        chart = self.file(f)
+        match chart.at:
+            case "absent":
+                return frozenset({False})
+            case "unknown":
+                return frozenset({False, True})
+            case "torn":
+                return frozenset({True, Status.ENOENT in chart.model.before})
+            case _:
+                return frozenset({True})
+
+    def _writes(self) -> Expect:
+        """What a write the volume accepts reports under the boot plan. A
+        permanent rule fails every write, one-shot rules only some."""
+        if not self.disk.write_fails:
+            return expect(OK)
+        return expect(EIO) if self.disk.reads == {"error"} else expect(OK, EIO)
+
     def _unfaulted(self, step: StorageStep, *, up: bool) -> Expect:
         match step:
-            case Put() | Get() if not up:
+            case Put() | Overwrite() | Get() | Remove() | Rename() if not up:
                 return expect(EIO, ERROR)
-            case Put() if not self.disk.write_fails:
-                return expect(OK)
             case Put():
-                # A permanent rule fails every write, one-shot rules only some.
-                return expect(EIO) if self.disk.reads == {"error"} else expect(OK, EIO)
+                return self._writes()
+            case Overwrite(file=f) | Remove(file=f):
+                present = self._presence(f)
+                allowed = self._writes() if True in present else expect()
+                if False in present:
+                    allowed |= expect(Status.ENOENT)
+                return allowed
+            case Rename(src=s, dst=d) if s == d:
+                present = self._presence(s)
+                allowed = expect(OK) if True in present else expect()
+                if False in present:
+                    allowed |= expect(Status.ENOENT)
+                return allowed
+            case Rename(src=s, dst=d):
+                allowed = expect()
+                for src in self._presence(s):
+                    for dst in self._presence(d):
+                        if not src:
+                            allowed |= expect(Status.ENOENT)
+                        elif dst:
+                            allowed |= expect(Status.EEXIST)
+                        else:
+                            allowed |= self._writes()
+                return allowed
             case Get(file=f):
                 chart = self.file(f)
                 match chart.at:
@@ -379,12 +463,27 @@ class StorageModel:
             case Put(file=f, seed=s), Status.OK:
                 return model._file(f, "written", seed=s)._moved(f)
             case Put(file=f), _:
-                armed = model.armed
-                dirty = "error" in model.disk.reads or (armed is not None and armed.op == "write")
-                failed = model._file(f, "write_failed")._moved(f)
-                return (
-                    replace(failed, window=failed.window.evolved("left_dirty")) if dirty else failed
-                )
+                return model._file(f, "write_failed")._moved(f)._dirtied()
+            # In place: the data keeps its clusters, so a fault keeps its target.
+            case Overwrite(file=f, seed=s), Status.OK:
+                return model._file(f, "written", seed=s)
+            case Overwrite() | Remove(), Status.ENOENT:
+                return model
+            case Overwrite(file=f), _:
+                return model._file(f, "write_failed")._dirtied()
+            # The freed clusters no longer belong to the file.
+            case Remove(file=f), Status.OK:
+                return model._file(f, "deleted")._moved(f)
+            case Remove(file=f), _:
+                return model._file(f, "write_failed")._dirtied()
+            case Rename(src=s, dst=d), Status.OK if s != d:
+                return model._renamed(s, d)
+            case Rename(src=s, dst=d), Status.OK:
+                return model
+            case Rename(), Status.ENOENT | Status.EEXIST:
+                return model
+            case Rename(src=s, dst=d), _:
+                return model._file(s, "write_failed")._file(d, "write_failed")._dirtied()
             case _:
                 return model
 
@@ -407,6 +506,25 @@ class StorageModel:
         """After a reset: the disk keeps its files and any damage, while the
         armed fault (disarmed first) and FatFs's window are gone."""
         return replace(self, fault=_fault(), window=_window())
+
+    def _dirtied(self) -> StorageModel:
+        """After a failed write FatFs keeps its dirty sector when the disk or
+        an armed fault fails writes."""
+        armed = self.armed
+        if "error" in self.disk.reads or (armed is not None and armed.op == "write"):
+            return replace(self, window=self.window.evolved("left_dirty"))
+        return self
+
+    def _renamed(self, src: int, dst: int) -> StorageModel:
+        """`dst` takes `src`'s file and its clusters, and `src` is gone. A fault
+        on the clusters follows the file, one on its old entry is adrift."""
+        files = {**self.files, dst: self.file(src), src: _fresh_file()}
+        model = replace(self, files=files)
+        if (armed := self.armed) is None or armed.file != src:
+            return model
+        if armed.region == "entry":
+            return replace(model, fault=model.fault.evolved("moved"))
+        return replace(model, fault=model.fault.evolved("followed", file=dst))
 
     def _moved(self, f: int) -> StorageModel:
         """A rewrite of `f` truncates it, so FatFs may give it new clusters:
@@ -481,7 +599,7 @@ def owner(step: Step) -> Component:
     match step:
         case Fault() | Restart():
             return "root"
-        case Put() | Get() | Arm() | Disarm() | Corrupt():
+        case Put() | Overwrite() | Get() | Remove() | Rename() | Arm() | Disarm() | Corrupt():
             return "storage"
         case Ping() | Unplug() | Pause():
             return "net"
@@ -515,7 +633,7 @@ class Model:
         match step:
             case Fault() | Restart():
                 return self.root.expect(step)
-            case Put() | Get():
+            case Put() | Overwrite() | Get() | Remove() | Rename():
                 allowed = self.storage.expect(step, up=self.root.up("blk"))
                 # A driver still reconciling may refuse the request.
                 return (allowed | expect(EIO, ERROR)) if self.root.recovering("blk") else allowed
@@ -549,7 +667,7 @@ class Model:
         match step:
             case Fault() | Restart():
                 model = replace(self, root=self.root.after(step, outcome))
-            case Put() | Get() | Arm() | Disarm() | Corrupt():
+            case Put() | Overwrite() | Get() | Remove() | Rename() | Arm() | Disarm() | Corrupt():
                 model = replace(self, storage=self.storage.after(step, outcome))
             case Ping() | Unplug() | Pause():
                 model = replace(self, net=self.net.after(step, outcome))

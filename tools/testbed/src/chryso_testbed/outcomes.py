@@ -14,6 +14,7 @@ class Status(Enum):
     EIO = "eio"
     ERROR = "error"  # any other error, or a crashed probe
     ENOENT = "enoent"
+    EEXIST = "eexist"  # a rename onto a name that exists
     DIFFERS = "differs"  # a file read back with the wrong contents
     GONE = "gone"  # Root ignored a request for a driver it gave up on
     PRESENT = "present"  # a disk fault found its target
