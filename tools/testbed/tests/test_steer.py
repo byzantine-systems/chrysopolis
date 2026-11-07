@@ -17,6 +17,8 @@ from chryso_testbed.faults import (
     Fault,
     Model,
     Put,
+    Remove,
+    Rename,
     Reset,
     Restart,
     Step,
@@ -29,6 +31,7 @@ from chryso_testbed.steer import (
     advance,
     enabled,
     faults_to,
+    free,
     gone,
     has_file,
     nominal,
@@ -39,7 +42,7 @@ from chryso_testbed.steer import (
     writes,
 )
 
-AIMING: Final = ("latent", "corrupt-heal", "write-fault")
+AIMING: Final = ("latent", "corrupt-heal", "write-fault", "latent-overwrite", "rename-remove")
 names = st.sampled_from(sorted(SCENARIOS))
 
 
@@ -118,3 +121,28 @@ def test_no_reset_is_offered_on_a_damaged_volume(
     assert damaged.storage.damaged
     for _ in range(20):
         assert not isinstance(data.draw(enabled(damaged)), Reset | CrashPut)
+
+
+@given(disk=disks, data=st.data())
+def test_the_rename_scenario_moves_a_file_then_removes_one(
+    disk: Expected, data: st.DataObject
+) -> None:
+    """As far as the nominal outcomes go, its rename takes a present file to
+    another name whenever one is free, and its remove finds a file, so
+    neither is refused."""
+    if not takes_writes(disk):
+        return
+    model = Model.start(BUDGET, disk)
+    moved = could_move = removed = False
+    for step in data.draw(programs(model, "rename-remove")):
+        if isinstance(step, Rename | Remove) and not model.storage.damaged:
+            allowed = model.expect(step).outcomes
+            # Not refused: a boot plan may still fail the write itself.
+            ok = Status.OK in allowed and not allowed & {Status.ENOENT, Status.EEXIST}
+            if isinstance(step, Rename):
+                could_move |= any(f != step.src for f in free(model))
+                moved |= ok and step.src != step.dst
+            removed |= isinstance(step, Remove) and ok
+        model = advance(model, step)
+    assert moved or not could_move
+    assert removed

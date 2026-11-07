@@ -34,9 +34,12 @@ from chryso_testbed.faults import (
     Fault,
     Get,
     Model,
+    Overwrite,
     Ping,
     Program,
     Put,
+    Remove,
+    Rename,
     Step,
     Unplug,
 )
@@ -99,11 +102,12 @@ def abstract(model: Model) -> tuple[object, ...]:
 
 def reaction(step: Step, seen: Outcome, model: Model) -> str | None:
     """A row of the fault-reaction table, for steps a disk fault could touch."""
-    if not isinstance(step, Put | Get):
+    if not isinstance(step, Put | Get | Overwrite | Remove | Rename):
         return None
+    file = step.src if isinstance(step, Rename) else step.file
     if (armed := model.storage.armed) is not None:
         fault = f"{armed.op}-error/{armed.region}" + ("/once" if armed.once else "")
-    elif model.storage.file(step.file).at == "corrupt":
+    elif model.storage.file(file).at == "corrupt":
         fault = "corrupt/data"
     elif model.storage.damaged:
         fault = "damaged-volume"
@@ -136,20 +140,22 @@ def crash_checks(
         image = crashlog.replay(log, base, scratch / f"crash-{k}.img", kept)
         t1 = perf_counter()
         crash = crashlog.crashed_at(log, k + 1, part)
-        promised = crashcheck.allowed(spans, crashlog.stable(log, k + 1), crash)
-        verdict = crashcheck.judge(image, promised)
+        stable = crashlog.stable(log, k + 1)
+        promised = crashcheck.allowed(spans, stable, crash)
+        verdict = crashcheck.judge(image, promised, cut=crashcheck.moves(spans, stable, crash))
         t2 = perf_counter()
         found += [f"crash after flush {k}: {p} (image {image})" for p in verdict.problems]
         events += [f"crash left a broken chain in {name}" for name in verdict.broken]
         if verdict.diverged:
             events.append("crash left the two FATs different")
+        events += ["crash left a rename on both names"] * len(verdict.crosslinked)
         if k in (chosen[0], chosen[-1]):
             code = crashcheck.fsck(image, scratch)
             events.append(f"crash fsck exit {code}")
             if code > 1:  # 1 reports lost clusters, which a crash may leave
                 found.append(f"crash after flush {k}: fsck.fat exited {code} (image {image})")
         if not verdict.problems:
-            image.unlink()  # 100 MB each: keep only an image that broke a promise
+            image.unlink()  # keep only an image that broke a promise
         log_.debug("crash.point", flush=k, replay_s=t1 - t0, judge_s=t2 - t1,
                    fsck_s=perf_counter() - t2)  # fmt: skip
     return found, events

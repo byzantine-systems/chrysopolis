@@ -25,10 +25,13 @@ from chryso_testbed.faults import (
     Fault,
     Get,
     Model,
+    Overwrite,
     Pause,
     Ping,
     Program,
     Put,
+    Remove,
+    Rename,
     Reset,
     Restart,
     Step,
@@ -93,6 +96,22 @@ def _get(model: Model) -> st.SearchStrategy[Step]:
     return st.builds(Get, kind=st.just("get"), file=_file(model))
 
 
+def _overwrite(model: Model) -> st.SearchStrategy[Step]:
+    return st.builds(
+        Overwrite, kind=st.just("overwrite"), file=_file(model), seed=st.integers(0, 255)
+    )
+
+
+def _remove(model: Model) -> st.SearchStrategy[Step]:
+    return st.builds(Remove, kind=st.just("remove"), file=_file(model))
+
+
+def _rename(model: Model) -> st.SearchStrategy[Step]:
+    return st.builds(
+        Rename, kind=st.just("rename"), src=_file(model), dst=st.integers(0, FILES - 1)
+    )
+
+
 def _arm(model: Model, op: Literal["read", "write"] | None = None) -> st.SearchStrategy[Step]:
     ops = st.just(op) if op is not None else st.sampled_from(["read", "write"])
     return st.builds(
@@ -122,7 +141,8 @@ def _request(model: Model, drivers: list[Driver]) -> st.SearchStrategy[Step]:
 def enabled(model: Model) -> st.SearchStrategy[Step]:
     """A step that can matter from `model`. Workload first, so shrinking
     tends toward plain reads and writes."""
-    choices = [writes(model), _get(model), _arm(model), _corrupt(model)]
+    choices = [writes(model), _get(model), _overwrite(model), _remove(model), _rename(model)]
+    choices += [_arm(model), _corrupt(model)]
     if model.storage.armed is not None:
         choices.append(st.just(Disarm(kind="disarm")))
     if drivers := requestable(model):
@@ -266,6 +286,35 @@ def _workload(model: Model) -> st.SearchStrategy[Step]:
     return st.one_of(_get(model), writes(model))
 
 
+def free(model: Model) -> list[int]:
+    """Files a rename can take as its target."""
+    return [f for f in range(FILES) if model.storage.file(f).at == "absent"]
+
+
+def _moved(model: Model) -> st.SearchStrategy[Step]:
+    """A rename of a present file onto a free name, or a write that makes one."""
+    targets = free(model)
+
+    def rename(src: int) -> st.SearchStrategy[Step]:
+        dst = st.sampled_from([f for f in targets if f != src] or [src])
+        return st.builds(Rename, kind=st.just("rename"), src=st.just(src), dst=dst)
+
+    return _aimed(model, rename)
+
+
+def _removed(model: Model) -> st.SearchStrategy[Step]:
+    return _aimed(model, lambda f: st.just(Remove(kind="remove", file=f)))
+
+
+def _overwritten(model: Model) -> st.SearchStrategy[Step]:
+    return _aimed(
+        model,
+        lambda f: st.builds(
+            Overwrite, kind=st.just("overwrite"), file=st.just(f), seed=st.integers(0, 255)
+        ),
+    )
+
+
 def faults_to(drivers: tuple[Driver, ...], *, settle: bool = True) -> Toward:
     def toward(model: Model) -> st.SearchStrategy[Step]:
         live = [d for d in drivers if model.root.up(d)] or list(drivers)
@@ -314,6 +363,23 @@ SCENARIOS: Final[dict[str, Scenario]] = {
         then(lambda _: st.just(Reset(kind="reset"))),
         _repeat(then(_workload), 2),
         then(faults_to(("blk",))),
+    ),
+    # A latent read error that whole-sector overwrites must step around.
+    "latent-overwrite": chain(
+        reach(has_file, writes, 4),
+        then(_read_fault_on_data),
+        then(_overwritten),
+        _repeat(then(_workload), 2),
+    ),
+    # A latent error carried by a rename, then a remove and a reset.
+    "rename-remove": chain(
+        reach(has_file, writes, 4),
+        then(_read_fault_on_data),
+        then(_moved),
+        _repeat(then(_workload), 2),
+        then(_removed),
+        then(lambda _: st.just(Reset(kind="reset"))),
+        _repeat(then(_workload), 2),
     ),
     "mixed": anything(12),
 }
