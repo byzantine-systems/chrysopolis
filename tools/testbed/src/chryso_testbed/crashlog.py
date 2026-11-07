@@ -7,7 +7,6 @@ state is every earlier epoch in full plus any subset of one epoch.
 from __future__ import annotations
 
 import random
-import shutil
 import struct
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -125,9 +124,25 @@ def stable(log: Log, epoch: int) -> int:
     return log.flushes[epoch - 1].end if epoch else log.sectorsize
 
 
+CHUNK: Final = 1 << 20
+
+
+def sparse_copy(base: Path, out: Path, chunk_size: int = CHUNK) -> None:
+    """Copy `base` to `out`, leaving holes where a chunk of `base` is zero: the
+    disk image is mostly empty, and a crash check copies it per crash point."""
+    zero = bytes(chunk_size)
+    with base.open("rb") as src, out.open("wb") as dst:
+        while chunk := src.read(chunk_size):
+            if chunk == zero[: len(chunk)]:
+                dst.seek(len(chunk), 1)
+            else:
+                dst.write(chunk)
+        dst.truncate()
+
+
 def replay(log: Log, base: Path, out: Path, keep: frozenset[int]) -> Path:
     """`base` with the kept writes applied in log order, written to `out`."""
-    shutil.copyfile(base, out)
+    sparse_copy(base, out)
     with out.open("r+b") as disk:
         for i in sorted(keep):
             entry = log.entries[i]

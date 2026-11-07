@@ -9,6 +9,7 @@ Planted defects caught:
 | persisted keeps all or none of an epoch | test_crash_subsets_reach_between_the_boundaries |
 | persisted samples outside its epoch | test_a_crash_persists_some_of_one_epoch_and_nothing_else |
 | persisted seeds from hash() | test_a_crash_subset_replays_in_another_process |
+| sparse_copy drops a trailing zero run | test_a_sparse_copy_equals_its_source |
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from chryso_testbed.crashlog import (
     parse,
     persisted,
     replay,
+    sparse_copy,
     stable,
     state,
 )
@@ -219,3 +221,19 @@ def test_replay_applies_exactly_the_kept_writes(
     (tmp_path / "base.img").write_bytes(disk)
     out = replay(log, tmp_path / "base.img", tmp_path / "crash.img", keep)
     assert out.read_bytes() == reference(log, keep, disk)
+
+
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(
+    runs=st.lists(st.tuples(st.booleans(), st.integers(1, 40)), max_size=12),
+    chunk_size=st.sampled_from([1, 7, 16, 64]),
+)
+def test_a_sparse_copy_equals_its_source(
+    tmp_path: Path, runs: list[tuple[bool, int]], chunk_size: int
+) -> None:
+    """Zero runs of any length, across chunk boundaries and at the end, copy
+    back byte for byte at the same size."""
+    data = b"".join(bytes(n) if zero else bytes([n]) * n for zero, n in runs)
+    (tmp_path / "src.img").write_bytes(data)
+    sparse_copy(tmp_path / "src.img", tmp_path / "dst.img", chunk_size)
+    assert (tmp_path / "dst.img").read_bytes() == data

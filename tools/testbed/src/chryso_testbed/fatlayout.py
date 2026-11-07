@@ -12,7 +12,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Literal
 
-from pyfatfs import PyFATException
 from pyfatfs.PyFat import PyFat
 
 SECTOR: Final = 512
@@ -20,6 +19,9 @@ MBR_SIGNATURE: Final = b"\x55\xaa"
 # The first partition entry's starting LBA, in the MBR's partition table.
 FIRST_LBA: Final = 0x1C6
 FAT32_ENTRY: Final = 4
+ENTRY_MASK: Final = 0x0FFFFFFF  # the top four bits of a FAT32 entry are reserved
+END_OF_CHAIN: Final = 0x0FFFFFF8
+FIRST_CLUSTER: Final = 2
 
 type Region = Literal["data", "fat", "entry"]
 REGIONS: Final[tuple[Region, ...]] = ("data", "fat", "entry")
@@ -90,12 +92,17 @@ def layout(image: Path) -> Layout:
         return Layout(MappingProxyType(dict(_extents(volume, root, raw, start))))
 
 
-def contents(image: Path) -> Mapping[bytes, bytes | None]:
-    """Each root-level file's bytes, keyed by 8.3 name, read along its cluster
-    chain, or None where the chain is broken, as a crash can leave a file
-    whose entry still points at clusters already freed."""
+type Chain = tuple[int, ...] | None  # None: broken
+
+
+def survey(image: Path) -> tuple[Mapping[bytes, bytes | None], Mapping[bytes, Chain]]:
+    """Each root-level file's bytes and cluster chain, keyed by 8.3 name, in
+    one read of the image. Both are None where the chain is broken (a free,
+    bad or out-of-range link, or a loop), as a crash can leave an entry on
+    clusters already freed."""
     with _volume(image) as (volume, root, raw, start):
         view, size = memoryview(raw), volume.bytes_per_cluster
+        fat = _fat(volume, raw, start)
 
         def cluster(c: int) -> memoryview:
             at = start + volume.get_data_cluster_address(c)
@@ -103,18 +110,60 @@ def contents(image: Path) -> Mapping[bytes, bytes | None]:
 
         _, files, _ = root.get_entries()
         found: dict[bytes, bytes | None] = {}
+        links: dict[bytes, Chain] = {}
         for entry in files:
             name = short_name(entry.get_short_name())
-            if (first := entry.get_cluster()) < 2:
-                found[name] = b""
-                continue
-            try:
-                data = b"".join(map(cluster, volume.get_cluster_chain(first)))
-            except PyFATException:
-                found[name] = None
-                continue
-            found[name] = data[: entry.filesize]
-        return MappingProxyType(found)
+            links[name] = chain = _chain(fat, entry.get_cluster())
+            found[name] = None if chain is None else b"".join(map(cluster, chain))[: entry.filesize]
+        return MappingProxyType(found), MappingProxyType(links)
+
+
+def contents(image: Path) -> Mapping[bytes, bytes | None]:
+    """Each root-level file's bytes, or None where its chain is broken."""
+    return survey(image)[0]
+
+
+def chains(image: Path) -> Mapping[bytes, Chain]:
+    """Each root-level file's cluster chain, or None where it is broken."""
+    return survey(image)[1]
+
+
+@dataclass(frozen=True, slots=True)
+class _Fat:
+    """The first FAT copy and the number of entries that name a cluster."""
+
+    table: memoryview
+    entries: int
+
+
+def _fat(volume: Any, raw: bytes, start: int) -> _Fat:
+    bpb = volume.bpb_header
+    per_sector = bpb["BPB_BytsPerSec"]
+    at = start + bpb["BPB_RsvdSecCnt"] * per_sector
+    table = memoryview(raw)[at : at + bpb["BPB_FATSz32"] * per_sector]
+    data_sectors = (
+        bpb["BPB_TotSec32"] - (at - start) // per_sector - (bpb["BPB_NumFATs"] * bpb["BPB_FATSz32"])
+    )
+    clusters = data_sectors // bpb["BPB_SecPerClus"] + FIRST_CLUSTER
+    return _Fat(table, min(clusters, len(table) // FAT32_ENTRY))
+
+
+def _chain(fat: _Fat, first: int) -> Chain:
+    """The clusters from `first` to the end mark. pyfatfs's own walk has no
+    loop guard, and a crash can leave a cyclic FAT."""
+    if first < FIRST_CLUSTER:
+        return ()  # an empty file has no cluster
+    chain: list[int] = []
+    seen: set[int] = set()
+    link = first
+    while link < END_OF_CHAIN:
+        if link < FIRST_CLUSTER or link >= fat.entries or link in seen:
+            return None
+        seen.add(link)
+        chain.append(link)
+        (link,) = struct.unpack_from("<I", fat.table, link * FAT32_ENTRY)
+        link &= ENTRY_MASK
+    return tuple(chain)
 
 
 def _extents(volume: Any, root: Any, raw: bytes, start: int) -> list[tuple[bytes, Extent]]:
