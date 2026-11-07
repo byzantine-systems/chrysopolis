@@ -174,7 +174,10 @@ fn addFatServer(
     lionsos_src: []const u8,
     board_dir: []const u8,
 ) void {
-    const fat_cflags = &[_][]const u8{ "-ffreestanding", "-O2", "-g", "-Wall" };
+    // FatFs sectors of one sDDF transfer block, so the FAT server never writes
+    // part of a block it would first have to read (a read error there would fail
+    // the write). packages.disk is formatted to match.
+    const fat_cflags = &[_][]const u8{ "-ffreestanding", "-O2", "-g", "-Wall", "-DFAT_SECTOR_SIZE=4096" };
     const fat_config_inc = b.fmt("{s}/components/fs/fat/config", .{lionsos_src});
 
     // A second libmicrokitco built against the fat component's opts header

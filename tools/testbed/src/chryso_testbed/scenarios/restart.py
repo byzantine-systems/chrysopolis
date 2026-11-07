@@ -287,7 +287,7 @@ async def blk_recovery(ctx: Context) -> None:
 # The first guest write fails with EIO, then the disk recovers.
 EIO_ONCE: Final = (WriteError(errno=EIO, once=True),)
 # Every guest read waits 1 ms and then succeeds.
-CLUSTER: Final = 512  # bytes per cluster on packages.disk (mkfs.fat's default for 96 MiB)
+CLUSTER: Final = 4096  # bytes per cluster on packages.disk (mkfs.fat -S 4096 -s 1)
 SLOW_READS: Final = (Delay(errno=0, event="read_aio", iotype="read", delay_ns=1_000_000),)
 
 

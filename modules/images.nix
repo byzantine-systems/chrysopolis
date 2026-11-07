@@ -647,13 +647,17 @@
 
               # Build a populated FAT32 partition image.
               part=part.fat
-              truncate -s 96M $part
+              # 4 KiB sectors and clusters, one sDDF transfer block each, so the
+              # FAT server (built with FAT_SECTOR_SIZE=4096) never writes part of a
+              # block. FAT32 needs 65525 clusters, hence 316 MiB.
+              truncate -s 316M $part
               # One FAT: a crash between FatFs's two unordered copy writes would
               # leave them different, and FatFs only reads the first.
-              mkfs.fat --invariant -F 32 -f 1 -n CHRYSO $part
+              mkfs.fat --invariant -F 32 -S 4096 -s 1 -f 1 -n CHRYSO $part
+              sector=$(od -An -tu2 -j11 -N2 $part | tr -d ' ')
               fats=$(od -An -tu1 -j16 -N1 $part | tr -d ' ')
-              if [ "$fats" != 1 ]; then
-                echo "disk: BPB_NumFATs is $fats, expected 1" >&2
+              if [ "$sector" != 4096 ] || [ "$fats" != 1 ]; then
+                echo "disk: BPB_BytsPerSec $sector, BPB_NumFATs $fats, expected 4096 and 1" >&2
                 exit 1
               fi
               export MTOOLS_SKIP_CHECK=1
@@ -712,7 +716,7 @@
               # Wrap the FAT image in an MBR table, partition 1 (the blk
               # virt's partition 0) starts at sector 2048 (1 MiB aligned).
               off=2048
-              truncate -s 100M $out
+              truncate -s 320M $out
               echo "label: dos
               label-id: 0x43485259
               start=$off, type=c" | sfdisk $out
