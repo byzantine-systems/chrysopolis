@@ -241,18 +241,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1787279221,
-        "narHash": "sha256-RlyoCQdp8a0+w6r+eUEYSfiKNM6SvLbFYb02jMLuTQU=",
-        "ref": "refs/tags/0.4.0",
-        "rev": "ad4c35ea7ae657d2f450e45c821035e746cfa48a",
-        "revCount": 764,
+        "lastModified": 1793998954,
+        "narHash": "sha256-upmmO71rVpiXI5pOXhPVGuliVSC+bFObcSxNdLl20PY=",
+        "ref": "chryso",
+        "rev": "9dd773ec79e23a31a63b0ea263f83f2344b791fa",
+        "revCount": 778,
         "type": "git",
-        "url": "https://github.com/au-ts/lionsos"
+        "url": "https://github.com/byzantine-systems/lionsos"
       },
       "original": {
-        "ref": "refs/tags/0.4.0",
+        "ref": "chryso",
         "type": "git",
-        "url": "https://github.com/au-ts/lionsos"
+        "url": "https://github.com/byzantine-systems/lionsos"
       }
     },
     "mk-shell-bin": {
@@ -469,19 +469,18 @@
         "systems-ci": "systems-ci"
       },
       "locked": {
-        "lastModified": 1787114094,
-        "narHash": "sha256-Ser9MfdEIbAmM/SgPh2eeTM5sa2uX3yi75V2U23SI2U=",
-        "ref": "refs/tags/0.7.0",
-        "rev": "650ace5dba984f5d9c7dd1a005648ff7b40655f7",
-        "revCount": 1547,
+        "lastModified": 1793911639,
+        "narHash": "sha256-fngRBVbUaveB3a20rSzEZ6ZV+jUXiocP8X7YDM+EnII=",
+        "ref": "chryso",
+        "rev": "835d6c77d38637e453dd1f6e4165401c3c91c392",
+        "revCount": 1564,
         "type": "git",
-        "url": "https://github.com/au-ts/sddf"
+        "url": "https://github.com/byzantine-systems/sddf"
       },
       "original": {
-        "ref": "refs/tags/0.7.0",
-        "rev": "650ace5dba984f5d9c7dd1a005648ff7b40655f7",
+        "ref": "chryso",
         "type": "git",
-        "url": "https://github.com/au-ts/sddf"
+        "url": "https://github.com/byzantine-systems/sddf"
       }
     },
     "sdfgen": {
@@ -527,11 +526,11 @@
     "systems-ci": {
       "flake": false,
       "locked": {
-        "lastModified": 1784859398,
-        "narHash": "sha256-Q4dqAW9yzl+6iAFqAvxvUSFKLPp2ECNiybMP2G1Lan0=",
+        "lastModified": 1788777190,
+        "narHash": "sha256-Chh44N+vZ96KMNLX9/p+YlZqSQMBpkJ9RcKELdqhpDw=",
         "owner": "au-ts",
         "repo": "systems-ci",
-        "rev": "39ada3f51b3f1ae167e05c5ced6946e8f75786e0",
+        "rev": "8f51c6f4e72ca031d8f8098dde352bf2d29978e6",
         "type": "github"
       },
       "original": {

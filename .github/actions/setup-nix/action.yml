@@ -34,7 +34,7 @@ runs:
 
     - uses: nix-community/cache-nix-action@v7
       with:
-        primary-key: nix-store-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'nix/patches/**', 'build.zig', 'build.zig.zon', 'tools/**/build.zig.zon') }}
+        primary-key: nix-store-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'build.zig', 'build.zig.zon', 'tools/**/build.zig.zon') }}
         restore-prefixes-first-match: nix-store-${{ runner.os }}-
         save: ${{ inputs.save }}
         purge: ${{ inputs.save }}

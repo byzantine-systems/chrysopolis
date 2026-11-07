@@ -1,8 +1,9 @@
 # The LionsOS source reconstruction and reference stack:
 #   packages.lionsos-src
 #     - The LionsOS tree with its (otherwise empty) git
-#       submodules populated from pinned flake inputs, plus
-#       the Chrysopolis libc patch.
+#       submodules populated from pinned flake inputs.
+#       Chrysopolis's changes to LionsOS and sDDF are commits
+#       on the byzantine-systems forks' chryso branches.
 #   packages.lions-stack
 #     - The POSIX libc.a + headers and the board DTB,
 #       built by nix/refstack.mk.
@@ -15,34 +16,6 @@
       chryso,
       ...
     }:
-    let
-      # RNG patch (issue 0.3.0-rng): libc_define_syscall asserts the slot is
-      # NULL, so beam_server cannot re-register the getrandom /
-      # clock_gettime / openat slots libc_init claims at startup.
-      # libc_redefine_syscall() REPLACES a claimed slot and returns the old
-      # handler so the RNG shims (src/pd/beam/compat/syscall/runtime_sys_*.c) can chain to
-      # upstream. ~10 lines, an upstream candidate alongside the TCP fixes.
-      # Appended (not patched by line number) so it survives lionsos bumps.
-      libcRedefineC = pkgs.writeText "libc_redefine_syscall.c" ''
-
-        /* Chrysopolis (issue 0.3.0-rng): replace an already-claimed syscall
-         * slot and return the previous handler, so a client can layer a new
-         * handler over libc's and chain to it. libc_define_syscall asserts
-         * the slot is NULL and so cannot do this. Upstream candidate. */
-        muslcsys_syscall_t libc_redefine_syscall(int syscall_num, muslcsys_syscall_t syscall_func) {
-            assert(syscall_num >= 0 && syscall_num < ARRAY_SIZE(syscall_table));
-            muslcsys_syscall_t old = syscall_table[syscall_num];
-            syscall_table[syscall_num] = syscall_func;
-            return old;
-        }
-      '';
-      libcRedefineH = pkgs.writeText "libc_redefine_syscall.h" ''
-
-        /* Chrysopolis (issue 0.3.0-rng): see posix.c. Replaces a claimed
-         * syscall slot, returning the old handler for chaining. */
-        muslcsys_syscall_t libc_redefine_syscall(int syscall_num, muslcsys_syscall_t syscall_func);
-      '';
-    in
     {
       packages = {
         # Reconstruct the LionsOS source tree with its (otherwise empty) git
@@ -59,43 +32,6 @@
           cp -r ${inputs.musllibc} $out/dep/musllibc
           cp -r ${inputs.libmicrokitco} $out/dep/libmicrokitco
           chmod -R u+w $out
-
-          cat ${libcRedefineC} >> $out/lib/libc/posix/posix.c
-          cat ${libcRedefineH} >> $out/include/lions/posix/posix.h
-
-          # Driver-restart patches against sDDF. Unlike the libc patch above,
-          # these edit the INSIDE of existing function bodies, so appending
-          # cannot express them and they are real patches.
-          #
-          # A warm restart (microkit_pd_restart) only rewrites PC and resumes; it
-          # does NOT re-zero .bss, so any driver global that is merely
-          # zero-initialised still holds its pre-crash value when init() re-runs.
-          # These make the virtio drivers reset the cursors they rely on being
-          # zero, which is what lets them come back from a restart against a
-          # freshly reset device instead of desyncing from it.
-          #
-          # Applied with -p1 and no fuzz: if an sddf bump moves this code, the
-          # build fails loudly here rather than silently dropping the fix.
-          for p in ${./../nix/patches}/sddf-*.patch; do
-            echo "applying $p"
-            patch -p1 -d $out/dep/sddf -F0 < "$p"
-          done
-
-          # The same idea one level up, against LionsOS's own components rather
-          # than sDDF's. The fs protocol has no notion of a client that can
-          # restart: fatfs answers a second FS_CMD_INITIALISE with an error and
-          # keeps the dead client's file handles allocated forever. A restarted
-          # beam_server issues that command exactly as a cold boot does, so
-          # without this it cannot tell a broken server from a stale mount, and
-          # each restart leaks handles until MAX_OPEN_FILES runs out.
-          #
-          # Separate loop because the tree root differs ($out, not $out/dep/sddf);
-          # same -p1 -F0 policy, so a lionsos bump that moves this code fails the
-          # build instead of silently dropping the fix.
-          for p in ${./../nix/patches}/lions-*.patch; do
-            echo "applying $p"
-            patch -p1 -d $out -F0 < "$p"
-          done
         '';
 
         # The LionsOS reference stack: the POSIX libc.a + headers and the
