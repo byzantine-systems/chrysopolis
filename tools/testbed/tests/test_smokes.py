@@ -1,0 +1,43 @@
+"""The smokes' programs against the model. A smoke shows a fix only if the
+model makes its claim strict: an overwrite allowed to fail, or a remove or
+rename allowed to be refused, would let the smoke pass on the old system.
+Planted defect: an `Overwrite` that inherits a get's read-fault expectation
+fails test_the_latent_overwrite_must_succeed."""
+
+from __future__ import annotations
+
+from chryso_testbed.faults import Expect, Model, Program
+from chryso_testbed.outcomes import Outcome, Seed, Status
+from chryso_testbed.scenarios.restart import LATENT_OVERWRITE, RENAME, UNLINK
+from chryso_testbed.steer import nominal
+
+BUDGET = 3
+
+
+def expectations(program: Program) -> list[Expect]:
+    """What the model allows at each step, run with its nominal outcomes."""
+    model, allowed = Model.start(BUDGET), []
+    for step in program:
+        allowed.append(model.expect(step))
+        model = model.after(step, nominal(model, step))
+    return allowed
+
+
+def exactly(*outcomes: Outcome) -> Expect:
+    return Expect(frozenset(outcomes))
+
+
+def test_the_latent_overwrite_must_succeed() -> None:
+    _, arm, overwrite, _, get = expectations(LATENT_OVERWRITE)
+    assert arm == exactly(Status.PRESENT)
+    assert overwrite == exactly(Status.OK)
+    assert get == exactly(Seed(6))
+
+
+def test_the_crash_smokes_start_from_a_held_file() -> None:
+    """Before the crash point the remove and rename must succeed outright, so
+    their crash states straddle a real change."""
+    for program in (UNLINK, RENAME):
+        put, change = expectations(program)
+        assert put == exactly(Status.OK)
+        assert change == exactly(Status.OK)

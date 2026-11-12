@@ -9,10 +9,10 @@ does no I/O, so it stays cheap and keeps working even once the block device
 has been stopped for good. `file:read_file/1` is the part that actually
 touches the disk.
 
-Results are reported via `catch` and `element(1, ...)` so that success and
-failure are both printable. After give-up the read must fail, and a probe
-that could only print success would be unable to tell a failure apart from
-a hang, which is precisely the wedge the give-up path exists to prevent.
+Results are classified with `try`, so success and failure are both
+printable. After give-up the read must fail, and a probe that could only
+print success would be unable to tell a failure apart from a hang, which is
+precisely the wedge the give-up path exists to prevent.
 
 These modules are loaded into memory before any test damages the disk (see
 `load_test_modules` in tools/testbed), which is what lets them keep
@@ -31,7 +31,8 @@ reporting after the device they probe is gone.
     overwrite/3,
     get/2,
     remove/2,
-    rename/3
+    rename/3,
+    pad/2
 ]).
 
 -doc """
@@ -263,6 +264,24 @@ write_sync_close(Fd, Seed) ->
 write_sync_close(Fd, Seed, At) ->
     Written = file:pwrite(Fd, At, binary:copy(<<Seed>>, ?FUZZ_SIZE)),
     {Written, file:sync(Fd), file:close(Fd)}.
+
+-doc """
+rename-crash-smoke: create `N` empty files after a fuzz file, so the rest of
+its directory sector is taken and a rename's new entry lands in another
+sector. Reports `FS_PAD_<TAG>|ok` or the first `{error, Reason}`.
+""".
+-spec pad(atom(), non_neg_integer()) -> ok.
+pad(Tag, N) ->
+    chryso_test:emit("FS_PAD_" ++ chryso_test:tag(Tag), pad_from(0, N)).
+
+-spec pad_from(non_neg_integer(), non_neg_integer()) -> ok | {error, term()}.
+pad_from(N, N) ->
+    ok;
+pad_from(I, N) ->
+    case file:write_file("/pad" ++ integer_to_list(I) ++ ".bin", <<>>) of
+        ok -> pad_from(I + 1, N);
+        {error, _} = Error -> Error
+    end.
 
 -spec fuzz_path(0..255) -> string().
 fuzz_path(File) ->

@@ -27,10 +27,13 @@ from chryso_testbed.faults import (
     Fault,
     Get,
     Model,
+    Overwrite,
     Pause,
     Ping,
     Program,
     Put,
+    Remove,
+    Rename,
     Reset,
     Step,
     Unplug,
@@ -530,77 +533,195 @@ async def crash_boot(ctx: Context) -> None:
 
 
 CUTS_PER_EPOCH: Final = 8  # seeded subsets checked per epoch, besides its boundary
+# The smokes' programs. tests/test_smokes.py holds the model to the outcomes each relies on.
+UNLINK: Final[Program] = (Put(kind="put", file=1, seed=5), Remove(kind="remove", file=1))
+RENAME: Final[Program] = (Put(kind="put", file=1, seed=5), Rename(kind="rename", src=1, dst=2))
+LATENT_OVERWRITE: Final[Program] = (
+    Put(kind="put", file=1, seed=5),
+    Arm(kind="arm", op="read", region="data", file=1, once=False),
+    Overwrite(kind="overwrite", file=1, seed=6),
+    Disarm(kind="disarm"),
+    Get(kind="get", file=1),
+)
+type Held = tuple[crashcheck.Content, ...]
 
 
-def rewrite_states(
-    log: crashlog.Log, spans: list[Span], base: Path, scratch: Path
+def crash_states(
+    log: crashlog.Log,
+    spans: list[Span],
+    base: Path,
+    scratch: Path,
+    *,
+    target: int,
+    files: tuple[int, ...],
+    keep: Callable[[Held], bool],
 ) -> tuple[list[str], Counter[str], Path | None]:
-    """Judge every crash state the rewrite crosses: each epoch's boundary plus
-    CUTS_PER_EPOCH subsets. Returns problems, contents seen, one torn image."""
-    rewrite = spans[1]
+    """Judge every crash state step `target` crosses: each epoch's boundary plus
+    CUTS_PER_EPOCH subsets, with fsck on the first and last. Returns problems,
+    what `files` held in each state, and the first image `keep` picks."""
+    step = spans[target]
 
     def crosses(e: int) -> bool:
         whole = crashlog.crashed_at(log, e, log.epochs[e])
-        return crashlog.stable(log, e) < rewrite.end and whole > rewrite.start
+        return crashlog.stable(log, e) < step.end and whole > step.start
 
     epochs = [e for e in range(len(log.epochs)) if crosses(e)]
     problems: list[str] = []
     seen: Counter[str] = Counter()
-    keep: Path | None = None
+    kept: Path | None = None
+    image = scratch / "state.img"
     for e in epochs:
         for seed in range(CUTS_PER_EPOCH + 1):
             part = crashlog.persisted(log, e, seed)
-            image = crashlog.replay(
-                log, base, scratch / "rewrite.img", crashlog.state(log, e, part)
+            crashlog.replay(log, base, image, crashlog.state(log, e, part))
+            stable, crash = crashlog.stable(log, e), crashlog.crashed_at(log, e, part)
+            verdict = crashcheck.judge(
+                image,
+                crashcheck.allowed(spans, stable, crash),
+                cut=crashcheck.moves(spans, stable, crash),
             )
-            expected = crashcheck.allowed(
-                spans, crashlog.stable(log, e), crashlog.crashed_at(log, e, part)
-            )
-            verdict = crashcheck.judge(image, expected)
             problems += [f"epoch {e} seed {seed}: {p}" for p in verdict.problems]
-            found = crashcheck.held(fatlayout.contents(image), 1)
-            seen[str(found)] += 1
-            if keep is None and found != 6:
-                keep = image.rename(scratch / "torn.img")
-    (scratch / "rewrite.img").unlink(missing_ok=True)  # 100 MB, the last state checked
-    return problems, seen, keep
+            ends = {(epochs[0], 0), (epochs[-1], CUTS_PER_EPOCH)}
+            # fsck exit 1 reports lost clusters, which a crash may leave.
+            if (e, seed) in ends and (code := crashcheck.fsck(image, scratch)) > 1:
+                problems.append(f"epoch {e} seed {seed}: fsck.fat exited {code}")
+            found = fatlayout.contents(image)
+            held = tuple(crashcheck.held(found, f) for f in files)
+            seen[",".join(map(str, held))] += 1
+            if kept is None and keep(held):
+                kept = image.rename(scratch / "kept.img")
+    image.unlink(missing_ok=True)  # 320 MiB sparse, the last state checked
+    return problems, seen, kept
+
+
+type Action = Callable[[Machine], Awaitable[None]]
+# A 4 KiB directory sector holds 128 entries, so this many more take the rest
+# of a file's sector and push a rename's new entry into another one.
+PAD: Final = 128
+
+
+async def logged_run(ctx: Context, *parts: Program | Action) -> tuple[crashlog.Log, list[Span]]:
+    """Run `parts` in order on a fresh disk with the write log on. A program
+    is judged step by step by the model and gives each step its span of the
+    log. An action is setup the model does not track: it gets no span, and
+    the next span starts after it."""
+    spans: list[Span] = []
+    async with ctx.boot("test-image", crashlog=True) as m:
+        await ready(ctx, m)
+        async with ctx.step("run and log"), asyncio.timeout(600):
+            start, model = 0, Model.start(ctx.abi.driver_budget)
+
+            def observe(step: Step, seen: Outcome, _: Model) -> None:
+                nonlocal start
+                spans.append(Span(step, seen, start, end := m.logged()))
+                start = end
+
+            for part in parts:
+                if isinstance(part, tuple):
+                    model = await inject.check(
+                        m, part, model, abi=ctx.abi, modules=ctx.settings.test_modules,
+                        observe=observe,
+                    )  # fmt: skip
+                else:
+                    await part(m)
+                    start = m.logged()
+            raw = await asyncio.to_thread(m.write_log.read_bytes)
+    return crashlog.parse(raw), spans
+
+
+async def pad_directory(m: Machine) -> None:
+    hit = await probes.call(m, f"chryso_fs:pad(pad, {PAD}).", r"FS_PAD_PAD\|(\S+)")
+    if hit.groups[0] != "ok":
+        raise m.console.fail(f"padding the root directory: {hit.groups[0]}")
+
+
+async def read_back(ctx: Context, image: Path, files: tuple[int, ...]) -> None:
+    """Boot a crash image and read each file: the guest must see what the
+    image holds offline (a whole seed, nothing, or an empty file)."""
+    found = await asyncio.to_thread(fatlayout.contents, image)
+    async with ctx.boot("test-image", disk=image) as m:
+        await ready(ctx, m)
+        async with ctx.step("boot a crash state"), asyncio.timeout(300):
+            for f in files:
+                held = crashcheck.held(found, f)
+                hit = await probes.call(m, f"chryso_fs:get(kept, {f}).", r"FS_GET_KEPT\|(\S+)")
+                guest = inject.get_outcome(hit.groups[0] or "")
+                wanted = {"absent": Status.ENOENT, "empty": Status.DIFFERS}.get(str(held))
+                if guest != (Seed(held) if isinstance(held, int) else wanted):
+                    raise m.console.fail(f"fuzz{f}.bin: offline {held}, guest read {guest}")
 
 
 @registry.scenario("rewrite-crash-smoke", group=GROUP, timeout=900)
 async def rewrite_crash(ctx: Context) -> None:
     """A crash anywhere in a rewrite leaves the file old, empty or new, never on
     freed clusters: offline for every crash state, on the guest for one."""
-    first, again = Put(kind="put", file=1, seed=5), Put(kind="put", file=1, seed=6)
-    spans: list[Span] = []
-    async with ctx.boot("test-image", crashlog=True) as m:
-        await ready(ctx, m)
-        async with ctx.step("write, rewrite and log"), asyncio.timeout(300):
-
-            def observe(step: Step, seen: Outcome, _: Model) -> None:
-                spans.append(Span(step, seen, spans[-1].end if spans else 0, m.logged()))
-
-            await inject.check(
-                m, (first, again), Model.start(ctx.abi.driver_budget), abi=ctx.abi,
-                modules=ctx.settings.test_modules, observe=observe,
-            )  # fmt: skip
-            raw = await asyncio.to_thread(m.write_log.read_bytes)
-    log = crashlog.parse(raw)
-    problems, seen, torn = await asyncio.to_thread(
-        rewrite_states, log, spans, ctx.settings.disk, ctx.workdir
+    log, spans = await logged_run(
+        ctx, (Put(kind="put", file=1, seed=5), Put(kind="put", file=1, seed=6))
     )
+    problems, seen, torn = await asyncio.to_thread(
+        crash_states, log, spans, ctx.settings.disk, ctx.workdir,
+        target=1, files=(1,), keep=lambda held: held != (6,),
+    )  # fmt: skip
     if problems:
         raise AssertionError(f"crash states of a rewrite: {problems}")
     if torn is None:
         raise AssertionError(f"no crash state cut the rewrite short: {dict(seen)}")
-    reads = {"5": Seed(5), "empty": Status.DIFFERS}
-    async with ctx.boot("test-image", disk=torn) as m:
-        await ready(ctx, m)
-        async with ctx.step("boot a torn image"), asyncio.timeout(300):
-            hit = await probes.call(m, "chryso_fs:get(torn, 1).", r"FS_GET_TORN\|(\S+)")
-            offline = str(crashcheck.held(fatlayout.contents(torn), 1))
-            if inject.get_outcome(hit.groups[0] or "") != reads.get(offline):
-                raise m.console.fail(f"offline {offline}, guest read {hit.groups[0]}")
+    await read_back(ctx, torn, (1,))
     ctx.record("rewrite-crash-smoke", contents=dict(seen), entries=len(log.entries))
+
+
+@registry.scenario("unlink-crash-smoke", group=GROUP, timeout=900)
+async def unlink_crash(ctx: Context) -> None:
+    """A crash anywhere in a remove leaves the file whole or gone, never an
+    entry on freed clusters: FatFs removes the entry and flushes before it
+    frees the chain."""
+    log, spans = await logged_run(ctx, UNLINK)
+    problems, seen, kept = await asyncio.to_thread(
+        crash_states, log, spans, ctx.settings.disk, ctx.workdir,
+        target=1, files=(1,), keep=lambda held: held == (5,),
+    )  # fmt: skip
+    if problems:
+        raise AssertionError(f"crash states of a remove: {problems}")
+    if kept is None:
+        raise AssertionError(f"no crash state kept the file: {dict(seen)}")
+    await read_back(ctx, kept, (1,))
+    ctx.record("unlink-crash-smoke", contents=dict(seen), entries=len(log.entries))
+
+
+@registry.scenario("rename-crash-smoke", group=GROUP, timeout=900)
+async def rename_crash(ctx: Context) -> None:
+    """A crash anywhere in a rename leaves the file under the old name, the new
+    one or both (the cross-link FatFs names), never under neither: FatFs
+    registers and flushes the new entry before it removes the old."""
+    # The pad keeps the two names in different directory sectors, or one write
+    # would carry both edits and no crash could separate them.
+    log, spans = await logged_run(ctx, RENAME[:1], pad_directory, RENAME[1:])
+    problems, seen, kept = await asyncio.to_thread(
+        crash_states, log, spans, ctx.settings.disk, ctx.workdir,
+        target=1, files=(1, 2), keep=lambda held: held[0] == 5,
+    )  # fmt: skip
+    if problems:
+        raise AssertionError(f"crash states of a rename: {problems}")
+    if kept is None:
+        raise AssertionError(f"no crash state kept the old name: {dict(seen)}")
+    await read_back(ctx, kept, (1, 2))
+    ctx.record("rename-crash-smoke", contents=dict(seen), entries=len(log.entries))
+
+
+@registry.scenario("latent-overwrite-smoke", group=GROUP, timeout=900)
+async def latent_overwrite(ctx: Context) -> None:
+    """A sticky read error on a file's data cannot fail an in-place overwrite
+    of whole sectors: with 4 KiB FatFs sectors nothing is read first. The
+    model expects exactly ok for the overwrite."""
+    outcomes: list[str] = []
+    async with ctx.boot("test-image") as m:
+        await ready(ctx, m)
+        async with ctx.step("overwrite around a latent error"), asyncio.timeout(400):
+            await inject.check(
+                m, LATENT_OVERWRITE, Model.start(ctx.abi.driver_budget), abi=ctx.abi,
+                modules=ctx.settings.test_modules, observe=record_into(outcomes),
+            )  # fmt: skip
+    ctx.record("latent-overwrite-smoke", outcomes=outcomes)
 
 
 @registry.scenario("flush-smoke", group=GROUP, timeout=600)
