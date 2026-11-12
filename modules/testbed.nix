@@ -48,15 +48,23 @@
       # One derivation per group. Scenarios run concurrently up to the build's
       # cores. Reports land in the build directory first, so a failed run
       # kept with --keep-failed still has its consoles. Then they move to $out.
+      # fsck.fat checks the crash states the crash smokes replay.
       group =
         name:
-        pkgs.runCommand "chrysopolis-testbed-${name}" { nativeBuildInputs = [ runner ]; } ''
-          jobs=''${NIX_BUILD_CORES:-1}
-          [ "$jobs" -gt 0 ] || jobs=$(nproc)
-          reports="$NIX_BUILD_TOP/reports"
-          chryso-testbed run --manifest ${manifest} --group ${name} --out "$reports" --jobs "$jobs"
-          cp -r "$reports" $out
-        '';
+        pkgs.runCommand "chrysopolis-testbed-${name}"
+          {
+            nativeBuildInputs = [
+              runner
+              pkgs.dosfstools
+            ];
+          }
+          ''
+            jobs=''${NIX_BUILD_CORES:-1}
+            [ "$jobs" -gt 0 ] || jobs=$(nproc)
+            reports="$NIX_BUILD_TOP/reports"
+            chryso-testbed run --manifest ${manifest} --group ${name} --out "$reports" --jobs "$jobs"
+            cp -r "$reports" $out
+          '';
       # Lint, strict types and tests. The Python reader must match every
       # Erlang vector.
       unit = pkgs.stdenvNoCC.mkDerivation {
@@ -114,7 +122,10 @@
         program = lib.getExe (
           pkgs.writeShellApplication {
             name = "chryso-testbed";
-            runtimeInputs = [ runner ];
+            runtimeInputs = [
+              runner
+              pkgs.dosfstools
+            ];
             text = ''
               export CHRYSO_TESTBED_MANIFEST=''${CHRYSO_TESTBED_MANIFEST:-${manifest}}
               exec chryso-testbed "$@"
