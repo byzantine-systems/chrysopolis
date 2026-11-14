@@ -316,7 +316,8 @@
             runHook preBuild
             export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
             cd tests/host
-            zig build test --summary all
+            # The pinned LionsOS tree, for the suites over its pure FAT headers
+            zig build test --summary all -Dlionsos-src=${config.packages.lionsos-src}
             touch $out
             runHook postBuild
           '';

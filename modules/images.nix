@@ -660,6 +660,18 @@
                 echo "disk: BPB_BytsPerSec $sector, BPB_NumFATs $fats, expected 4096 and 1" >&2
                 exit 1
               fi
+              # The fork's FatFs keeps its rename record in the last reserved
+              # sector, clear of the boot sector, FSInfo and their backups at 0,
+              # 1, 6 and 7. It must start zero, or a mount reads it as foreign.
+              reserved=$(od -An -tu2 -j14 -N2 $part | tr -d ' ')
+              if [ "$reserved" -lt 9 ]; then
+                echo "disk: BPB_RsvdSecCnt $reserved, the rename record needs at least 9" >&2
+                exit 1
+              fi
+              if ! cmp -s -n 4096 -i "$(((reserved - 1) * 4096)):0" "$part" /dev/zero; then
+                echo "disk: reserved sector $((reserved - 1)), the rename record's, is not zero" >&2
+                exit 1
+              fi
               export MTOOLS_SKIP_CHECK=1
 
               mmd -i $part ::/dev ::/bin ::/lib ::/releases "::/releases/$rel"
