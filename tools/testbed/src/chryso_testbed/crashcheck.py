@@ -17,7 +17,8 @@ from typing import Final, Literal
 
 from pyfatfs import PyFATException
 
-from chryso_testbed.fatlayout import SECTOR, Chain, partition_start, short_name, survey
+from chryso_testbed import renaming
+from chryso_testbed.fatlayout import SECTOR, Chain, Root, partition_start, root, short_name, survey
 from chryso_testbed.faults import CrashPut, Overwrite, Put, Remove, Rename, Step
 from chryso_testbed.outcomes import Outcome, Status
 
@@ -232,3 +233,54 @@ def fsck(image: Path, scratch: Path) -> int:
         ).returncode
     finally:
         partition.unlink()
+
+
+# --- after a mount ---------------------------------------------------------------------
+
+ENTRY: Final = 32
+DELETED: Final = 0xE5
+LONG_NAME: Final = 0x0F  # the attribute byte of an LFN entry
+
+
+def as_volume(r: Root) -> renaming.Volume:
+    """A crash image's root directory and rename record in the model's terms,
+    so the model's own recovery predicts what the fork's mount leaves."""
+    sectors = tuple(
+        tuple(_entry(s[i : i + ENTRY]) for i in range(0, len(s), ENTRY)) for s in r.sectors
+    )
+    return renaming.Volume(
+        sectors=sectors, dirs=(("root", tuple(range(len(sectors)))),), record=_intent(r)
+    )
+
+
+def _entry(raw: bytes) -> renaming.Entry | None:
+    if raw[0] == 0 or raw[11] == LONG_NAME:
+        return None
+    cluster = int.from_bytes(raw[20:22], "little") << 16 | int.from_bytes(raw[26:28], "little")
+    return renaming.Entry(raw[:11].decode("latin-1"), cluster, live=raw[0] != DELETED)
+
+
+def _intent(r: Root) -> renaming.Intent | None:
+    """The record as an intent on the root, the one directory the fuzz uses.
+    Absent, foreign and corrupt records leave the names alone."""
+    match renaming.Record.decode(r.record):
+        case renaming.Record(old_dir=old, new_dir=new, dptr=dptr, sfn=sfn, cluster=cluster) if (
+            old == new == r.cluster
+        ):
+            slot = (dptr // r.sector_size, dptr % r.sector_size // ENTRY)
+            return renaming.Intent(slot, sfn.decode("latin-1"), cluster, "root")
+        case _:
+            return None
+
+
+def after_mount(image: Path) -> set[bytes]:
+    """The short names a mount of `image` leaves live, by the model's recovery."""
+    names = renaming.settled(as_volume(root(image))).names()
+    return {key.removeprefix("root/").encode("latin-1") for key in names}
+
+
+def judge_after_mount(image: Path) -> tuple[str, ...]:
+    """What a mount of `image` would still leave wrong: two names on a chain."""
+    if shared := renaming.settled(as_volume(root(image))).shared():
+        return (f"after mount, clusters {sorted(shared)} hold two names",)
+    return ()

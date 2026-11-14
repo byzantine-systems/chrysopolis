@@ -129,6 +129,31 @@ def chains(image: Path) -> Mapping[bytes, Chain]:
 
 
 @dataclass(frozen=True, slots=True)
+class Root:
+    """The root directory's raw sectors in chain order, its first cluster, the
+    sector size, and the last reserved sector, where the rename record lives."""
+
+    cluster: int
+    sector_size: int
+    sectors: tuple[bytes, ...]
+    record: bytes
+
+
+def root(image: Path) -> Root:
+    with _volume(image) as (volume, _, raw, start):
+        bpb = volume.bpb_header
+        size, first = bpb["BPB_BytsPerSec"], bpb["BPB_RootClus"]
+        record_at = start + (bpb["BPB_RsvdSecCnt"] - 1) * size
+        sectors: list[bytes] = []
+        for cluster in _chain(_fat(volume, raw, start), first) or ():
+            at = start + volume.get_data_cluster_address(cluster)
+            sectors += [
+                raw[at + k : at + k + size] for k in range(0, volume.bytes_per_cluster, size)
+            ]
+        return Root(first, size, tuple(sectors), raw[record_at : record_at + size])
+
+
+@dataclass(frozen=True, slots=True)
 class _Fat:
     """The first FAT copy and the number of entries that name a cluster."""
 

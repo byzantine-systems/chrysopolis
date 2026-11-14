@@ -21,15 +21,24 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from chryso_testbed.crashcheck import Content, Move, judge
+from chryso_testbed.crashcheck import (
+    Content,
+    Move,
+    after_mount,
+    as_volume,
+    judge,
+    judge_after_mount,
+)
 from chryso_testbed.fatlayout import (
     SECTOR,
     chains,
     contents,
     layout,
     partition_start,
+    root,
     short_name,
 )
+from chryso_testbed.renaming import Record
 
 START_LBA: Final = 2048
 # FAT32 needs 65525 clusters: 40 MiB at 512-byte sectors, 320 MiB (sparse) at 4 KiB.
@@ -310,3 +319,68 @@ def test_a_cut_rename_must_keep_its_file_under_one_name(
     assert not judge(image, expected).problems
     lost = judge(image, expected, cut=[Move(1, 2, frozenset({seed}))])
     assert lost.problems == ("fuzz1.bin -> fuzz2.bin: lost under both names",)
+
+
+def write_record(image: Path, src: str, cluster: int) -> None:
+    """Put a rename record for `src` in the last reserved sector, as the fork's
+    f_rename does before it registers the new name."""
+    found = root(image)
+    sector, offset = next(
+        (k, raw.index(short_name(src)))
+        for k, raw in enumerate(found.sectors)
+        if short_name(src) in raw
+    )
+    record = Record(
+        old_dir=found.cluster, blk_ofs=sector * found.sector_size + offset,
+        dptr=sector * found.sector_size + offset, sfn=short_name(src), cluster=cluster,
+        new_dir=found.cluster,
+    ).encode(found.sector_size)  # fmt: skip
+    raw = image.read_bytes()
+    boot = START_LBA * SECTOR
+    (size,) = struct.unpack_from("<H", raw, boot + 0x0B)
+    (reserved,) = struct.unpack_from("<H", raw, boot + 0x0E)
+    with image.open("r+b") as disk:
+        disk.seek(boot + (reserved - 1) * size)
+        disk.write(record)
+
+
+@needs_tools
+@settings(
+    max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(files=st.dictionaries(names, file_bytes, min_size=1, max_size=4))
+def test_the_model_reads_the_files_mtools_wrote(tmp_path: Path, files: dict[str, bytes]) -> None:
+    for old in tmp_path.iterdir():
+        old.unlink()
+    image, target = volume(tmp_path, files, 4096)
+    model = as_volume(root(image))
+    assert model.record is None
+    assert model.names() == {
+        f"root/{short_name(n).decode()}": first_cluster(target, n) for n in files
+    }
+
+
+@needs_tools
+@settings(
+    max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(files=st.dictionaries(names, file_bytes, min_size=2, max_size=4), data=st.data())
+def test_a_mount_finishes_a_cut_rename_its_record_names(
+    tmp_path: Path, files: dict[str, bytes], data: st.DataObject
+) -> None:
+    """Two names on one chain, as a rename cut after registering the new one:
+    with the record the mount drops the old name, without it nothing does."""
+    for old in tmp_path.iterdir():
+        old.unlink()
+    named = {f"fuzz{i}.bin": payload for i, payload in enumerate(files.values())}
+    image, target = volume(tmp_path, named, 4096)
+    src, dst = (f"fuzz{i}.bin" for i in data.draw(st.permutations(range(len(named))))[:2])
+    cluster = chain_of(target, src)[0]
+    point_entry(image, dst, cluster)
+    assert judge_after_mount(image), "a cross-link with no record stays"
+    assert short_name(src) in after_mount(image)
+    write_record(image, src, cluster)
+    assert judge_after_mount(image) == ()
+    mounted = after_mount(image)
+    assert short_name(src) not in mounted
+    assert short_name(dst) in mounted
