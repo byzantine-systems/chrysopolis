@@ -536,6 +536,13 @@ CUTS_PER_EPOCH: Final = 8  # seeded subsets checked per epoch, besides its bound
 # The smokes' programs. tests/test_smokes.py holds the model to the outcomes each relies on.
 UNLINK: Final[Program] = (Put(kind="put", file=1, seed=5), Remove(kind="remove", file=1))
 RENAME: Final[Program] = (Put(kind="put", file=1, seed=5), Rename(kind="rename", src=1, dst=2))
+# After a mount finished the rename: writing the new name must leave the old
+# one gone, which a chain still shared by both names would not.
+AFTER_RECOVERY: Final[Program] = (
+    Put(kind="put", file=2, seed=7),
+    Get(kind="get", file=1),
+    Get(kind="get", file=2),
+)
 LATENT_OVERWRITE: Final[Program] = (
     Put(kind="put", file=1, seed=5),
     Arm(kind="arm", op="read", region="data", file=1, once=False),
@@ -555,10 +562,13 @@ def crash_states(
     target: int,
     files: tuple[int, ...],
     keep: Callable[[Held], bool],
+    after: Callable[[Path], tuple[str, ...]] | None = None,
 ) -> tuple[list[str], Counter[str], Path | None]:
     """Judge every crash state step `target` crosses: each epoch's boundary plus
-    CUTS_PER_EPOCH subsets, with fsck on the first and last. Returns problems,
-    what `files` held in each state, and the first image `keep` picks."""
+    CUTS_PER_EPOCH subsets, with fsck on the first and last. `after`, when
+    given, also judges what a mount would leave of each state. Returns
+    problems, what `files` held in each state, and the first image `keep`
+    picks."""
     step = spans[target]
 
     def crosses(e: int) -> bool:
@@ -581,6 +591,8 @@ def crash_states(
                 cut=crashcheck.moves(spans, stable, crash),
             )
             problems += [f"epoch {e} seed {seed}: {p}" for p in verdict.problems]
+            if after is not None:
+                problems += [f"epoch {e} seed {seed}: {p}" for p in after(image)]
             ends = {(epochs[0], 0), (epochs[-1], CUTS_PER_EPOCH)}
             # fsck exit 1 reports lost clusters, which a crash may leave.
             if (e, seed) in ends and (code := crashcheck.fsck(image, scratch)) > 1:
@@ -635,10 +647,22 @@ async def pad_directory(m: Machine) -> None:
         raise m.console.fail(f"padding the root directory: {hit.groups[0]}")
 
 
-async def read_back(ctx: Context, image: Path, files: tuple[int, ...]) -> None:
+async def read_back(
+    ctx: Context,
+    image: Path,
+    files: tuple[int, ...],
+    *,
+    mounted: bool = False,
+    then: Action | None = None,
+) -> None:
     """Boot a crash image and read each file: the guest must see what the
-    image holds offline (a whole seed, nothing, or an empty file)."""
+    image holds offline (a whole seed, nothing, or an empty file). With
+    `mounted`, a name the mount's recovery drops (`crashcheck.after_mount`)
+    must read as absent. `then` runs on the same boot after the reads."""
     found = await asyncio.to_thread(fatlayout.contents, image)
+    if mounted:
+        live = await asyncio.to_thread(crashcheck.after_mount, image)
+        found = {name: data for name, data in found.items() if name in live}
     async with ctx.boot("test-image", disk=image) as m:
         await ready(ctx, m)
         async with ctx.step("boot a crash state"), asyncio.timeout(300):
@@ -649,6 +673,8 @@ async def read_back(ctx: Context, image: Path, files: tuple[int, ...]) -> None:
                 wanted = {"absent": Status.ENOENT, "empty": Status.DIFFERS}.get(str(held))
                 if guest != (Seed(held) if isinstance(held, int) else wanted):
                     raise m.console.fail(f"fuzz{f}.bin: offline {held}, guest read {guest}")
+            if then is not None:
+                await then(m)
 
 
 @registry.scenario("rewrite-crash-smoke", group=GROUP, timeout=900)
@@ -691,21 +717,41 @@ async def unlink_crash(ctx: Context) -> None:
 @registry.scenario("rename-crash-smoke", group=GROUP, timeout=900)
 async def rename_crash(ctx: Context) -> None:
     """A crash anywhere in a rename leaves the file under the old name, the new
-    one or both (the cross-link FatFs names), never under neither: FatFs
-    registers and flushes the new entry before it removes the old."""
+    one or both, never under neither: FatFs registers and flushes the new entry
+    before it removes the old. Both is a cross-link, and the intent record the
+    fork flushes first lets a mount end it: every crash state must leave one
+    name per chain after a mount, as the model in renaming.py predicts.
+
+    One cross-linked state is booted. Its record, which C wrote, must equal
+    the one Python derives from the image, and is replaced by Python's bytes
+    before the boot, so the mount also shows C decoding Python. The guest must
+    then see only the new name, and keep seeing it after writing it."""
     # The pad keeps the two names in different directory sectors, or one write
     # would carry both edits and no crash could separate them.
     log, spans = await logged_run(ctx, RENAME[:1], pad_directory, RENAME[1:])
     problems, seen, kept = await asyncio.to_thread(
         crash_states, log, spans, ctx.settings.disk, ctx.workdir,
-        target=1, files=(1, 2), keep=lambda held: held[0] == 5,
+        target=1, files=(1, 2), keep=lambda held: held == (5, 5),
+        after=crashcheck.judge_after_mount,
     )  # fmt: skip
     if problems:
         raise AssertionError(f"crash states of a rename: {problems}")
     if kept is None:
-        raise AssertionError(f"no crash state kept the old name: {dict(seen)}")
-    await read_back(ctx, kept, (1, 2))
-    ctx.record("rename-crash-smoke", contents=dict(seen), entries=len(log.entries))
+        raise AssertionError(f"no crash state left both names: {dict(seen)}")
+    expected = await asyncio.to_thread(fatlayout.intent_for, kept, "fuzz1.bin")
+    written = (await asyncio.to_thread(fatlayout.root, kept)).record
+    if written != expected.encode(len(written)):
+        raise AssertionError(f"the fork's record {written[:48].hex()} is not {expected}")
+    await asyncio.to_thread(fatlayout.write_record, kept, expected)
+
+    async def rewrite_new_name(m: Machine) -> None:
+        await inject.check(
+            m, AFTER_RECOVERY, Model.start(ctx.abi.driver_budget), abi=ctx.abi,
+            modules=ctx.settings.test_modules,
+        )  # fmt: skip
+
+    await read_back(ctx, kept, (1, 2), mounted=True, then=rewrite_new_name)
+    ctx.record("rename-crash-smoke", contents=dict(seen), entries=len(log.entries), recovered=True)
 
 
 @registry.scenario("latent-overwrite-smoke", group=GROUP, timeout=900)

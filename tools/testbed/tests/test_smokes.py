@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from chryso_testbed.faults import Expect, Model, Program
 from chryso_testbed.outcomes import Outcome, Seed, Status
-from chryso_testbed.scenarios.restart import LATENT_OVERWRITE, RENAME, UNLINK
+from chryso_testbed.scenarios.restart import AFTER_RECOVERY, LATENT_OVERWRITE, RENAME, UNLINK
 from chryso_testbed.steer import nominal
 
 BUDGET = 3
@@ -41,3 +41,13 @@ def test_the_crash_smokes_start_from_a_held_file() -> None:
         put, change = expectations(program)
         assert put == exactly(Status.OK)
         assert change == exactly(Status.OK)
+
+
+def test_after_recovery_only_the_new_name_holds_the_file() -> None:
+    """On the booted crash image the old name must be gone and the new one
+    must take a write. A chain both names still shared would read the new
+    seed back under the old name, which the model does not allow."""
+    put, old, new = expectations(AFTER_RECOVERY)
+    assert put == exactly(Status.OK)
+    assert old == exactly(Status.ENOENT)
+    assert new == exactly(Seed(7))

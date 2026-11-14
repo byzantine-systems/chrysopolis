@@ -18,7 +18,19 @@ from typing import Final, Literal
 from pyfatfs import PyFATException
 
 from chryso_testbed import renaming
-from chryso_testbed.fatlayout import SECTOR, Chain, Root, partition_start, root, short_name, survey
+from chryso_testbed.fatlayout import (
+    DELETED,
+    ENTRY,
+    LONG_NAME,
+    SECTOR,
+    Chain,
+    Root,
+    entry_cluster,
+    partition_start,
+    root,
+    short_name,
+    survey,
+)
 from chryso_testbed.faults import CrashPut, Overwrite, Put, Remove, Rename, Step
 from chryso_testbed.outcomes import Outcome, Status
 
@@ -170,7 +182,8 @@ def judge(image: Path, expected: Mapping[int, May], *, cut: Iterable[Move] = ())
     """Where a crash image breaks `expected`, as `allowed` gives it, or a cut
     rename, as `moves` gives it. Two entries on one cluster are a problem,
     except a cut rename's two names, which FatFs registers before it removes
-    the old one: that cross-link is counted, not failed."""
+    the old one: that cross-link is counted, not failed, since the image is
+    not yet mounted. `judge_after_mount` checks that a mount ends it."""
     try:
         with warnings.catch_warnings(record=True) as warned:
             warnings.simplefilter("always")
@@ -237,10 +250,6 @@ def fsck(image: Path, scratch: Path) -> int:
 
 # --- after a mount ---------------------------------------------------------------------
 
-ENTRY: Final = 32
-DELETED: Final = 0xE5
-LONG_NAME: Final = 0x0F  # the attribute byte of an LFN entry
-
 
 def as_volume(r: Root) -> renaming.Volume:
     """A crash image's root directory and rename record in the model's terms,
@@ -256,8 +265,7 @@ def as_volume(r: Root) -> renaming.Volume:
 def _entry(raw: bytes) -> renaming.Entry | None:
     if raw[0] == 0 or raw[11] == LONG_NAME:
         return None
-    cluster = int.from_bytes(raw[20:22], "little") << 16 | int.from_bytes(raw[26:28], "little")
-    return renaming.Entry(raw[:11].decode("latin-1"), cluster, live=raw[0] != DELETED)
+    return renaming.Entry(raw[:11].decode("latin-1"), entry_cluster(raw), live=raw[0] != DELETED)
 
 
 def _intent(r: Root) -> renaming.Intent | None:

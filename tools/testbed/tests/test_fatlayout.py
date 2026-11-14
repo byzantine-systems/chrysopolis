@@ -6,6 +6,7 @@ pyfatfs itself. Planted defects:
 | a chain walk with no loop guard | test_a_looping_chain_reads_as_broken (MemoryError) |
 | a `judge` that ignores shared clusters | test_two_entries_on_one_cluster_are_a_problem_... |
 | a `judge` without the cut rename's joint rule | test_a_cut_rename_must_keep_its_file_... |
+| `intent_for` with `blk_ofs = dptr` | test_a_long_name_record_starts_at_its_first_lfn_entry |
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import re
 import shutil
 import struct
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Final
 
@@ -30,13 +32,19 @@ from chryso_testbed.crashcheck import (
     judge_after_mount,
 )
 from chryso_testbed.fatlayout import (
+    ENTRY,
+    NO_LFN,
     SECTOR,
     chains,
     contents,
+    entry_cluster,
+    intent_for,
     layout,
     partition_start,
     root,
+    sfn_checksum,
     short_name,
+    write_record,
 )
 from chryso_testbed.renaming import Record
 
@@ -321,27 +329,44 @@ def test_a_cut_rename_must_keep_its_file_under_one_name(
     assert lost.problems == ("fuzz1.bin -> fuzz2.bin: lost under both names",)
 
 
-def write_record(image: Path, src: str, cluster: int) -> None:
-    """Put a rename record for `src` in the last reserved sector, as the fork's
-    f_rename does before it registers the new name."""
-    found = root(image)
-    sector, offset = next(
-        (k, raw.index(short_name(src)))
-        for k, raw in enumerate(found.sectors)
-        if short_name(src) in raw
+@needs_tools
+@pytest.mark.parametrize("name", ["a_long_name.bin", "an_even_longer_file_name.bin"])
+def test_a_long_name_record_starts_at_its_first_lfn_entry(tmp_path: Path, name: str) -> None:
+    """mtools writes one LFN entry per 13 characters in front of the short
+    entry, and a mount must remove them all, so blk_ofs is the first of them."""
+    image, target = volume(tmp_path, {name: b"x" * 10}, 4096)
+    raw = b"".join(root(image).sectors)
+    cluster = chain_of(target, name)[0]
+    dptr = next(
+        at
+        for at in range(0, len(raw), ENTRY)
+        if raw[at] and raw[at + 11] != 0x0F and entry_cluster(raw[at : at + ENTRY]) == cluster
     )
-    record = Record(
-        old_dir=found.cluster, blk_ofs=sector * found.sector_size + offset,
-        dptr=sector * found.sector_size + offset, sfn=short_name(src), cluster=cluster,
-        new_dir=found.cluster,
-    ).encode(found.sector_size)  # fmt: skip
-    raw = image.read_bytes()
-    boot = START_LBA * SECTOR
-    (size,) = struct.unpack_from("<H", raw, boot + 0x0B)
-    (reserved,) = struct.unpack_from("<H", raw, boot + 0x0E)
-    with image.open("r+b") as disk:
-        disk.seek(boot + (reserved - 1) * size)
-        disk.write(record)
+    sfn = raw[dptr : dptr + 11]
+    stored = f"{sfn[:8].decode().rstrip()}.{sfn[8:].decode().rstrip()}"
+    lfn_entries = -(-len(name) // 13)
+    record = intent_for(image, stored)
+    assert record.dptr == dptr
+    assert record.blk_ofs == dptr - lfn_entries * ENTRY
+    assert raw[record.blk_ofs + 13] == sfn_checksum(sfn)
+    assert record.cluster == cluster
+
+
+@needs_tools
+def test_a_short_name_record_has_no_lfn(tmp_path: Path) -> None:
+    """A name stored upper case in 8.3 needs no long name entry."""
+    image, target = volume(tmp_path, {"FUZZ1.BIN": b"x"}, 4096)
+    record = intent_for(image, "FUZZ1.BIN")
+    assert record.blk_ofs == NO_LFN
+    assert record.cluster == chain_of(target, "FUZZ1.BIN")[0]
+
+
+@needs_tools
+def test_a_written_record_reads_back(tmp_path: Path) -> None:
+    image, _ = volume(tmp_path, {"FUZZ1.BIN": b"x"}, 4096)
+    record = intent_for(image, "FUZZ1.BIN")
+    write_record(image, record)
+    assert Record.decode(root(image).record) == record
 
 
 @needs_tools
@@ -379,7 +404,10 @@ def test_a_mount_finishes_a_cut_rename_its_record_names(
     point_entry(image, dst, cluster)
     assert judge_after_mount(image), "a cross-link with no record stays"
     assert short_name(src) in after_mount(image)
-    write_record(image, src, cluster)
+    record = intent_for(image, src)
+    write_record(image, replace(record, cluster=record.cluster + 1))
+    assert judge_after_mount(image), "a record on another chain finishes nothing"
+    write_record(image, record)
     assert judge_after_mount(image) == ()
     mounted = after_mount(image)
     assert short_name(src) not in mounted

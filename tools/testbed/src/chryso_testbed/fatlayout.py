@@ -14,6 +14,8 @@ from typing import Any, Final, Literal
 
 from pyfatfs.PyFat import PyFat
 
+from chryso_testbed.renaming import Record
+
 SECTOR: Final = 512
 MBR_SIGNATURE: Final = b"\x55\xaa"
 # The first partition entry's starting LBA, in the MBR's partition table.
@@ -22,6 +24,13 @@ FAT32_ENTRY: Final = 4
 ENTRY_MASK: Final = 0x0FFFFFFF  # the top four bits of a FAT32 entry are reserved
 END_OF_CHAIN: Final = 0x0FFFFFF8
 FIRST_CLUSTER: Final = 2
+ENTRY: Final = 32  # bytes of a directory entry
+DELETED: Final = 0xE5
+LONG_NAME: Final = 0x0F  # the attribute byte of an LFN entry
+NO_LFN: Final = 0xFFFFFFFF  # FatFs's blk_ofs for an entry with no long name
+# Boot sector fields: bytes per sector and reserved sectors.
+BPB_BYTS_PER_SEC: Final = 0x0B
+BPB_RSVD_SEC_CNT: Final = 0x0E
 
 type Region = Literal["data", "fat", "entry"]
 REGIONS: Final[tuple[Region, ...]] = ("data", "fat", "entry")
@@ -151,6 +160,77 @@ def root(image: Path) -> Root:
                 raw[at + k : at + k + size] for k in range(0, volume.bytes_per_cluster, size)
             ]
         return Root(first, size, tuple(sectors), raw[record_at : record_at + size])
+
+
+def entry_cluster(raw: bytes) -> int:
+    """A short entry's start cluster. FAT32 splits it in two little-endian
+    words: the high one at byte 20 (DIR_FstClusHI) and the low one at byte 26
+    (DIR_FstClusLO)."""
+    return int.from_bytes(raw[20:22], "little") << 16 | int.from_bytes(raw[26:28], "little")
+
+
+def sfn_checksum(sfn: bytes) -> int:
+    """The checksum every LFN entry stores (byte 13) of the 11-byte short name
+    it belongs to, as FatFs's sum_sfn computes it. It ties a long name to its
+    short entry, so a stray LFN entry left by a deleted file is not taken as
+    part of the next one."""
+    total = 0
+    for byte in sfn:
+        # Rotate the 8-bit sum right by one, then add the next byte, mod 256.
+        rotated = ((total & 1) << 7) | (total >> 1)
+        total = (rotated + byte) & 0xFF
+    return total
+
+
+def intent_for(image: Path, src: str) -> Record:
+    """The record the fork's f_rename writes to rename root file `src` within
+    the root, derived from the image alone, never from the fork's own bytes,
+    so comparing the two checks the C encoder.
+
+    A FAT file is one short entry, possibly behind a run of long name (LFN)
+    entries that spell its long name. FatFs's `dptr` is the short entry's byte
+    offset in the directory. Its `blk_ofs` is the offset of the run's first
+    LFN entry, or NO_LFN when there is none (FatFs stores `fuzz1.bin` with no
+    LFN, through the case bits). A mount removes from `blk_ofs` to `dptr`."""
+    r = root(image)
+    raw = b"".join(r.sectors)  # the root directory, its sectors in chain order
+    offsets = range(0, len(raw), ENTRY)
+    want = short_name(src)
+
+    def live(at: int) -> bool:
+        # Byte 0 is 0 past the last entry, and 0xE5 for a deleted one.
+        return raw[at] not in (0, DELETED)
+
+    def is_long(at: int) -> bool:
+        # Byte 11 is the attribute, which marks an LFN entry as 0x0F.
+        return raw[at + 11] & 0x3F == LONG_NAME
+
+    dptr = next(at for at in offsets if live(at) and not is_long(at) and raw[at : at + 11] == want)
+    # Walk back over the live LFN entries that name this short entry.
+    blk_ofs = dptr
+    while blk_ofs > 0 and live(prev := blk_ofs - ENTRY) and is_long(prev):
+        if raw[prev + 13] != sfn_checksum(want):
+            break  # another file's long name
+        blk_ofs = prev
+    return Record(
+        old_dir=r.cluster, blk_ofs=NO_LFN if blk_ofs == dptr else blk_ofs, dptr=dptr,
+        sfn=want, cluster=entry_cluster(raw[dptr : dptr + ENTRY]), new_dir=r.cluster,
+    )  # fmt: skip
+
+
+def write_record(image: Path, record: Record) -> None:
+    """Write `record` over the last reserved sector, where the fork keeps it.
+    That sector is `BPB_RsvdSecCnt - 1` sectors into the partition, whose
+    start the MBR gives. A booted mount then acts on it as on one the fork
+    wrote, which is how the smoke checks the C decoder."""
+    with image.open("r+b") as disk:
+        start = partition_start(disk.read(SECTOR))
+        disk.seek(start)
+        boot = disk.read(SECTOR)
+        (size,) = struct.unpack_from("<H", boot, BPB_BYTS_PER_SEC)
+        (reserved,) = struct.unpack_from("<H", boot, BPB_RSVD_SEC_CNT)
+        disk.seek(start + (reserved - 1) * size)
+        disk.write(record.encode(size))
 
 
 @dataclass(frozen=True, slots=True)
