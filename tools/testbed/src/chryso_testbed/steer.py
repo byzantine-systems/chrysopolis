@@ -41,9 +41,10 @@ from chryso_testbed.faults import (
 from chryso_testbed.outcomes import GaveUp, Outcome, Restarted, Seed, Status
 
 MAX_STEPS: Final = 16
-# When several outcomes are allowed, look ahead as if things went well.
+# When several outcomes are allowed, look ahead as if things went well. Every
+# Status is listed, or a step allowed only an unlisted one has no nominal.
 PREFERENCE: Final[tuple[Status, ...]] = (
-    Status.OK, Status.PRESENT, Status.DIFFERS, Status.ENOENT, Status.GONE,
+    Status.OK, Status.PRESENT, Status.DIFFERS, Status.ENOENT, Status.EEXIST, Status.GONE,
     Status.UNREACHABLE, Status.EIO, Status.ERROR, Status.ABSENT,
 )  # fmt: skip
 

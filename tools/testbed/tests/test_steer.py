@@ -1,4 +1,8 @@
-"""Laws of steered generation."""
+"""Laws of steered generation.
+
+Planted defect: `PREFERENCE` without `EEXIST` fails
+test_every_status_has_a_preference and test_a_refused_rename_has_a_nominal
+(a random draw in test_lineage found it first)."""
 
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from chryso_testbed.faults import (
 from chryso_testbed.outcomes import Status
 from chryso_testbed.steer import (
     MAX_STEPS,
+    PREFERENCE,
     SCENARIOS,
     advance,
     enabled,
@@ -44,6 +49,21 @@ from chryso_testbed.steer import (
 
 AIMING: Final = ("latent", "corrupt-heal", "write-fault", "latent-overwrite", "rename-remove")
 names = st.sampled_from(sorted(SCENARIOS))
+
+
+def test_every_status_has_a_preference() -> None:
+    """`nominal` falls back on PREFERENCE, so a step the model allows only an
+    unlisted status would have no nominal outcome."""
+    assert set(PREFERENCE) == set(Status)
+
+
+def test_a_refused_rename_has_a_nominal() -> None:
+    """FatFs refuses a rename onto an existing name, and that is all the
+    model allows, so generation must still be able to step past it."""
+    model = Model.start(BUDGET)
+    for f in (0, 1):
+        model = advance(model, Put(kind="put", file=f, seed=5))
+    assert nominal(model, Rename(kind="rename", src=1, dst=0)) == Status.EEXIST
 
 
 def takes_writes(disk: Expected) -> bool:
