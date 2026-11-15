@@ -7,6 +7,11 @@ pyfatfs itself. Planted defects:
 | a `judge` that ignores shared clusters | test_two_entries_on_one_cluster_are_a_problem_... |
 | a `judge` without the cut rename's joint rule | test_a_cut_rename_must_keep_its_file_... |
 | `intent_for` with `blk_ofs = dptr` | test_a_long_name_record_starts_at_its_first_lfn_entry |
+| the ghost written at slot 1 | test_a_leftover_linked_unzeroed_shows_the_ghost |
+| the free search from cluster 2 whatever the hint | test_the_dirtied_clusters_are_the_ones_... |
+| `free_slots` counting only never-used entries | test_free_slots_count_never_used_and_... |
+| `accounting` not walking subdirectories | test_every_cluster_is_owned_free_bad_or_lost |
+| `accounting` leaving free clusters out of `free` | test_every_cluster_is_owned_free_bad_or_lost |
 """
 
 from __future__ import annotations
@@ -28,15 +33,19 @@ from chryso_testbed.crashcheck import (
     Move,
     after_mount,
     as_volume,
+    fsck,
     judge,
     judge_after_mount,
 )
 from chryso_testbed.fatlayout import (
     ENTRY,
+    GHOST,
     NO_LFN,
     SECTOR,
+    accounting,
     chains,
     contents,
+    dirty_free_clusters,
     entry_cluster,
     intent_for,
     layout,
@@ -412,3 +421,217 @@ def test_a_mount_finishes_a_cut_rename_its_record_names(
     mounted = after_mount(image)
     assert short_name(src) not in mounted
     assert short_name(dst) in mounted
+
+
+# --- leftover directory sectors in free clusters (W9) ------------------------------------
+
+
+def fat_table(image: Path) -> list[int]:
+    """Every entry of the first FAT copy, masked, read from the boot sector's
+    own fields."""
+    boot = START_LBA * SECTOR
+    with image.open("rb") as disk:
+        disk.seek(boot)
+        bpb = disk.read(SECTOR)
+        (per_sector,) = struct.unpack_from("<H", bpb, 0x0B)
+        (reserved,) = struct.unpack_from("<H", bpb, 0x0E)
+        (per_fat,) = struct.unpack_from("<I", bpb, 0x24)
+        disk.seek(boot + reserved * per_sector)
+        table = disk.read(per_fat * per_sector)
+    return [e & 0x0FFFFFFF for (e,) in struct.iter_unpack("<I", table)]
+
+
+def set_fat(image: Path, cluster: int, value: int) -> None:
+    """Write FAT entry `cluster` in every copy, as FatFs's mirrored writes do."""
+    boot = START_LBA * SECTOR
+    with image.open("r+b") as disk:
+        disk.seek(boot)
+        bpb = disk.read(SECTOR)
+        (per_sector,) = struct.unpack_from("<H", bpb, 0x0B)
+        (reserved,) = struct.unpack_from("<H", bpb, 0x0E)
+        (copies,) = struct.unpack_from("<B", bpb, 0x10)
+        (per_fat,) = struct.unpack_from("<I", bpb, 0x24)
+        for copy in range(copies):
+            disk.seek(boot + (reserved + copy * per_fat) * per_sector + cluster * 4)
+            disk.write(struct.pack("<I", value))
+
+
+def set_next_free(image: Path, hint: int) -> None:
+    """Write FSInfo's next-free hint (FSI_Nxt_Free, byte 492 of the sector
+    BPB_FSInfo names)."""
+    boot = START_LBA * SECTOR
+    with image.open("r+b") as disk:
+        disk.seek(boot)
+        bpb = disk.read(SECTOR)
+        (per_sector,) = struct.unpack_from("<H", bpb, 0x0B)
+        (fsinfo,) = struct.unpack_from("<H", bpb, 0x30)
+        disk.seek(boot + fsinfo * per_sector + 492)
+        disk.write(struct.pack("<I", hint))
+
+
+def zero_cluster(image: Path, cluster: int) -> None:
+    boot = START_LBA * SECTOR
+    raw = image.read_bytes()
+    per_sector, per_cluster, reserved, fats = struct.unpack_from("<HBHB", raw, boot + 0x0B)
+    (per_fat,) = struct.unpack_from("<I", raw, boot + 0x24)
+    data = boot + (reserved + fats * per_fat) * per_sector
+    with image.open("r+b") as disk:
+        disk.seek(data + (cluster - 2) * per_cluster * per_sector)
+        disk.write(bytes(per_cluster * per_sector))
+
+
+def grow_root(image: Path, cluster: int) -> None:
+    """Link `cluster` to the end of the root's chain and end the chain there."""
+    set_fat(image, root(image).clusters[-1], cluster)
+    set_fat(image, cluster, 0x0FFFFFFF)
+
+
+needs_fsck = pytest.mark.skipif(shutil.which("fsck.fat") is None, reason="needs dosfstools")
+
+
+@needs_tools
+@needs_fsck
+@settings(
+    max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(
+    files=st.dictionaries(names, file_bytes, max_size=3),
+    count=st.integers(1, 40),
+    sector_size=sector_sizes,
+)
+def test_leftovers_in_free_clusters_are_invisible(
+    tmp_path: Path, files: dict[str, bytes], count: int, sector_size: int
+) -> None:
+    """A free cluster may hold anything: dirtying the free ones changes no
+    file, no chain, no root sector and no verdict, and fsck.fat stays clean."""
+    for old in tmp_path.iterdir():
+        old.unlink()
+    image, _ = volume(tmp_path, files, sector_size)
+    before = contents(image), chains(image), root(image), judge(image, {})
+    dirty_free_clusters(image, count)
+    assert (contents(image), chains(image), root(image), judge(image, {})) == before
+    assert fsck(image, tmp_path) == 0
+
+
+@needs_tools
+@settings(
+    max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(files=st.dictionaries(names, file_bytes, max_size=3), sector_size=sector_sizes)
+def test_a_leftover_linked_unzeroed_shows_the_ghost(
+    tmp_path: Path, files: dict[str, bytes], sector_size: int
+) -> None:
+    """The root grown into a dirtied cluster without zeroing it shows the
+    ghost on clusters the FAT does not hold. Zeroed first, nothing shows."""
+    for old in tmp_path.iterdir():
+        old.unlink()
+    image, _ = volume(tmp_path, files, sector_size)
+    (grown,) = dirty_free_clusters(image, 1)
+    unzeroed = tmp_path / "unzeroed.img"
+    shutil.copyfile(image, unzeroed)
+    grow_root(unzeroed, grown)
+    zero_cluster(image, grown)
+    grow_root(image, grown)
+    ghost = GHOST.decode()
+    assert judge(unzeroed, {}).problems == (f"{ghost}: entry on clusters the FAT does not hold",)
+    assert judge(image, {}).problems == ()
+
+
+@needs_tools
+@settings(
+    max_examples=10, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(
+    files=st.dictionaries(names, file_bytes, max_size=3),
+    data=st.data(),
+    count=st.integers(1, 8),
+    sector_size=sector_sizes,
+)
+def test_the_dirtied_clusters_are_the_ones_fatfs_takes_next(
+    tmp_path: Path, files: dict[str, bytes], data: st.DataObject, count: int, sector_size: int
+) -> None:
+    """FatFs's create_chain(obj, 0) starts from last_clst, FSInfo's hint when
+    it names a cluster, else 1, and takes the first free cluster above it."""
+    for old in tmp_path.iterdir():
+        old.unlink()
+    image, _ = volume(tmp_path, files, sector_size)
+    fat = fat_table(image)
+    top = max(c for c, link in enumerate(fat) if c >= 2 and link != FREE)
+    # Past the last used cluster, so a free one lies at or below a valid hint.
+    hint = data.draw(st.one_of(st.just(0xFFFFFFFF), st.integers(top + 1, top + 64)), "hint")
+    set_next_free(image, hint)
+    after = hint if 2 <= hint < len(fat) else 1
+    want = [c for c in range(after + 1, len(fat)) if fat[c] == FREE][:count]
+    assert dirty_free_clusters(image, count) == frozenset(want)
+
+
+@needs_tools
+@settings(
+    max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(added=st.integers(1, 6), data=st.data())
+def test_free_slots_count_never_used_and_deleted_entries(
+    tmp_path: Path, added: int, data: st.DataObject
+) -> None:
+    """Each 8.3 name mtools adds takes one slot, and each it deletes gives one
+    back as 0xE5, which a new name may reuse."""
+    for old in tmp_path.iterdir():
+        old.unlink()
+    image, target = volume(tmp_path, {}, 4096)
+    empty = root(image).free_slots()
+    stored = [f"F{i}.BIN" for i in range(added)]  # upper case 8.3: no long name entry
+    for name in stored:
+        (tmp_path / name).write_bytes(b"x")
+        mtools("mcopy", "-i", target, str(tmp_path / name), f"::/{name}")
+    assert root(image).free_slots() == empty - added
+    gone = data.draw(st.integers(1, added), "deleted")
+    for name in stored[:gone]:
+        mtools("mdel", "-i", target, f"::/{name}")
+    assert root(image).free_slots() == empty - added + gone
+
+
+@needs_tools
+@settings(
+    max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(
+    top=st.dictionaries(names, file_bytes, max_size=3),
+    nested=st.dictionaries(names, file_bytes, min_size=1, max_size=3),
+    data=st.data(),
+    sector_size=sector_sizes,
+)
+def test_every_cluster_is_owned_free_bad_or_lost(
+    tmp_path: Path,
+    top: dict[str, bytes],
+    nested: dict[str, bytes],
+    data: st.DataObject,
+    sector_size: int,
+) -> None:
+    """Conservation: the classes split the volume. On an image mtools wrote
+    every allocated cluster is on a chain mtools reports, files in a
+    subdirectory included, and an end mark planted on a free cluster is lost
+    and nothing else is."""
+    for old in tmp_path.iterdir():
+        old.unlink()
+    image, target = volume(tmp_path, top, sector_size)
+    mtools("mmd", "-i", target, "::/sub")
+    for name, payload in nested.items():
+        (tmp_path / name).write_bytes(payload)
+        mtools("mcopy", "-o", "-i", target, str(tmp_path / name), f"::/sub/{name}")
+    files = [*top, *(f"sub/{n}" for n in nested), "sub"]
+    chained = set(root(image).clusters).union(*(chain_of(target, f) for f in files))
+    clean = accounting(image)
+    assert clean.owned == chained
+    assert clean.unowned == set()
+    classes = (clean.owned, clean.free, clean.bad, clean.unowned)
+    assert sum(map(len, classes)) == len(frozenset().union(*classes))  # pairwise disjoint
+    fat = fat_table(image)
+    first_free = next(c for c in range(2, len(fat)) if fat[c] == FREE)
+    lost = data.draw(st.sets(st.integers(first_free, first_free + 32), max_size=4), "lost")
+    lost = {c for c in lost if fat[c] == FREE}
+    for c in lost:
+        set_fat(image, c, 0x0FFFFFFF)
+    after = accounting(image)
+    assert after.unowned == lost
+    assert after.owned == clean.owned
+    assert after.free == clean.free - lost
