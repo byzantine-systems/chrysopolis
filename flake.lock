@@ -241,11 +241,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1794672799,
-        "narHash": "sha256-7rz4lWq5Vj1x4cMp6sLeCjjxYQKGSJdi9/5kIswMDPQ=",
+        "lastModified": 1794780396,
+        "narHash": "sha256-rcKzWdnTZ7NCsmy95t2suzXif70eobVb65svPTePOU8=",
         "ref": "chryso",
-        "rev": "d655ec7a16e887d5487119ef1d157b79151c0f3b",
-        "revCount": 785,
+        "rev": "2f159160e125362bef37b04564f79b6d777e3609",
+        "revCount": 786,
         "type": "git",
         "url": "https://github.com/byzantine-systems/lionsos"
       },
