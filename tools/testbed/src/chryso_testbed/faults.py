@@ -338,6 +338,10 @@ class StorageModel:
     def expect(self, step: StorageStep, *, up: bool) -> Expect:
         """`up` is whether Root still runs the block driver."""
         base = self._unfaulted(step, up=up)
+        if self.suspect and isinstance(step, Put | Overwrite | Get | Remove | Rename):
+            # FatFs retries a dirty window before every later load, so even a
+            # lookup that would find nothing may fail first.
+            base |= expect(EIO)
         if isinstance(step, Put | Overwrite | Get | Remove | Rename) and self.damaged and up:
             return ANYTHING
         if (armed := self.armed) is None or not isinstance(
@@ -442,7 +446,7 @@ class StorageModel:
                         held = expect(Status.DIFFERS)
                     case _:
                         held = expect(Seed(chart.model.seed or 0))
-                return (held | expect(EIO)) if self.suspect else held
+                return held
             case Arm(file=f) | Corrupt(file=f):
                 return self._present(f)
             case Disarm():

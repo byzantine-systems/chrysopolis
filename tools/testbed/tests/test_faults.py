@@ -23,6 +23,7 @@ state they need instead of waiting for it. Each caught a planted defect:
 | a rename drops every other file | test_changes_to_distinct_files_commute |
 | a remove keeps the fault on the freed data | test_a_removed_file_reads_as_absent |
 | an overwrite expects a get's read errors | test_an_overwrite_never_reads_file_data |
+| only a get may fail on a dirty window | test_a_dirty_window_may_fail_any_volume_step |
 
 The pre-split model ran in lockstep with this one before it was deleted.
 """
@@ -378,6 +379,31 @@ def test_a_file_written_ok_reads_back_until_something_disturbs_it(trace: Trace) 
 
 
 files = st.integers(0, 3)
+volume_steps: st.SearchStrategy[Step] = st.one_of(
+    st.builds(Put, kind=st.just("put"), file=files, seed=st.integers(0, 255)),
+    st.builds(Overwrite, kind=st.just("overwrite"), file=files, seed=st.integers(0, 255)),
+    st.builds(Get, kind=st.just("get"), file=files),
+    st.builds(Remove, kind=st.just("remove"), file=files),
+    st.builds(Rename, kind=st.just("rename"), src=files, dst=files),
+)
+
+
+@given(start=states(), file=files, seed=st.integers(0, 255), step=volume_steps)
+def test_a_dirty_window_may_fail_any_volume_step(
+    start: Model, file: int, seed: int, step: Step
+) -> None:
+    """A put failed by a write fault leaves FatFs's window dirty, and every
+    later load retries it: once the fault is gone, any step that loads a
+    sector may still report eio, a lookup of a missing file included."""
+    put = Put(kind="put", file=file, seed=seed)
+    faulted = with_fault(start, "write", "data", file, once=False)
+    if Status.EIO not in faulted.expect(put):
+        return  # the volume refuses the put some other way
+    dirty = without_fault(faulted.after(put, Status.EIO))
+    assert dirty.storage.suspect
+    assert Status.EIO in dirty.expect(step)
+
+
 regions: st.SearchStrategy[Region] = st.sampled_from(["data", "fat", "entry"])
 
 
@@ -488,11 +514,12 @@ def reads(model: Model) -> tuple[Expect, ...]:
 
 
 def plain(model: Model) -> Model | None:
-    """`model` with no armed fault, a clean boot plan and Root settled, or
-    None where the block driver is gone or the volume damaged."""
+    """`model` with no armed fault, a clean window and boot plan and Root
+    settled, or None where the block driver is gone or the volume damaged.
+    A dirty window has its own law, test_a_dirty_window_may_fail_any_volume_step."""
     if not model.root.up("blk") or model.storage.damaged:
         return None
-    storage = replace(model.storage, fault=FaultLifecycle(FaultRecord()), disk=CLEAN_DISK)
+    storage = replace(model.storage.rebooted(), disk=CLEAN_DISK)
     return replace(model, root=model.root.settled(DRIVERS), storage=storage)
 
 
