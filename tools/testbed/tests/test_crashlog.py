@@ -10,6 +10,7 @@ Planted defects caught:
 | persisted samples outside its epoch | test_a_crash_persists_some_of_one_epoch_and_nothing_else |
 | persisted seeds from hash() | test_a_crash_subset_replays_in_another_process |
 | sparse_copy drops a trailing zero run | test_a_sparse_copy_equals_its_source |
+| avoiding compares only a write's first sector | test_avoiding_drops_exactly_the_writes_to_... |
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from chryso_testbed.crashlog import (
     FLUSH,
     MAGIC,
     Log,
+    avoiding,
     crashed_at,
     parse,
     persisted,
@@ -152,6 +154,44 @@ def test_crash_subsets_reach_between_the_boundaries(case: tuple[list[Op], int]) 
     n = len(log.epochs[epoch])
     sizes = {len(persisted(log, epoch, seed)) for seed in range(1, 200)}
     assert sizes & set(range(1, n)), sizes
+
+
+@given(case=busy(), lost=st.frozensets(st.integers(0, 10), max_size=4))
+def test_avoiding_drops_exactly_the_writes_to_the_lost_sectors(
+    case: tuple[list[Op], int], lost: frozenset[int]
+) -> None:
+    """The kept writes are the epoch's writes that cover no lost sector, and
+    with nothing lost the whole epoch is kept."""
+    log_ops, epoch = case
+    log = parse(encode(log_ops))
+
+    def covers(i: int) -> bool:
+        e = log.entries[i]
+        return any(e.sector <= s < e.sector + e.nr_sectors for s in lost)
+
+    kept = avoiding(log, epoch, lost)
+    assert kept <= set(log.epochs[epoch])
+    assert not any(map(covers, kept))
+    assert all(covers(i) for i in set(log.epochs[epoch]) - kept)
+    assert avoiding(log, epoch, frozenset()) == set(log.epochs[epoch])
+
+
+@given(case=busy(), lost=st.frozensets(st.integers(0, 10), min_size=1, max_size=4))
+def test_a_crash_avoiding_sectors_leaves_them_as_the_epoch_found_them(
+    case: tuple[list[Op], int], lost: frozenset[int]
+) -> None:
+    """Observed on the replayed disk: the lost sectors read as they did
+    before the epoch. No write fills a sector with this base's bytes."""
+    log_ops, epoch = case
+    log = parse(encode(log_ops))
+    base = bytes(range(256)) * (SECTOR // 256) * DISK_SECTORS
+    before = reference(log, state(log, epoch), base)
+    after = reference(log, state(log, epoch, avoiding(log, epoch, lost)), base)
+
+    def sector(disk: bytes, s: int) -> bytes:
+        return disk[s * SECTOR : (s + 1) * SECTOR]
+
+    assert all(sector(after, s) == sector(before, s) for s in lost)
 
 
 REPLAY = """

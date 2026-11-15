@@ -109,6 +109,22 @@ def persisted(log: Log, epoch: int, seed: int) -> frozenset[int]:
     return frozenset(rng.sample(writes, rng.randint(0, len(writes))))
 
 
+def avoiding(log: Log, epoch: int, sectors: frozenset[int]) -> frozenset[int]:
+    """Every write of `epoch` that touches none of `sectors`, in the log's
+    sector unit: the crash that loses exactly the writes to those sectors.
+    A seeded subset finds that state only by luck, and it is the one a
+    directory linked before it is zeroed shows its leftovers in."""
+    if epoch >= len(log.epochs):
+        return frozenset()
+    return frozenset(
+        i
+        for i in log.epochs[epoch]
+        if sectors.isdisjoint(
+            range(log.entries[i].sector, log.entries[i].sector + log.entries[i].nr_sectors)
+        )
+    )
+
+
 def crashed_at(log: Log, epoch: int, subset: Iterable[int] = ()) -> int:
     """Where the crash fell: the end of the last kept write, or the stable point."""
     if epoch >= len(log.epochs):
