@@ -40,8 +40,9 @@ class Intent:
 @dataclass(frozen=True, slots=True)
 class Volume:
     """Directory sectors by id, each directory's chain of them, the clusters
-    freed and the intent record. A sector a chain names but nothing wrote yet
-    reads as empty, as a fresh cluster does."""
+    freed and the intent record. A sector no chain names is free space, and
+    may still hold leftover entries from an earlier use: a directory that
+    grows into it shows them unless it is zeroed first."""
 
     sectors: tuple[tuple[Entry | None, ...], ...]
     dirs: tuple[tuple[str, tuple[int, ...]], ...]
@@ -162,22 +163,53 @@ class Design:
     record_empty: bool = False  # also for a file with no chain, matched by cluster 0
     clear_apart: bool = True  # recovery flushes the removal before clearing
     free_chain: bool = False  # recovery frees the old entry's chain
+    grow_apart: bool = True  # a directory's new sector is zeroed and flushed before it is linked
 
 
 FIXED: Final = Design()
 
 
-def placement(v: Volume, d: str) -> tuple[tuple[Write, ...], tuple[int, int]]:
+@dataclass(frozen=True, slots=True)
+class Placement:
+    """Where a new entry of a directory goes. When the directory is full it
+    grows by a sector: `zero` clears it and `link` adds it to the chain."""
+
+    slot: tuple[int, int]
+    zero: tuple[Write, ...] = ()
+    link: tuple[Write, ...] = ()
+
+    def epochs(self, entry: Write, design: Design) -> tuple[tuple[Write, ...], ...]:
+        """The flush epochs that grow the directory and write `entry`. The
+        fork zeroes and flushes first, upstream FatFs links in the same epoch."""
+        if self.zero and design.grow_apart:
+            return (self.zero, (*self.link, entry))
+        return ((*self.link, *self.zero, entry),)
+
+    def grown(self, v: Volume) -> Volume:
+        return Plan((self.zero, self.link)).done(v)
+
+
+def placement(v: Volume, d: str) -> Placement:
     """Where FatFs's dir_alloc puts a new entry of `d`: its first unused slot,
-    or a new sector, linked and zeroed before the entry is written."""
+    or the first slot of a sector the directory grows into. That sector is the
+    lowest one no chain names, leftovers and all, or a new one."""
     for sector in v.chain(d):
         for i, entry in enumerate(v.cells(sector)):
             if entry is None or not entry.live:
-                return (), (sector, i)
-    new = len(v.sectors)
+                return Placement((sector, i))
+    chained = {s for _, chain in v.dirs for s in chain}
+    new = next(s for s in range(len(v.sectors) + 1) if s not in chained)
     width = len(v.cells(v.chain(d)[0]))
     dirs = tuple((k, (*s, new) if k == d else s) for k, s in v.dirs)
-    return (FatWrite(dirs, v.freed), SectorWrite(new, (None,) * width)), (new, 0)
+    return Placement(
+        (new, 0), zero=(SectorWrite(new, (None,) * width),), link=(FatWrite(dirs, v.freed),)
+    )
+
+
+def create(v: Volume, d: str, name: str, cluster: int, design: Design = FIXED) -> Plan:
+    """A new entry `name` in `d`, as a create's directory writes."""
+    at = placement(v, d)
+    return Plan(at.epochs(put(at.grown(v), at.slot, Entry(name, cluster)), design))
 
 
 def rename(v: Volume, src: tuple[str, str], dst: tuple[str, str], design: Design = FIXED) -> Plan:
@@ -186,11 +218,16 @@ def rename(v: Volume, src: tuple[str, str], dst: tuple[str, str], design: Design
     old, entry = v.locate(*src)
     record = design.record and (entry.cluster != 0 or design.record_empty)
     intent = (RecordWrite(Intent(old, entry.name, entry.cluster, dst[0])),) if record else ()
-    grow, slot = placement(v, dst[0])
-    register = (*grow, put(Plan((grow,)).done(v), slot, Entry(dst[1], entry.cluster)))
-    removal = put(Plan((intent, register)).done(v), old, replace(entry, live=False))
+    at = placement(v, dst[0])
+    *growth, register = at.epochs(put(at.grown(v), at.slot, Entry(dst[1], entry.cluster)), design)
+    removal = put(Plan((intent, *growth, register)).done(v), old, replace(entry, live=False))
     clear = (RecordWrite(None),) if record else ()
-    head = (intent, register) if design.record_apart else ((*intent, *register),)
+    if design.record_apart:
+        head = (intent, *growth, register)
+    elif growth:  # the growth's own flush carries the record out before the entry
+        head = ((*intent, *growth[0]), register)
+    else:
+        head = ((*intent, *register),)
     return Plan((*head, (removal,), clear))
 
 

@@ -11,6 +11,7 @@ by its predicted law:
 | recovery clears the record in the removal's epoch | `recovery_survives_crashes` |
 | an empty file's twin matched by cluster 0 | `never_lost` |
 | recovery frees the old entry's chain | `atomic` |
+| a new directory sector linked as it is zeroed (upstream) | `atomic`, `create_atomic` |
 
 And in the model itself:
 
@@ -18,6 +19,7 @@ And in the model itself:
 |---|---|
 | `Plan.crashes` keeps whole epochs only | the record-with-entry and clear-with-removal searches |
 | `Record.decode` skips the CRC | test_no_single_corrupted_byte_decodes_as_a_record |
+| `placement` grows into a new sector, never a leftover one | the links-before-zeroing searches |
 
 Non-law: a crashed rename of an empty file may leave both names. It has no
 chain to share, so no record is written for it.
@@ -32,6 +34,7 @@ from typing import Final
 import pytest
 from hypothesis import find, given, settings
 from hypothesis import strategies as st
+from hypothesis.errors import NoSuchExample
 
 from chryso_testbed.renaming import (
     FIXED,
@@ -41,6 +44,7 @@ from chryso_testbed.renaming import (
     Plan,
     Record,
     Volume,
+    create,
     placement,
     put,
     recover,
@@ -65,26 +69,33 @@ class Case:
         return self.volume.names(), self.plan(design).done(self.volume).names()
 
     def kind(self) -> str:
-        grow, (sector, _) = placement(self.volume, self.dst)
+        at = placement(self.volume, self.dst)
+        sector, _ = at.slot
         (old, _), _ = self.volume.locate("P", "a")
-        if grow:
-            return "grows"
+        if at.zero:
+            return "grows-into-leftovers" if any(self.volume.cells(sector)) else "grows"
         if self.dst != "P":
             return "other-dir"
         return "same-sector" if sector == old else "other-sector"
 
 
 @st.composite
-def cases(draw: st.DrawFn, *, empty: bool = False) -> Case:
+def cases(draw: st.DrawFn, *, empty: bool = False, leftovers: bool | None = None) -> Case:
     """Directories P (one or two sectors) and Q (one), one to three slots a
     sector. Other slots hold files, empty files, deleted entries or nothing.
-    The source `a` sits at a drawn slot of P, and `b` is free everywhere."""
+    The source `a` sits at a drawn slot of P, and `b` is free everywhere.
+
+    With `leftovers` (drawn when None), the free sector a directory would
+    grow into holds old entries. Their names and clusters are drawn from the
+    live ones too, the renamed file's included: a leftover on its chain is
+    what a mount's twin scan must never get to see."""
     width = draw(st.integers(1, 3))
     p = draw(st.integers(1, 2))
     slots = [(s, i) for s in range(p + 1) for i in range(width)]
     src = draw(st.sampled_from(slots[: p * width]))
     clusters = iter(range(2, 100))
-    cells: dict[tuple[int, int], Entry | None] = {src: Entry("a", 0 if empty else next(clusters))}
+    source = Entry("a", 0 if empty else next(clusters))
+    cells: dict[tuple[int, int], Entry | None] = {src: source}
     others = iter(OTHERS * 2)
     for slot in slots:
         if slot == src:
@@ -99,10 +110,16 @@ def cases(draw: st.DrawFn, *, empty: bool = False) -> Case:
                 cells[slot] = Entry(name, next(clusters), live=False)
             case _:
                 cells[slot] = None
-    volume = Volume(
-        sectors=tuple(tuple(cells.get((s, i)) for i in range(width)) for s in range(p + 1)),
-        dirs=(("P", tuple(range(p))), ("Q", (p,))),
-    )
+    sectors = [tuple(cells.get((s, i)) for i in range(width)) for s in range(p + 1)]
+    if draw(st.booleans()) if leftovers is None else leftovers:
+        old = st.builds(
+            Entry,
+            name=st.sampled_from(("a", "b", *OTHERS)),
+            cluster=st.sampled_from([source.cluster, *range(50, 54)]),
+            live=st.booleans(),
+        )
+        sectors.append(tuple(draw(st.lists(old, min_size=width, max_size=width))))
+    volume = Volume(sectors=tuple(sectors), dirs=(("P", tuple(range(p))), ("Q", (p,))))
     return Case(volume, draw(st.sampled_from(["P", "Q"])))
 
 
@@ -132,6 +149,14 @@ def recovery_survives_crashes(c: Case, design: Design = FIXED) -> bool:
         if any(settled(t, design).names() != goal for t in recover(s, design).crashes(s)):
             return False
     return True
+
+
+def create_atomic(c: Case, design: Design = FIXED) -> bool:
+    """A crashed create of `dst`/b leaves the names before or after, never a
+    leftover one from the sector the directory grew into."""
+    plan = create(c.volume, c.dst, "b", 60, design)
+    ends = (c.volume.names(), plan.done(c.volume).names())
+    return all(settled(s, design).names() in ends for s in plan.crashes(c.volume))
 
 
 # --- laws on the fork's design --------------------------------------------------------
@@ -179,6 +204,11 @@ def test_an_empty_file_is_never_lost(c: Case) -> None:
     assert never_lost(c)
 
 
+@given(c=cases())
+def test_a_crashed_create_shows_no_leftover_name(c: Case) -> None:
+    assert create_atomic(c)
+
+
 @st.composite
 def stale(draw: st.DrawFn) -> Volume:
     """A rename whose clear never reached the disk, then creates and removes,
@@ -197,9 +227,7 @@ def stale(draw: st.DrawFn) -> Volume:
             continue
         used = {e.cluster for dd, _ in v.dirs for _, e in v.entries(dd)}
         cluster = draw(st.sampled_from([0, *(x for x in range(2, 12) if x not in used)]))
-        grow, slot = placement(v, d)
-        v = Plan((grow,)).done(v)
-        v = put(v, slot, Entry(name, cluster)).onto(v)
+        v = create(v, d, name, cluster).done(v)
     return v
 
 
@@ -219,9 +247,14 @@ def test_a_stale_record_changes_nothing(v: Volume) -> None:
         (Design(clear_apart=False), recovery_survives_crashes, False),
         (Design(record_empty=True), never_lost, True),
         (Design(free_chain=True), atomic, False),
+        (Design(grow_apart=False), atomic, False),
+        (Design(grow_apart=False), create_atomic, False),
     ],
-    ids=["no-record", "record-with-entry", "clear-with-removal", "empty-twin", "frees-chain"],
-)
+    ids=[
+        "no-record", "record-with-entry", "clear-with-removal", "empty-twin", "frees-chain",
+        "links-before-zeroing", "create-links-before-zeroing",
+    ],
+)  # fmt: skip
 def test_every_planted_design_is_rejected(
     design: Design, law: Callable[[Case, Design], bool], empty: bool
 ) -> None:
@@ -233,7 +266,20 @@ def test_every_planted_design_is_rejected(
     assert law(found, FIXED), "the fork's design passes where the planted one fails"
 
 
-@pytest.mark.parametrize("kind", ["same-sector", "other-sector", "other-dir", "grows"])
+def test_without_leftovers_linking_before_zeroing_goes_unseen() -> None:
+    """Why the smoke dirties the disk first: on clean free space the upstream
+    order breaks no law, so no crash state can show it."""
+    with pytest.raises(NoSuchExample):
+        find(
+            cases(leftovers=False),
+            lambda c: not atomic(c, Design(grow_apart=False)),
+            settings=settings(max_examples=500, database=None),
+        )
+
+
+@pytest.mark.parametrize(
+    "kind", ["same-sector", "other-sector", "other-dir", "grows", "grows-into-leftovers"]
+)
 def test_the_generator_reaches_every_kind_of_rename(kind: str) -> None:
     find(cases(), lambda c: c.kind() == kind, settings=settings(database=None))
 
