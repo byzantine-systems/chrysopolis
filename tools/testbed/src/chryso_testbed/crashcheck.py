@@ -18,6 +18,7 @@ from typing import Final, Literal
 from pyfatfs import PyFATException
 
 from chryso_testbed import renaming
+from chryso_testbed.allowed import Allowed
 from chryso_testbed.fatlayout import (
     DELETED,
     ENTRY,
@@ -52,25 +53,23 @@ class Span:
 type Content = int | Literal["absent", "empty", "garbage", "broken"]
 
 
-type May = frozenset[Content] | None  # None allows anything
-ABSENT: Final[frozenset[Content]] = frozenset({"absent"})
+ABSENT: Final[Allowed[Content]] = Allowed.of("absent")
+ANYTHING: Final[Allowed[Content]] = Allowed.everything()
 
 
-def _union(a: May, b: May) -> May:
-    return None if a is None or b is None else a | b
-
-
-def allowed(spans: Iterable[Span], stable: int, crash: int | None = None) -> Mapping[int, May]:
-    """What each file may hold after a crash, or None for anything. A step ok
+def allowed(
+    spans: Iterable[Span], stable: int, crash: int | None = None
+) -> Mapping[int, Allowed[Content]]:
+    """What each file may hold after a crash. A step ok
     by `stable` is done. One started by `crash` but not stable may be done or
     not: a rewrite leaves the file as before, empty or new, an overwrite as
     before, new or part new (garbage), a remove as before or absent, and a
     rename `src` as before or absent and `dst` as before or `src`'s content.
     A failed step leaves anything, a refused one nothing changed."""
     crash = stable if crash is None else crash
-    files: dict[int, May] = {}
+    files: dict[int, Allowed[Content]] = {}
 
-    def before(f: int) -> May:
+    def before(f: int) -> Allowed[Content]:
         return files.get(f, ABSENT)
 
     for span in spans:
@@ -79,23 +78,23 @@ def allowed(spans: Iterable[Span], stable: int, crash: int | None = None) -> Map
         done = span.outcome == Status.OK and span.end <= stable
         match span.step, span.outcome:
             case CrashPut(file=f, seed=s), _:
-                files[f] = _union(before(f), frozenset({"empty", s}))
+                files[f] = before(f) | Allowed.of("empty", s)
             case Put() | Overwrite() | Remove() | Rename(), Status.ENOENT | Status.EEXIST:
                 continue
             case Put(file=f) | Overwrite(file=f) | Remove(file=f), outcome if outcome != Status.OK:
-                files[f] = None
+                files[f] = ANYTHING
             case Rename(src=s, dst=d), outcome if outcome != Status.OK:
-                files[s] = files[d] = None
+                files[s] = files[d] = ANYTHING
             case Put(file=f, seed=s), _:
-                files[f] = frozenset({s}) if done else _union(before(f), frozenset({"empty", s}))
+                files[f] = Allowed.of(s) if done else before(f) | Allowed.of("empty", s)
             case Overwrite(file=f, seed=s), _:
-                files[f] = frozenset({s}) if done else _union(before(f), frozenset({"garbage", s}))
+                files[f] = Allowed.of(s) if done else before(f) | Allowed.of("garbage", s)
             case Remove(file=f), _:
-                files[f] = ABSENT if done else _union(before(f), ABSENT)
+                files[f] = ABSENT if done else before(f) | ABSENT
             case Rename(src=s, dst=d), _ if s != d:
                 moved = before(s)
                 files[s], files[d] = (
-                    (ABSENT, moved) if done else (_union(moved, ABSENT), _union(before(d), moved))
+                    (ABSENT, moved) if done else (moved | ABSENT, before(d) | moved)
                 )
     return files
 
@@ -106,7 +105,7 @@ class Move:
 
     src: int
     dst: int
-    content: frozenset[Content]
+    content: Allowed[Content]
 
 
 def moves(spans: Iterable[Span], stable: int, crash: int | None = None) -> tuple[Move, ...]:
@@ -123,7 +122,7 @@ def moves(spans: Iterable[Span], stable: int, crash: int | None = None) -> tuple
                 and span.outcome == Status.OK
                 and span.end > stable
                 and not any({s, d} & touched(later.step) for later in spans[i + 1 :])
-                and (content := allowed(spans[:i], stable, crash).get(s, ABSENT)) is not None
+                and not (content := allowed(spans[:i], stable, crash).get(s, ABSENT)).anything
             ):
                 cut.append(Move(s, d, content))
     return tuple(cut)
@@ -146,7 +145,7 @@ def durable(
     """Each file's seed a crash must keep: `allowed` narrowed to one seed."""
     promised: dict[int, int | None] = {}
     for f, may in allowed(spans, stable, crash).items():
-        only = next(iter(may)) if may is not None and len(may) == 1 else None
+        only = may.only()
         promised[f] = only if isinstance(only, int) else None
     return promised
 
@@ -178,7 +177,9 @@ class Verdict:
     crosslinked: tuple[tuple[int, int], ...] = ()
 
 
-def judge(image: Path, expected: Mapping[int, May], *, cut: Iterable[Move] = ()) -> Verdict:
+def judge(
+    image: Path, expected: Mapping[int, Allowed[Content]], *, cut: Iterable[Move] = ()
+) -> Verdict:
     """Where a crash image breaks `expected`, as `allowed` gives it, or a cut
     rename, as `moves` gives it. Two entries on one cluster are a problem,
     except a cut rename's two names, which FatFs registers before it removes
@@ -196,11 +197,16 @@ def judge(image: Path, expected: Mapping[int, May], *, cut: Iterable[Move] = ())
     if diverged:  # packages.disk has one FAT, so two copies that disagree are a fault
         problems.append("the FAT copies differ")
     for file, may in expected.items():
-        if may is not None and (got := held(found, file)) not in may:
-            problems.append(f"fuzz{file}.bin: holds {got!r}, allowed {sorted(map(str, may))}")
+        if (got := held(found, file)) not in may:
+            problems.append(
+                f"fuzz{file}.bin: holds {got!r}, allowed {sorted(map(str, may.values))}"
+            )
     cut = tuple(cut)
     for m in cut:
-        if "absent" not in m.content and held(found, m.src) == held(found, m.dst) == "absent":
+        if (
+            "absent" not in m.content.values
+            and held(found, m.src) == held(found, m.dst) == "absent"
+        ):
             problems.append(f"fuzz{m.src}.bin -> fuzz{m.dst}.bin: lost under both names")
     pairs = {frozenset({_fuzz(m.src), _fuzz(m.dst)}): (m.src, m.dst) for m in cut}
     crosslinked = []

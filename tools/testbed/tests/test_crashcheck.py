@@ -13,6 +13,7 @@ from __future__ import annotations
 from hypothesis import given
 from hypothesis import strategies as st
 
+from chryso_testbed.allowed import Allowed
 from chryso_testbed.crashcheck import Content, Move, Span, allowed, durable, moves
 from chryso_testbed.faults import CrashPut, Overwrite, Put, Remove, Rename, Step
 from chryso_testbed.outcomes import Outcome, Status
@@ -78,8 +79,8 @@ def test_a_later_crash_never_promises_more(spans: list[Span], data: st.DataObjec
     }
 
 
-def may(*contents: Content) -> frozenset[Content]:
-    return frozenset(contents)
+def may(*contents: Content) -> Allowed[Content]:
+    return Allowed.of(*contents)
 
 
 def put(file: int, seed: int, start: int, end: int, outcome: Outcome = Status.OK) -> Span:
@@ -94,14 +95,14 @@ def test_allowed_contents_anchor_the_meaning() -> None:
     assert allowed([first], 1024) == {1: may(5)}
     assert allowed([first, again], 1024, 1536) == {1: may(5, "empty", 6)}
     assert allowed([put(2, 7, 512, 1024)], 600, 700) == {2: may("absent", "empty", 7)}
-    assert allowed([put(3, 8, 512, 1024, Status.EIO)], 2048) == {3: None}
+    assert allowed([put(3, 8, 512, 1024, Status.EIO)], 2048) == {3: Allowed.everything()}
     failed_then_ok = [put(3, 8, 512, 1024, Status.EIO), put(3, 9, 1024, 2048)]
     assert allowed(failed_then_ok, 2048) == {3: may(9)}
 
 
-def covers(wide: frozenset[Content] | None, narrow: frozenset[Content] | None) -> bool:
-    """`wide` allows everything `narrow` does. None allows anything."""
-    return wide is None or (narrow is not None and narrow <= wide)
+def covers(wide: Allowed[Content], narrow: Allowed[Content]) -> bool:
+    """`wide` allows everything `narrow` does."""
+    return wide.anything or (not narrow.anything and narrow.values <= wide.values)
 
 
 @given(spans=histories(), data=st.data())
@@ -172,7 +173,7 @@ def test_with_nothing_in_flight_a_crash_keeps_exactly_the_replay(spans: list[Spa
     ok steps in order leaves, and no rename is cut."""
     stable = spans[-1].end if spans else 512
     found = allowed(spans, stable)
-    assert dict(found) == {f: frozenset({c}) for f, c in replayed(spans).items()}
+    assert dict(found) == {f: Allowed.of(c) for f, c in replayed(spans).items()}
     assert moves(spans, stable) == ()
 
 

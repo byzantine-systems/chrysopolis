@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Final
 
 from chryso_testbed import crashcheck, crashlog, fatlayout, inject, probes, rootlog
+from chryso_testbed.allowed import Allowed
 from chryso_testbed.blkdebug import EIO, Delay, WriteError
 from chryso_testbed.console import Mark
 from chryso_testbed.crashcheck import Span
@@ -518,7 +519,7 @@ async def crash_boot(ctx: Context) -> None:
         crashlog.replay, log, ctx.settings.disk, image, crashlog.state(log, point)
     )
     expected = crashcheck.allowed(spans, crashlog.stable(log, point))  # a boundary: crash == stable
-    if expected.get(1) != frozenset({5}):
+    if expected.get(1) != Allowed.of(5):
         raise AssertionError(f"the first write should be durable here: {expected}")
     verdict = await asyncio.to_thread(crashcheck.judge, image, expected)
     if verdict.problems:

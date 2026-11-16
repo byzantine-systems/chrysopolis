@@ -28,6 +28,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from chryso_testbed.allowed import Allowed
 from chryso_testbed.crashcheck import (
     Content,
     Move,
@@ -314,7 +315,7 @@ def test_two_entries_on_one_cluster_are_a_problem_unless_a_cut_rename(
     plain = judge(image, {})
     assert any("share clusters" in p for p in plain.problems)
     assert not plain.crosslinked
-    cut = judge(image, {}, cut=[Move(src, dst, frozenset({"garbage"}))])
+    cut = judge(image, {}, cut=[Move(src, dst, Allowed.of("garbage"))])
     assert not any("share clusters" in p for p in cut.problems)
     assert cut.crosslinked == ((src, dst),)
 
@@ -331,10 +332,10 @@ def test_a_cut_rename_must_keep_its_file_under_one_name(
     for old in tmp_path.iterdir():
         old.unlink()
     image, _ = volume(tmp_path, files, 4096)  # fuzz names are not in `names`
-    either: frozenset[Content] = frozenset({seed, "absent"})
+    either: Allowed[Content] = Allowed.of(seed, "absent")
     expected = {1: either, 2: either}
     assert not judge(image, expected).problems
-    lost = judge(image, expected, cut=[Move(1, 2, frozenset({seed}))])
+    lost = judge(image, expected, cut=[Move(1, 2, Allowed.of(seed))])
     assert lost.problems == ("fuzz1.bin -> fuzz2.bin: lost under both names",)
 
 
