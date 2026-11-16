@@ -305,7 +305,7 @@ async def check(
             observe(step, seen, model)
         fields = {"n": n, **step.model_dump(), "outcome": render(seen)}
         if seen not in allowed:
-            wanted = "anything" if allowed.anything else sorted(map(render, allowed.outcomes))
+            wanted = "anything" if allowed.anything else sorted(map(render, allowed.values))
             log.error("step.disallowed", **fields, allowed=wanted)
             raise m.console.fail(f"step {n} {step!r}: got {render(seen)}, allowed {wanted}")
         log.info("step", **fields)

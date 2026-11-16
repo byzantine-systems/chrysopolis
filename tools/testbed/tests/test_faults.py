@@ -38,6 +38,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 
+from chryso_testbed.allowed import Allowed
 from chryso_testbed.blkdebug import PLAN, Expected
 from chryso_testbed.blkdebug import SCHEMA as PLAN_SCHEMA
 from chryso_testbed.fatlayout import Region
@@ -52,7 +53,6 @@ from chryso_testbed.faults import (
     Corrupt,
     CrashPut,
     Disarm,
-    Expect,
     Fault,
     Get,
     Model,
@@ -82,11 +82,11 @@ UNIVERSE: Final[tuple[Outcome, ...]] = (
 steps = from_schema(STEP.json_schema()).map(STEP.validate_python)
 programs = st.lists(steps, max_size=12).map(tuple)
 disks = from_schema(PLAN_SCHEMA).map(PLAN.validate_python).map(Expected.of)
-type Trace = list[tuple[Step, Expect, Outcome, Model]]
+type Trace = list[tuple[Step, Allowed[Outcome], Outcome, Model]]
 
 
-def outcome(allowed: Expect) -> st.SearchStrategy[Outcome]:
-    choices = UNIVERSE if allowed.anything else sorted(allowed.outcomes, key=render)
+def outcome(allowed: Allowed[Outcome]) -> st.SearchStrategy[Outcome]:
+    choices = UNIVERSE if allowed.anything else sorted(allowed.values, key=render)
     return st.sampled_from(choices)
 
 
@@ -187,7 +187,7 @@ def test_steps_of_different_components_commute(
 
 @given(trace=runs())
 def test_every_step_allows_something(trace: Trace) -> None:
-    assert all(allowed.anything or allowed.outcomes for _, allowed, _, _ in trace)
+    assert all(allowed.anything or allowed.values for _, allowed, _, _ in trace)
 
 
 # --- Root ----------------------------------------------------------------------------
@@ -241,7 +241,7 @@ def test_a_driver_is_restarted_budget_times_then_given_up_on(
     answers = []
     for kind in kinds:
         step = kind(kind="fault" if kind is Fault else "restart", driver=driver)  # type: ignore[arg-type]
-        (only,) = model.expect(step).outcomes
+        (only,) = model.expect(step).values
         answers.append(only)
         model = model.after(step, only)
     counts = [a.count for a in answers if isinstance(a, Restarted)]
@@ -262,10 +262,10 @@ def test_without_the_block_driver_no_data_reads_back(
         return
     blk = Fault(kind="fault", driver="blk")
     while model.root.up("blk"):
-        (only,) = model.expect(blk).outcomes
+        (only,) = model.expect(blk).values
         model = model.after(blk, only)
     for f in (held_file, other):
-        assert model.expect(Get(kind="get", file=f)).outcomes == {Status.EIO, Status.ERROR}
+        assert model.expect(Get(kind="get", file=f)).values == {Status.EIO, Status.ERROR}
 
 
 # --- the recovery window -----------------------------------------------------------
@@ -288,16 +288,15 @@ def test_an_unsettled_request_only_widens_the_next_step(
     settled = request(kind=kind, driver=driver)  # type: ignore[arg-type]
     unsettled = request(kind=kind, driver=driver, settle=False)  # type: ignore[arg-type]
     assert model.expect(settled) == model.expect(unsettled)
-    (seen,) = model.expect(settled).outcomes
+    (seen,) = model.expect(settled).values
     waited, hurried = model.after(settled, seen), model.after(unsettled, seen)
     assert waited.root.chart(driver).model.spent == hurried.root.chart(driver).model.spent
     if isinstance(then, Fault | Restart) and then.driver == driver and not then.settle:
         return
     assert (
-        waited.expect(then).outcomes <= hurried.expect(then).outcomes
-        or hurried.expect(then).anything
+        waited.expect(then).values <= hurried.expect(then).values or hurried.expect(then).anything
     )
-    for outcome in sorted(waited.expect(then).outcomes, key=render):
+    for outcome in sorted(waited.expect(then).values, key=render):
         assert waited.after(then, outcome).key() == hurried.after(then, outcome).key()
 
 
@@ -323,7 +322,7 @@ def test_a_reset_forgets_root_and_keeps_the_disk(start: Model, file: int, seed: 
     assert rebooted.root.key() == ()
     assert rebooted.storage.armed is None
     assert not rebooted.storage.suspect
-    assert rebooted.expect(Get(kind="get", file=file)) == Expect(frozenset({Seed(seed)}))
+    assert rebooted.expect(Get(kind="get", file=file)) == expect(Seed(seed))
 
 
 @given(model=states(), file=st.integers(0, 3), seed=st.integers(0, 255), after=st.integers(0, 200))
@@ -373,9 +372,9 @@ def test_a_file_written_ok_reads_back_until_something_disturbs_it(trace: Trace) 
         chart = storage.file(step.file)
         match chart.at:
             case "absent":
-                assert allowed == Expect(frozenset({Status.ENOENT}))
+                assert allowed == expect(Status.ENOENT)
             case "held":
-                assert allowed == Expect(frozenset({Seed(chart.model.seed or 0)}))
+                assert allowed == expect(Seed(chart.model.seed or 0))
 
 
 files = st.integers(0, 3)
@@ -453,10 +452,10 @@ def test_a_latent_read_error_on_present_data_is_always_reported(
         return
     storage = model.storage
     arm = Arm(kind="arm", op="read", region="data", file=file, once=once)
-    assert model.expect(arm) == Expect(frozenset({Status.PRESENT}))
+    assert model.expect(arm) == expect(Status.PRESENT)
     armed = model.after(arm, Status.PRESENT)
     get = Get(kind="get", file=file)
-    assert armed.expect(get) == Expect(frozenset({Status.EIO}))
+    assert armed.expect(get) == expect(Status.EIO)
     after = armed.after(get, Status.EIO)
     assert (after.storage.armed is None) == (once and not storage.suspect)
 
@@ -501,14 +500,14 @@ def test_nothing_can_be_aimed_at_a_missing_file(
     if model.storage.damaged or model.storage.file(file).at != "absent":
         return
     arm = Arm(kind="arm", op=op, region=region, file=file, once=False)
-    assert model.expect(arm) == Expect(frozenset({Status.ABSENT}))
+    assert model.expect(arm) == expect(Status.ABSENT)
     assert model.after(arm, Status.ABSENT).storage.armed is None
 
 
 # --- remove, rename and overwrite ----------------------------------------------------
 
 
-def reads(model: Model) -> tuple[Expect, ...]:
+def reads(model: Model) -> tuple[Allowed[Outcome], ...]:
     """The observation these laws compare: what a get of each file may return."""
     return tuple(model.expect(Get(kind="get", file=f)) for f in range(FILES))
 
@@ -558,7 +557,7 @@ def test_removing_an_absent_file_is_the_identity(start: Model, file: int) -> Non
         return
     model = absent(model, file)
     remove = Remove(kind="remove", file=file)
-    assert model.expect(remove) == Expect(frozenset({Status.ENOENT}))
+    assert model.expect(remove) == expect(Status.ENOENT)
     assert reads(model.after(remove, Status.ENOENT)) == reads(model)
 
 
@@ -573,8 +572,8 @@ def test_a_removed_file_reads_as_absent(start: Model, file: int, seed: int) -> N
     removed = armed.after(Remove(kind="remove", file=file), Status.OK)
     allowed = removed.expect(Get(kind="get", file=file))
     assert not allowed.anything
-    assert allowed.outcomes <= {Status.ENOENT, Status.EIO}
-    assert Status.ENOENT in allowed.outcomes
+    assert allowed.values <= {Status.ENOENT, Status.EIO}
+    assert Status.ENOENT in allowed.values
 
 
 @given(start=states(), file=files, seed=st.integers(0, 255))
@@ -584,7 +583,7 @@ def test_remove_is_idempotent(start: Model, file: int, seed: int) -> None:
         return
     remove = Remove(kind="remove", file=file)
     once = model.after(remove, Status.OK)
-    assert once.expect(remove) == Expect(frozenset({Status.ENOENT}))
+    assert once.expect(remove) == expect(Status.ENOENT)
     assert reads(once.after(remove, Status.ENOENT)) == reads(once)
 
 
@@ -598,7 +597,7 @@ def test_a_rename_moves_what_a_get_reads(start: Model, pair: list[int], seed: in
     if (model := holding(absent(plain_start, dst), src, seed)) is None:
         return
     rename = Rename(kind="rename", src=src, dst=dst)
-    assert model.expect(rename) == Expect(frozenset({Status.OK}))
+    assert model.expect(rename) == expect(Status.OK)
     before, after = reads(model), reads(model.after(rename, Status.OK))
     gone = model.expect(Get(kind="get", file=dst))  # dst was absent
     assert after[dst] == before[src]
@@ -618,7 +617,7 @@ def test_renaming_there_and_back_is_the_identity(start: Model, pair: list[int], 
                         Status.PRESENT)  # fmt: skip
     there = model.after(Rename(kind="rename", src=src, dst=dst), Status.OK)
     back = Rename(kind="rename", src=dst, dst=src)
-    assert there.expect(back) == Expect(frozenset({Status.OK}))
+    assert there.expect(back) == expect(Status.OK)
     returned = there.after(back, Status.OK)
     assert reads(returned) == reads(model)
     assert returned.storage.armed == model.storage.armed
@@ -636,7 +635,7 @@ def test_a_rename_onto_a_present_name_is_refused_and_changes_nothing(
     if (model := holding(held, src, seeds[0])) is None:
         return
     rename = Rename(kind="rename", src=src, dst=dst)
-    assert model.expect(rename) == Expect(frozenset({Status.EEXIST}))
+    assert model.expect(rename) == expect(Status.EEXIST)
     assert reads(model.after(rename, Status.EEXIST)) == reads(model)
 
 
@@ -653,7 +652,7 @@ def test_a_read_error_follows_its_file_through_a_rename(
     armed = model.after(Arm(kind="arm", op="read", region="data", file=src, once=once),
                         Status.PRESENT)  # fmt: skip
     renamed = armed.after(Rename(kind="rename", src=src, dst=dst), Status.OK)
-    assert renamed.expect(Get(kind="get", file=dst)) == Expect(frozenset({Status.EIO}))
+    assert renamed.expect(Get(kind="get", file=dst)) == expect(Status.EIO)
 
 
 @given(start=states(), file=files, seed=st.integers(0, 255), again=st.integers(0, 255),
@@ -666,7 +665,7 @@ def test_an_overwrite_never_reads_file_data(
         return
     overwrite = Overwrite(kind="overwrite", file=file, seed=again)
     faulted = with_fault(model, "read", "data", file, once)
-    assert faulted.expect(overwrite) == model.expect(overwrite) == Expect(frozenset({Status.OK}))
+    assert faulted.expect(overwrite) == model.expect(overwrite) == expect(Status.OK)
     rewritten = faulted.after(overwrite, Status.OK)
     assert rewritten.storage.armed == faulted.storage.armed, "the data kept its clusters"
 
@@ -707,8 +706,8 @@ def test_a_renamed_file_reads_under_its_new_name() -> None:
     """The anchor: identity laws alone pass for a model that ignores renames."""
     model = Model.start(BUDGET).after(Put(kind="put", file=1, seed=5), Status.OK)
     model = model.after(Rename(kind="rename", src=1, dst=2), Status.OK)
-    assert model.expect(Get(kind="get", file=2)) == Expect(frozenset({Seed(5)}))
-    assert model.expect(Get(kind="get", file=1)) == Expect(frozenset({Status.ENOENT}))
+    assert model.expect(Get(kind="get", file=2)) == expect(Seed(5))
+    assert model.expect(Get(kind="get", file=1)) == expect(Status.ENOENT)
 
 
 # --- the interpreter's parsing -------------------------------------------------------

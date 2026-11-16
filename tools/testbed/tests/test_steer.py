@@ -123,7 +123,7 @@ def test_aimed_faults_find_their_target(name: str, disk: Expected, data: st.Data
     hits = []
     for step in data.draw(programs(model, name)):
         if isinstance(step, Arm | Corrupt):
-            hits.append(model.storage.damaged or model.expect(step).outcomes == {Status.PRESENT})
+            hits.append(model.storage.damaged or model.expect(step).values == {Status.PRESENT})
         model = advance(model, step)
     assert any(hits)
 
@@ -156,7 +156,7 @@ def test_the_rename_scenario_moves_a_file_then_removes_one(
     moved = could_move = removed = False
     for step in data.draw(programs(model, "rename-remove")):
         if isinstance(step, Rename | Remove) and not model.storage.damaged:
-            allowed = model.expect(step).outcomes
+            allowed = model.expect(step).values
             # Not refused: a boot plan may still fail the write itself.
             ok = Status.OK in allowed and not allowed & {Status.ENOENT, Status.EEXIST}
             if isinstance(step, Rename):

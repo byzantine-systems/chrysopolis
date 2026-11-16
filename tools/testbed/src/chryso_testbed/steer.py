@@ -54,11 +54,11 @@ def nominal(model: Model, step: Step) -> Outcome:
     allowed = model.expect(step)
     if allowed.anything:
         return Status.PRESENT if isinstance(step, Arm | Corrupt) else Status.OK
-    for outcome in allowed.outcomes:
+    for outcome in allowed.values:
         if isinstance(outcome, Restarted | GaveUp | Seed):
             return outcome
     for status in PREFERENCE:
-        if status in allowed.outcomes:
+        if status in allowed.values:
             return status
     raise AssertionError(f"{step!r} allows nothing")
 

@@ -17,6 +17,7 @@ from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from chryso_testbed.allowed import Allowed
 from chryso_testbed.blkdebug import Expected
 from chryso_testbed.fatlayout import Region
 from chryso_testbed.lifecycles import (
@@ -200,25 +201,12 @@ def trim(program: Program, budget: int) -> Program:
     return tuple(kept(program))
 
 
-@dataclass(frozen=True, slots=True)
-class Expect:
-    """The outcomes a step may have. `anything` admits every outcome."""
-
-    outcomes: frozenset[Outcome] = frozenset()
-    anything: bool = False
-
-    def __contains__(self, outcome: object) -> bool:
-        return self.anything or outcome in self.outcomes
-
-    def __or__(self, other: Expect) -> Expect:
-        return Expect(self.outcomes | other.outcomes, self.anything or other.anything)
+def expect(*outcomes: Outcome) -> Allowed[Outcome]:
+    """The outcomes a step may have, typed as outcomes whatever their kinds."""
+    return Allowed.of(*outcomes)
 
 
-def expect(*outcomes: Outcome) -> Expect:
-    return Expect(frozenset(outcomes))
-
-
-ANYTHING: Final = Expect(anything=True)
+ANYTHING: Final[Allowed[Outcome]] = Allowed.everything()
 CLEAN_DISK: Final = Expected(write_fails=False, reads=frozenset({"ok"}))
 OK, EIO, ERROR = Status.OK, Status.EIO, Status.ERROR
 
@@ -254,7 +242,7 @@ class RootModel:
     def gone(self) -> frozenset[Driver]:
         return frozenset(d for d, chart in self.drivers.items() if chart.at == "gone")
 
-    def expect(self, step: Fault | Restart) -> Expect:
+    def expect(self, step: Fault | Restart) -> Allowed[Outcome]:
         chart = self.chart(step.driver)
         if chart.at == "gone":
             return expect(Status.GONE)
@@ -335,7 +323,7 @@ class StorageModel:
     def suspect(self) -> bool:
         return self.window.at == "dirty"
 
-    def expect(self, step: StorageStep, *, up: bool) -> Expect:
+    def expect(self, step: StorageStep, *, up: bool) -> Allowed[Outcome]:
         """`up` is whether Root still runs the block driver."""
         base = self._unfaulted(step, up=up)
         if self.suspect and isinstance(step, Put | Overwrite | Get | Remove | Rename):
@@ -370,7 +358,7 @@ class StorageModel:
             case _:
                 return base | expect(EIO)
 
-    def _present(self, f: int) -> Expect:
+    def _present(self, f: int) -> Allowed[Outcome]:
         """What locating file `f` on disk may find."""
         if self.damaged:
             return ANYTHING
@@ -395,14 +383,14 @@ class StorageModel:
             case _:
                 return frozenset({True})
 
-    def _writes(self) -> Expect:
+    def _writes(self) -> Allowed[Outcome]:
         """What a write the volume accepts reports under the boot plan. A
         permanent rule fails every write, one-shot rules only some."""
         if not self.disk.write_fails:
             return expect(OK)
         return expect(EIO) if self.disk.reads == {"error"} else expect(OK, EIO)
 
-    def _unfaulted(self, step: StorageStep, *, up: bool) -> Expect:
+    def _unfaulted(self, step: StorageStep, *, up: bool) -> Allowed[Outcome]:
         match step:
             case Put() | Overwrite() | Get() | Remove() | Rename() if not up:
                 return expect(EIO, ERROR)
@@ -580,7 +568,7 @@ class NetModel:
     """The network as the guest sees it. A cut link or a pause is restored
     before the step ends, so nothing outlives a step today."""
 
-    def expect(self, step: NetStep, *, up: bool) -> Expect:
+    def expect(self, step: NetStep, *, up: bool) -> Allowed[Outcome]:
         """`up` is whether Root still runs the NIC driver."""
         match step:
             case Ping():
@@ -633,7 +621,7 @@ class Model:
         """Equal keys mean equal lifecycles and data: the model's identity."""
         return (self.root.key(), self.storage.key(), self.net.key())
 
-    def expect(self, step: Step) -> Expect:
+    def expect(self, step: Step) -> Allowed[Outcome]:
         match step:
             case Fault() | Restart():
                 return self.root.expect(step)

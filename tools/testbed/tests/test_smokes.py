@@ -6,7 +6,8 @@ fails test_the_latent_overwrite_must_succeed."""
 
 from __future__ import annotations
 
-from chryso_testbed.faults import Expect, Model, Program
+from chryso_testbed.allowed import Allowed
+from chryso_testbed.faults import Model, Program, expect
 from chryso_testbed.outcomes import Outcome, Seed, Status
 from chryso_testbed.scenarios.restart import AFTER_RECOVERY, LATENT_OVERWRITE, RENAME, UNLINK
 from chryso_testbed.steer import nominal
@@ -14,7 +15,7 @@ from chryso_testbed.steer import nominal
 BUDGET = 3
 
 
-def expectations(program: Program) -> list[Expect]:
+def expectations(program: Program) -> list[Allowed[Outcome]]:
     """What the model allows at each step, run with its nominal outcomes."""
     model, allowed = Model.start(BUDGET), []
     for step in program:
@@ -23,15 +24,11 @@ def expectations(program: Program) -> list[Expect]:
     return allowed
 
 
-def exactly(*outcomes: Outcome) -> Expect:
-    return Expect(frozenset(outcomes))
-
-
 def test_the_latent_overwrite_must_succeed() -> None:
     _, arm, overwrite, _, get = expectations(LATENT_OVERWRITE)
-    assert arm == exactly(Status.PRESENT)
-    assert overwrite == exactly(Status.OK)
-    assert get == exactly(Seed(6))
+    assert arm == expect(Status.PRESENT)
+    assert overwrite == expect(Status.OK)
+    assert get == expect(Seed(6))
 
 
 def test_the_crash_smokes_start_from_a_held_file() -> None:
@@ -39,8 +36,8 @@ def test_the_crash_smokes_start_from_a_held_file() -> None:
     their crash states straddle a real change."""
     for program in (UNLINK, RENAME):
         put, change = expectations(program)
-        assert put == exactly(Status.OK)
-        assert change == exactly(Status.OK)
+        assert put == expect(Status.OK)
+        assert change == expect(Status.OK)
 
 
 def test_after_recovery_only_the_new_name_holds_the_file() -> None:
@@ -48,6 +45,6 @@ def test_after_recovery_only_the_new_name_holds_the_file() -> None:
     must take a write. A chain both names still shared would read the new
     seed back under the old name, which the model does not allow."""
     put, old, new = expectations(AFTER_RECOVERY)
-    assert put == exactly(Status.OK)
-    assert old == exactly(Status.ENOENT)
-    assert new == exactly(Seed(7))
+    assert put == expect(Status.OK)
+    assert old == expect(Status.ENOENT)
+    assert new == expect(Seed(7))

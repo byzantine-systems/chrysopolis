@@ -48,7 +48,7 @@ def history(
             if request is Fault
             else Restart(kind="restart", driver=driver)
         )
-        (seen,) = model.expect(step).outcomes
+        (seen,) = model.expect(step).values
         child = CHILDREN[driver]
         if seen != Status.GONE and isinstance(step, Fault):
             publish(Kind.CONTROL, child, "fault_inject")
