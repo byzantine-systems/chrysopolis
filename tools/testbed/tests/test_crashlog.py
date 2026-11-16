@@ -20,7 +20,7 @@ import struct
 import subprocess
 import sys
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal, NamedTuple
 
 import pytest
 from hypothesis import HealthCheck, given, settings
@@ -44,18 +44,23 @@ from chryso_testbed.crashlog import (
 SECTOR: Final = 512
 DISK_SECTORS: Final = 64
 
-type Op = tuple[str, int, bytes]  # kind, sector, data (whole sectors)
 
+class Op(NamedTuple):
+    """One logged request: its kind, first sector and data (whole sectors)."""
+
+    kind: Literal["write", "flush", "discard"]
+    sector: int
+    data: bytes
+
+
+FLUSH_OP: Final = Op("flush", 0, b"")
 writes = st.builds(
-    lambda sector, n, byte: ("write", sector, bytes([byte]) * (n * SECTOR)),
+    lambda sector, n, byte: Op("write", sector, bytes([byte]) * (n * SECTOR)),
     st.integers(0, 6),  # a narrow range, so writes overlap and order shows
     st.integers(1, 4),
     st.integers(0, 255),
 )
-ops = st.lists(
-    st.one_of(writes, st.just(("flush", 0, b"")), st.just(("discard", 3, b""))), max_size=24
-)
-FLUSH_OP: Final[Op] = ("flush", 0, b"")
+ops = st.lists(st.one_of(writes, st.just(FLUSH_OP), st.just(Op("discard", 3, b""))), max_size=24)
 
 
 @st.composite
@@ -64,7 +69,7 @@ def busy(draw: st.DrawFn) -> tuple[list[Op], int]:
     for, and that epoch's index."""
     before, after = draw(ops), draw(ops)
     middle = draw(st.lists(writes, min_size=2, max_size=8))
-    epoch = sum(k == "flush" for k, _, _ in before) + 1
+    epoch = sum(op.kind == "flush" for op in before) + 1
     return [*before, FLUSH_OP, *middle, FLUSH_OP, *after], epoch
 
 
@@ -72,10 +77,10 @@ def encode(log_ops: list[Op], *, counted: int | None = None) -> bytes:
     """A log as blklogwrites lays it out. `counted` is the superblock's stale
     nr_entries, which a reader must not trust."""
     body = b""
-    for kind, sector, data in log_ops:
-        flags = {"write": 0, "flush": FLUSH, "discard": DISCARD}[kind]
-        nr = len(data) // SECTOR if kind == "write" else (1 if kind == "discard" else 0)
-        body += struct.pack("<QQQQ", sector, nr, flags, 0).ljust(SECTOR, b"\0") + data
+    for op in log_ops:
+        flags = {"write": 0, "flush": FLUSH, "discard": DISCARD}[op.kind]
+        nr = len(op.data) // SECTOR if op.kind == "write" else (1 if op.kind == "discard" else 0)
+        body += struct.pack("<QQQQ", op.sector, nr, flags, 0).ljust(SECTOR, b"\0") + op.data
     entries = len(log_ops) if counted is None else counted
     return struct.pack("<QQQI", MAGIC, 1, entries, SECTOR).ljust(SECTOR, b"\0") + body
 
@@ -86,9 +91,9 @@ def test_parse_reads_every_entry_whatever_the_superblock_counts(
 ) -> None:
     log = parse(encode(log_ops, counted=counted))
     assert [(e.sector, e.data) for e in log.entries if e.write] == [
-        (s, d) for k, s, d in log_ops if k == "write"
+        (op.sector, op.data) for op in log_ops if op.kind == "write"
     ]
-    assert len(log.flushes) == sum(k == "flush" for k, _, _ in log_ops)
+    assert len(log.flushes) == sum(op.kind == "flush" for op in log_ops)
 
 
 @given(log_ops=ops.filter(bool), cut=st.integers(1, SECTOR * 4))

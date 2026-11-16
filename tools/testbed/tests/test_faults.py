@@ -31,7 +31,7 @@ The pre-split model ran in lockstep with this one before it was deleted.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Final, Literal
 
 from hypothesis import given
@@ -82,7 +82,17 @@ UNIVERSE: Final[tuple[Outcome, ...]] = (
 steps = from_schema(STEP.json_schema()).map(STEP.validate_python)
 programs = st.lists(steps, max_size=12).map(tuple)
 disks = from_schema(PLAN_SCHEMA).map(PLAN.validate_python).map(Expected.of)
-type Trace = list[tuple[Step, Allowed[Outcome], Outcome, Model]]
+
+
+@dataclass(frozen=True, slots=True)
+class Seen:
+    """One step of a simulated run: what the model allowed, what happened,
+    and the model before it."""
+
+    step: Step
+    allowed: Allowed[Outcome]
+    outcome: Outcome
+    before: Model
 
 
 def outcome(allowed: Allowed[Outcome]) -> st.SearchStrategy[Outcome]:
@@ -91,15 +101,15 @@ def outcome(allowed: Allowed[Outcome]) -> st.SearchStrategy[Outcome]:
 
 
 @st.composite
-def runs(draw: st.DrawFn) -> Trace:
+def runs(draw: st.DrawFn) -> list[Seen]:
     """A program, and for each step what was allowed, what happened and the
     model before it."""
     model = Model.start(BUDGET, draw(disks))
-    trace: Trace = []
+    trace: list[Seen] = []
     for step in draw(programs):
         allowed = model.expect(step)
         seen = draw(outcome(allowed))
-        trace.append((step, allowed, seen, model))
+        trace.append(Seen(step, allowed, seen, model))
         model = model.after(step, seen)
     return trace
 
@@ -110,8 +120,8 @@ def states(draw: st.DrawFn) -> Model:
     trace = draw(runs())
     if not trace:
         return Model.start(BUDGET)
-    step, _, seen, before = trace[-1]
-    return before.after(step, seen)
+    last = trace[-1]
+    return last.before.after(last.step, last.outcome)
 
 
 def with_fault(
@@ -186,32 +196,32 @@ def test_steps_of_different_components_commute(
 
 
 @given(trace=runs())
-def test_every_step_allows_something(trace: Trace) -> None:
-    assert all(allowed.anything or allowed.values for _, allowed, _, _ in trace)
+def test_every_step_allows_something(trace: list[Seen]) -> None:
+    assert all(row.allowed.anything or row.allowed.values for row in trace)
 
 
 # --- Root ----------------------------------------------------------------------------
 
 
-def between_resets(trace: Trace) -> list[Trace]:
+def between_resets(trace: list[Seen]) -> list[list[Seen]]:
     """The trace cut at every reset, since Root starts over at each."""
-    stretches: list[Trace] = [[]]
-    for entry in trace:
-        if isinstance(entry[0], Reset | CrashPut):
+    stretches: list[list[Seen]] = [[]]
+    for row in trace:
+        if isinstance(row.step, Reset | CrashPut):
             stretches.append([])
         else:
-            stretches[-1].append(entry)
+            stretches[-1].append(row)
     return stretches
 
 
 @given(trace=runs())
-def test_restarts_count_up_then_give_up_once_then_stay_gone(trace: Trace) -> None:
+def test_restarts_count_up_then_give_up_once_then_stay_gone(trace: list[Seen]) -> None:
     """Per driver, between resets: restarts numbered 1 to the budget, then one
     give-up, then gone. Faults and debug restarts share the count, and each
     takes the path its request names."""
     for stretch in between_resets(trace):
         seen: dict[str, list[Outcome]] = {}
-        for step, _, result, _ in stretch:
+        for step, result in ((row.step, row.outcome) for row in stretch):
             if isinstance(step, Fault | Restart):
                 seen.setdefault(step.driver, []).append(result)
                 if isinstance(result, Restarted):
@@ -355,10 +365,10 @@ def test_a_crashed_write_changes_only_its_file(
 
 
 @given(trace=runs())
-def test_a_file_written_ok_reads_back_until_something_disturbs_it(trace: Trace) -> None:
+def test_a_file_written_ok_reads_back_until_something_disturbs_it(trace: list[Seen]) -> None:
     """With the disk up and settled, no fault armed and nothing left dirty, a read returns
     the last seed written to that file, or enoent if none was."""
-    for step, allowed, _, before in trace:
+    for step, allowed, before in ((row.step, row.allowed, row.before) for row in trace):
         storage = before.storage
         if (
             not isinstance(step, Get)
