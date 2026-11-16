@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from types import MappingProxyType
+from typing import Final, Protocol
 
 from chryso_testbed import crashcheck, crashlog, fatlayout, inject, probes, rootlog
 from chryso_testbed.allowed import Allowed
@@ -551,7 +553,20 @@ LATENT_OVERWRITE: Final[Program] = (
     Disarm(kind="disarm"),
     Get(kind="get", file=1),
 )
-type Held = tuple[crashcheck.Content, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Held:
+    """What each probed fuzz file holds in one crash state."""
+
+    contents: Mapping[int, crashcheck.Content]
+
+    def of(self, file: int) -> crashcheck.Content:
+        return self.contents[file]
+
+    def label(self) -> str:
+        """The files' contents in probe order, as the run report counts them."""
+        return ",".join(map(str, self.contents.values()))
 
 
 def crash_states(
@@ -604,15 +619,20 @@ def crash_states(
             if (e, label) in (first, last) and (code := crashcheck.fsck(image, scratch)) > 1:
                 problems.append(f"epoch {e} {label}: fsck.fat exited {code}")
             found = fatlayout.contents(image)
-            held = tuple(crashcheck.held(found, f) for f in files)
-            seen[",".join(map(str, held))] += 1
+            held = Held(MappingProxyType({f: crashcheck.held(found, f) for f in files}))
+            seen[held.label()] += 1
             if kept is None and keep(held) and (where is None or where(image)):
                 kept = image.rename(scratch / "kept.img")
     image.unlink(missing_ok=True)  # 320 MiB sparse, the last state checked
     return problems, seen, kept
 
 
-type Action = Callable[[Machine], Awaitable[None]]
+class Action(Protocol):
+    """Setup a scenario runs on a machine, outside the model."""
+
+    async def __call__(self, m: Machine, /) -> None: ...
+
+
 # A 4 KiB directory sector holds 128 entries, so this many more take the rest
 # of a file's sector and push a rename's new entry into another one.
 PAD: Final = 128
@@ -694,7 +714,7 @@ async def rewrite_crash(ctx: Context) -> None:
     )
     problems, seen, torn = await asyncio.to_thread(
         crash_states, log, spans, ctx.settings.disk, ctx.workdir,
-        target=1, files=(1,), keep=lambda held: held != (6,),
+        target=1, files=(1,), keep=lambda held: held.of(1) != 6,
     )  # fmt: skip
     if problems:
         raise AssertionError(f"crash states of a rewrite: {problems}")
@@ -712,7 +732,7 @@ async def unlink_crash(ctx: Context) -> None:
     log, spans = await logged_run(ctx, UNLINK)
     problems, seen, kept = await asyncio.to_thread(
         crash_states, log, spans, ctx.settings.disk, ctx.workdir,
-        target=1, files=(1,), keep=lambda held: held == (5,),
+        target=1, files=(1,), keep=lambda held: held.of(1) == 5,
     )  # fmt: skip
     if problems:
         raise AssertionError(f"crash states of a remove: {problems}")
@@ -739,7 +759,7 @@ async def rename_crash(ctx: Context) -> None:
     log, spans = await logged_run(ctx, RENAME[:1], pad_directory, RENAME[1:])
     problems, seen, kept = await asyncio.to_thread(
         crash_states, log, spans, ctx.settings.disk, ctx.workdir,
-        target=1, files=(1, 2), keep=lambda held: held == (5, 5),
+        target=1, files=(1, 2), keep=lambda held: held.of(1) == held.of(2) == 5,
         after=crashcheck.judge_after_mount,
     )  # fmt: skip
     if problems:
@@ -824,7 +844,7 @@ def growth_states(
     sectors = frozenset(range(at.start // log.sectorsize, at.stop // log.sectorsize))
 
     def unregistered(held: Held) -> bool:
-        return put and held[0] == "absent"
+        return put and held.of(1) == "absent"
 
     def linked(image: Path) -> bool:
         return cluster in fatlayout.root(image).clusters
