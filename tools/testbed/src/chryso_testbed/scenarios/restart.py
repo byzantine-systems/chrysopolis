@@ -563,12 +563,15 @@ def crash_states(
     files: tuple[int, ...],
     keep: Callable[[Held], bool],
     after: Callable[[Path], tuple[str, ...]] | None = None,
+    lose: frozenset[int] = frozenset(),
+    where: Callable[[Path], bool] | None = None,
 ) -> tuple[list[str], Counter[str], Path | None]:
     """Judge every crash state step `target` crosses: each epoch's boundary plus
     CUTS_PER_EPOCH subsets, with fsck on the first and last. `after`, when
-    given, also judges what a mount would leave of each state. Returns
-    problems, what `files` held in each state, and the first image `keep`
-    picks."""
+    given, also judges what a mount would leave of each state. `lose`, when
+    given, adds to each epoch the state that loses exactly its writes to those
+    log sectors (`crashlog.avoiding`). Returns problems, what `files` held in
+    each state, and the first image `keep` picks, and `where` too if given."""
     step = spans[target]
 
     def crosses(e: int) -> bool:
@@ -580,9 +583,12 @@ def crash_states(
     seen: Counter[str] = Counter()
     kept: Path | None = None
     image = scratch / "state.img"
+    first, last = (epochs[0], "seed 0"), (epochs[-1], f"seed {CUTS_PER_EPOCH}")
     for e in epochs:
-        for seed in range(CUTS_PER_EPOCH + 1):
-            part = crashlog.persisted(log, e, seed)
+        cuts = [(f"seed {s}", crashlog.persisted(log, e, s)) for s in range(CUTS_PER_EPOCH + 1)]
+        if lose:
+            cuts.append(("avoiding", crashlog.avoiding(log, e, lose)))
+        for label, part in cuts:
             crashlog.replay(log, base, image, crashlog.state(log, e, part))
             stable, crash = crashlog.stable(log, e), crashlog.crashed_at(log, e, part)
             verdict = crashcheck.judge(
@@ -590,17 +596,16 @@ def crash_states(
                 crashcheck.allowed(spans, stable, crash),
                 cut=crashcheck.moves(spans, stable, crash),
             )
-            problems += [f"epoch {e} seed {seed}: {p}" for p in verdict.problems]
+            problems += [f"epoch {e} {label}: {p}" for p in verdict.problems]
             if after is not None:
-                problems += [f"epoch {e} seed {seed}: {p}" for p in after(image)]
-            ends = {(epochs[0], 0), (epochs[-1], CUTS_PER_EPOCH)}
+                problems += [f"epoch {e} {label}: {p}" for p in after(image)]
             # fsck exit 1 reports lost clusters, which a crash may leave.
-            if (e, seed) in ends and (code := crashcheck.fsck(image, scratch)) > 1:
-                problems.append(f"epoch {e} seed {seed}: fsck.fat exited {code}")
+            if (e, label) in (first, last) and (code := crashcheck.fsck(image, scratch)) > 1:
+                problems.append(f"epoch {e} {label}: fsck.fat exited {code}")
             found = fatlayout.contents(image)
             held = tuple(crashcheck.held(found, f) for f in files)
             seen[",".join(map(str, held))] += 1
-            if kept is None and keep(held):
+            if kept is None and keep(held) and (where is None or where(image)):
                 kept = image.rename(scratch / "kept.img")
     image.unlink(missing_ok=True)  # 320 MiB sparse, the last state checked
     return problems, seen, kept
@@ -612,13 +617,15 @@ type Action = Callable[[Machine], Awaitable[None]]
 PAD: Final = 128
 
 
-async def logged_run(ctx: Context, *parts: Program | Action) -> tuple[crashlog.Log, list[Span]]:
-    """Run `parts` in order on a fresh disk with the write log on. A program
-    is judged step by step by the model and gives each step its span of the
-    log. An action is setup the model does not track: it gets no span, and
-    the next span starts after it."""
+async def logged_run(
+    ctx: Context, *parts: Program | Action, disk: Path | None = None
+) -> tuple[crashlog.Log, list[Span]]:
+    """Run `parts` in order on a fresh disk, or on a copy of `disk`, with the
+    write log on. A program is judged step by step by the model and gives
+    each step its span of the log. An action is setup the model does not
+    track: it gets no span, and the next span starts after it."""
     spans: list[Span] = []
-    async with ctx.boot("test-image", crashlog=True) as m:
+    async with ctx.boot("test-image", crashlog=True, disk=disk) as m:
         await ready(ctx, m)
         async with ctx.step("run and log"), asyncio.timeout(600):
             start, model = 0, Model.start(ctx.abi.driver_budget)
@@ -752,6 +759,130 @@ async def rename_crash(ctx: Context) -> None:
 
     await read_back(ctx, kept, (1, 2), mounted=True, then=rewrite_new_name)
     ctx.record("rename-crash-smoke", contents=dict(seen), entries=len(log.entries), recovered=True)
+
+
+def padding(tag: str, start: int, count: int) -> Action:
+    """Create `count` empty root files from `pad<start>.bin` on."""
+
+    async def pad(m: Machine) -> None:
+        call = f"chryso_fs:pad({tag}, {start}, {count})."
+        hit = await probes.call(m, call, rf"FS_PAD_{tag.upper()}\|(\S+)")
+        if hit.groups[0] != "ok":
+            raise m.console.fail(f"padding the root directory: {hit.groups[0]}")
+
+    return pad
+
+
+# Both growths and the put's data between them, with room to spare.
+DIRTIED: Final = 40
+
+
+def written_by(log: crashlog.Log, offset: int) -> frozenset[int]:
+    """Every write logged before `offset`: the disk as the guest saw it then."""
+    return frozenset(i for i, e in enumerate(log.entries) if e.write and e.end <= offset)
+
+
+def growth_states(
+    log: crashlog.Log,
+    spans: list[Span],
+    base: Path,
+    scratch: Path,
+    *,
+    target: int,
+    dirty: frozenset[int],
+    lost: frozenset[int],
+) -> tuple[int, list[str], Counter[str], Path | None]:
+    """Judge the crash states of step `target`, which must add one dirtied
+    cluster to the root, and return that cluster with `crash_states`'s
+    results. Each state is also mounted, and must keep every cluster owned,
+    free or bad, except the new one and, for a put, its own data chain, which
+    it allocates before its entry reaches the disk. `lost` is what the disk
+    lost before the run. The state kept for a put is one with the link and
+    no entry."""
+    span = spans[target]
+    before = crashlog.replay(log, base, scratch / "before.img", written_by(log, span.start))
+    was = set(fatlayout.root(before).clusters)
+    before.unlink()
+    after = crashlog.replay(log, base, scratch / "after.img", written_by(log, span.end))
+    grown = set(fatlayout.root(after).clusters) - was
+    if len(grown) != 1 or not grown <= dirty:
+        raise AssertionError(
+            f"{span.step.kind} grew the root by {grown}, not one of {sorted(dirty)}"
+        )
+    (cluster,) = grown
+    match span.step:
+        case Put(file=file):
+            name = fatlayout.short_name(f"fuzz{file}.bin")
+            put, own = True, fatlayout.chains(after).get(name) or ()
+        case _:
+            put, own = False, ()
+    after.unlink()
+    may_leak = frozenset({cluster, *own})
+    at = fatlayout.cluster_bytes(base, cluster)
+    sectors = frozenset(range(at.start // log.sectorsize, at.stop // log.sectorsize))
+
+    def unregistered(held: Held) -> bool:
+        return put and held[0] == "absent"
+
+    def linked(image: Path) -> bool:
+        return cluster in fatlayout.root(image).clusters
+
+    def mounted_and_conserved(image: Path) -> tuple[str, ...]:
+        problems = crashcheck.judge_after_mount(image)
+        if extra := fatlayout.accounting(image).unowned - lost - may_leak:
+            problems += (f"clusters {sorted(extra)} lost outside the step in flight",)
+        return problems
+
+    problems, seen, kept = crash_states(
+        log, spans, base, scratch, target=target, files=(1, 2, fatlayout.GHOST_FILE),
+        keep=unregistered, where=linked, lose=sectors, after=mounted_and_conserved,
+    )  # fmt: skip
+    return cluster, problems, seen, kept
+
+
+@registry.scenario("dirgrow-crash-smoke", group=GROUP, timeout=1800)
+async def dirgrow_crash(ctx: Context) -> None:
+    """A crash while a create or a rename grows the root shows the names before
+    or after, never a leftover one: the fork zeroes and flushes the new
+    cluster before it links it. The store disk's free clusters are all zero,
+    which would hide a link made first, so the run starts on a copy whose
+    next free clusters hold a directory sector naming GHOST.
+
+    Each growth is judged in every crash state, plus the one that keeps
+    exactly the writes outside the new cluster (the link, not the zeros or
+    the entry), as `growth_states` says. One state of the put with the link
+    and no entry is booted, and the guest must not see GHOST. The program is
+    RENAME, which tests/test_smokes.py holds to the model."""
+    ctx.workdir.mkdir(parents=True, exist_ok=True)  # a boot makes it, and none has run yet
+    disk = ctx.workdir / "dirty.img"
+    await asyncio.to_thread(crashlog.sparse_copy, ctx.settings.disk, disk)
+    dirty = await asyncio.to_thread(fatlayout.dirty_free_clusters, disk, DIRTIED)
+    free = (await asyncio.to_thread(fatlayout.root, disk)).free_slots()
+    lost = (await asyncio.to_thread(fatlayout.accounting, disk)).unowned
+    # The fill takes the root's last slot, so the put grows it. The refill
+    # takes the new cluster's other slots, so the rename grows it again.
+    log, spans = await logged_run(
+        ctx, padding("fill", 0, free), RENAME[:1], padding("refill", free, PAD - 1),
+        RENAME[1:], disk=disk,
+    )  # fmt: skip
+    problems: list[str] = []
+    contents: dict[str, dict[str, int]] = {}
+    grew: list[int] = []
+    kept: Path | None = None
+    for target in (0, 1):
+        cluster, found, seen, picked = await asyncio.to_thread(
+            growth_states, log, spans, disk, ctx.workdir, target=target, dirty=dirty, lost=lost
+        )
+        grew.append(cluster)
+        problems += [f"{spans[target].step.kind}: {p}" for p in found]
+        contents[spans[target].step.kind] = dict(seen)
+        kept = kept or picked
+    if problems:
+        raise AssertionError(f"crash states of a directory growth: {problems}")
+    if kept is None:
+        raise AssertionError(f"no crash state kept the link without the entry: {contents}")
+    await read_back(ctx, kept, (1, fatlayout.GHOST_FILE))
+    ctx.record("dirgrow-crash-smoke", contents=contents, grew=grew, entries=len(log.entries))
 
 
 @registry.scenario("latent-overwrite-smoke", group=GROUP, timeout=900)

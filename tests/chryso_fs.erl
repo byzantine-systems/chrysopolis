@@ -32,7 +32,8 @@ reporting after the device they probe is gone.
     get/2,
     remove/2,
     rename/3,
-    pad/2
+    pad/2,
+    pad/3
 ]).
 
 -doc """
@@ -272,7 +273,15 @@ sector. Reports `FS_PAD_<TAG>|ok` or the first `{error, Reason}`.
 """.
 -spec pad(atom(), non_neg_integer()) -> ok.
 pad(Tag, N) ->
-    chryso_test:emit("FS_PAD_" ++ chryso_test:tag(Tag), pad_from(0, N)).
+    pad(Tag, 0, N).
+
+-doc """
+dirgrow-crash-smoke: as `pad/2`, naming the files `pad<From>.bin` onwards, so
+a second pad on the same volume makes new entries.
+""".
+-spec pad(atom(), non_neg_integer(), non_neg_integer()) -> ok.
+pad(Tag, From, N) ->
+    chryso_test:emit("FS_PAD_" ++ chryso_test:tag(Tag), pad_from(From, From + N)).
 
 -spec pad_from(non_neg_integer(), non_neg_integer()) -> ok | {error, term()}.
 pad_from(N, N) ->
