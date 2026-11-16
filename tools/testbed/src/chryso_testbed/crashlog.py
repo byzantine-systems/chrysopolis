@@ -14,6 +14,8 @@ from functools import cached_property
 from pathlib import Path
 from typing import Final
 
+from chryso_testbed.disk import Disk, Overlay
+
 MAGIC: Final = 0x6A736677736872
 VERSION: Final = 1
 FLUSH: Final = 1 << 0
@@ -154,6 +156,13 @@ def sparse_copy(base: Path, out: Path, chunk_size: int = CHUNK) -> None:
             else:
                 dst.write(chunk)
         dst.truncate()
+
+
+def overlay(log: Log, base: Disk, keep: frozenset[int]) -> Overlay:
+    """`base` with the kept writes applied in log order, in memory: what
+    `replay` writes to a file, without copying the image."""
+    writes = ((log.entries[i].sector * log.sectorsize, log.entries[i].data) for i in sorted(keep))
+    return Overlay.of(base, log.sectorsize, writes)
 
 
 def replay(log: Log, base: Path, out: Path, keep: frozenset[int]) -> Path:

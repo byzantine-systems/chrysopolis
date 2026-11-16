@@ -11,6 +11,7 @@ Planted defects caught:
 | persisted seeds from hash() | test_a_crash_subset_replays_in_another_process |
 | sparse_copy drops a trailing zero run | test_a_sparse_copy_equals_its_source |
 | avoiding compares only a write's first sector | test_avoiding_drops_exactly_the_writes_to_... |
+| overlay applies the newest write first | test_an_overlay_reads_what_a_replay_writes |
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from chryso_testbed.crashlog import (
     Log,
     avoiding,
     crashed_at,
+    overlay,
     parse,
     persisted,
     replay,
@@ -40,6 +42,7 @@ from chryso_testbed.crashlog import (
     stable,
     state,
 )
+from chryso_testbed.disk import FileDisk
 
 SECTOR: Final = 512
 DISK_SECTORS: Final = 64
@@ -266,6 +269,23 @@ def test_replay_applies_exactly_the_kept_writes(
     (tmp_path / "base.img").write_bytes(disk)
     out = replay(log, tmp_path / "base.img", tmp_path / "crash.img", keep)
     assert out.read_bytes() == reference(log, keep, disk)
+
+
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(log_ops=ops, base=st.binary(min_size=SECTOR, max_size=SECTOR), data=st.data())
+def test_an_overlay_reads_what_a_replay_writes(
+    tmp_path: Path, log_ops: list[Op], base: bytes, data: st.DataObject
+) -> None:
+    """The in-memory crash state equals the replayed file, byte for byte."""
+    log = parse(encode(log_ops))
+    epoch = data.draw(st.integers(0, len(log.epochs) - 1))
+    keep = state(log, epoch, data.draw(st.sets(st.sampled_from(log.epochs[epoch] or (0,)))))
+    disk = base * DISK_SECTORS
+    (tmp_path / "base.img").write_bytes(disk)
+    out = replay(log, tmp_path / "base.img", tmp_path / "crash.img", keep)
+    assert (
+        overlay(log, FileDisk(tmp_path / "base.img"), keep).read(0, len(disk)) == out.read_bytes()
+    )
 
 
 @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
