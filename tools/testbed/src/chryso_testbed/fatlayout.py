@@ -1,19 +1,24 @@
 """Where a FAT32 file keeps its data, FAT entry and directory entry, in disk
-sectors, for IRON-style targeted faults. pyfatfs parses the volume.
+sectors, for IRON-style targeted faults, and what a crash image holds.
+
+The volume is parsed here from the boot sector, the FAT and the directory
+entries, read through a `Disk`: an image on file or a crash state built in
+memory. A reader asks only for the sectors it needs, so judging a crash
+state never reads the whole image. tests/test_fatlayout.py holds the parser
+to mtools and, as a differential, to pyfatfs.
 """
 
 from __future__ import annotations
 
-import contextlib
 import struct
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, Literal
+from typing import Final, Literal
 
-from pyfatfs.PyFat import PyFat
-
+from chryso_testbed.disk import Disk, FileDisk
 from chryso_testbed.renaming import Record
 
 SECTOR: Final = 512
@@ -79,26 +84,127 @@ class Layout:
                 return extent.entry
 
 
-@contextlib.contextmanager
-def _volume(image: Path) -> Iterator[tuple[Any, Any, bytes, int]]:
-    """The open FAT32 volume, its root directory, the raw image and the
-    partition's byte offset."""
-    raw = image.read_bytes()
-    start = partition_start(raw[:SECTOR])
-    with contextlib.closing(PyFat(offset=start)) as volume:
-        volume.open(str(image), read_only=True)
-        if volume.fat_type != PyFat.FAT_TYPE_FAT32:
-            raise ValueError(f"{image}: FAT{volume.fat_type}, expected FAT32")
-        if (root := volume.root_dir) is None:
-            raise ValueError(f"{image}: no root directory")
-        yield volume, root, raw, start
+# Boot sector fields past the two above (FAT32 layout).
+BPB_SEC_PER_CLUS: Final = 0x0D
+BPB_NUM_FATS: Final = 0x10
+BPB_ROOT_ENT_CNT: Final = 0x11
+BPB_FAT_SZ16: Final = 0x16
+BPB_TOT_SEC32: Final = 0x20
+BPB_FAT_SZ32: Final = 0x24
+BPB_ROOT_CLUS: Final = 0x2C
+MIN_FAT32_CLUSTERS: Final = 65525  # fewer makes the volume FAT12 or FAT16
 
 
-def layout(image: Path) -> Layout:
+@dataclass(frozen=True)
+class _Volume:
+    """A FAT32 volume on `disk`: its partition's byte offset and the boot
+    sector fields every reader needs."""
+
+    disk: Disk
+    start: int
+    sector: int
+    per_cluster: int  # sectors
+    reserved: int
+    fats: int
+    fat_sectors: int
+    root_cluster: int
+    total_sectors: int
+
+    @classmethod
+    def open(cls, image: Path | Disk) -> _Volume:
+        disk = FileDisk(image) if isinstance(image, Path) else image
+        start = partition_start(disk.read(0, SECTOR))
+        boot = disk.read(start, SECTOR)
+        if len(boot) < SECTOR:
+            raise ValueError("no boot sector")
+        sector, per_cluster, reserved, fats = struct.unpack_from("<HBHB", boot, BPB_BYTS_PER_SEC)
+        (root_entries,) = struct.unpack_from("<H", boot, BPB_ROOT_ENT_CNT)
+        (fat16,) = struct.unpack_from("<H", boot, BPB_FAT_SZ16)
+        (total,) = struct.unpack_from("<I", boot, BPB_TOT_SEC32)
+        (fat32,) = struct.unpack_from("<I", boot, BPB_FAT_SZ32)
+        (root,) = struct.unpack_from("<I", boot, BPB_ROOT_CLUS)
+        if sector not in (512, 1024, 2048, 4096) or per_cluster == 0 or fats == 0:
+            raise ValueError(f"not a FAT boot sector: {sector}-byte sectors, {fats} FATs")
+        volume = cls(disk, start, sector, per_cluster, reserved, fats, fat32, root, total)
+        if root_entries or fat16 or not fat32 or volume.clusters < MIN_FAT32_CLUSTERS:
+            raise ValueError(f"not FAT32: {volume.clusters} clusters")
+        return volume
+
+    @property
+    def cluster_size(self) -> int:
+        return self.per_cluster * self.sector
+
+    @property
+    def data_start(self) -> int:
+        """The first data sector's byte offset on the disk."""
+        return self.start + (self.reserved + self.fats * self.fat_sectors) * self.sector
+
+    @property
+    def clusters(self) -> int:
+        """The data clusters the boot sector counts."""
+        data = self.total_sectors - self.reserved - self.fats * self.fat_sectors
+        return data // self.per_cluster
+
+    def fat_copy(self, k: int) -> bytes:
+        at = self.start + (self.reserved + k * self.fat_sectors) * self.sector
+        return self.disk.read(at, self.fat_sectors * self.sector)
+
+    @cached_property
+    def fat(self) -> _Fat:
+        """The first FAT copy, the one FatFs reads."""
+        table = self.fat_copy(0)
+        return _Fat(
+            memoryview(table), min(self.clusters + FIRST_CLUSTER, len(table) // FAT32_ENTRY)
+        )
+
+    def cluster_at(self, c: int) -> int:
+        """Cluster `c`'s byte offset on the disk."""
+        return self.data_start + (c - FIRST_CLUSTER) * self.cluster_size
+
+    def cluster(self, c: int) -> bytes:
+        return self.disk.read(self.cluster_at(c), self.cluster_size)
+
+    def entries(self, chain: tuple[int, ...]) -> Iterator[tuple[int, bytes]]:
+        """A directory's entries in order, each with its byte offset on the
+        disk, up to the first never-used one."""
+        for c in chain:
+            raw, at = self.cluster(c), self.cluster_at(c)
+            for k in range(0, len(raw) - ENTRY + 1, ENTRY):
+                if raw[k] == 0:
+                    return
+                yield at + k, raw[k : k + ENTRY]
+
+    def files(self) -> Iterator[tuple[int, bytes]]:
+        """The root directory's live short entries that name files, not
+        directories, long names or the volume label."""
+        chain = _chain(self.fat, self.root_cluster)
+        if not chain.whole:
+            raise ValueError("the root directory's chain is broken")
+        for at, entry in self.entries(chain.clusters):
+            attr = entry[11]
+            # A long name entry's attribute (0x0F) has the label bit too, so
+            # the mask below would drop it anyway. The test says so outright.
+            if entry[0] == DELETED or attr & 0x3F == LONG_NAME:
+                continue
+            if not attr & (ATTR_VOLUME_ID | ATTR_DIRECTORY):
+                yield at, entry
+
+
+def layout(image: Path | Disk) -> Layout:
     """Read a FAT32 disk image's layout. Only FAT32 is read, because that is
     what `packages.disk` formats."""
-    with _volume(image) as (volume, root, raw, start):
-        return Layout(MappingProxyType(dict(_extents(volume, root, raw, start))))
+    v = _Volume.open(image)
+    fat_start = v.start + v.reserved * v.sector
+    files: dict[bytes, Extent] = {}
+    for at, entry in v.files():
+        if (cluster := entry_cluster(entry)) < FIRST_CLUSTER:
+            continue
+        files[entry[:11]] = Extent(
+            data=v.cluster_at(cluster) // SECTOR,
+            fat=(fat_start + cluster * FAT32_ENTRY) // SECTOR,
+            entry=at // SECTOR,
+        )
+    return Layout(MappingProxyType(files))
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,36 +222,34 @@ class Chain:
         return self.clusters if self.whole else ()
 
 
-def survey(image: Path) -> tuple[Mapping[bytes, bytes | None], Mapping[bytes, Chain]]:
-    """Each root-level file's bytes and cluster chain, keyed by 8.3 name, in
-    one read of the image. The bytes are None where the chain is broken, as a
-    crash can leave an entry on clusters already freed."""
-    with _volume(image) as (volume, root, raw, start):
-        view, size = memoryview(raw), volume.bytes_per_cluster
-        fat = _fat(volume, raw, start)
-
-        def cluster(c: int) -> memoryview:
-            at = start + volume.get_data_cluster_address(c)
-            return view[at : at + size]  # a view: the join below is the one copy
-
-        _, files, _ = root.get_entries()
-        found: dict[bytes, bytes | None] = {}
-        links: dict[bytes, Chain] = {}
-        for entry in files:
-            name = short_name(entry.get_short_name())
-            links[name] = chain = _chain(fat, entry.get_cluster())
-            found[name] = (
-                b"".join(map(cluster, chain.clusters))[: entry.filesize] if chain.whole else None
-            )
-        return MappingProxyType(found), MappingProxyType(links)
+def survey(image: Path | Disk) -> tuple[Mapping[bytes, bytes | None], Mapping[bytes, Chain]]:
+    """Each root-level file's bytes and cluster chain, keyed by 8.3 name. The
+    bytes are None where the chain is broken, as a crash can leave an entry on
+    clusters already freed."""
+    v = _Volume.open(image)
+    found: dict[bytes, bytes | None] = {}
+    links: dict[bytes, Chain] = {}
+    for _, entry in v.files():
+        name = entry[:11]
+        links[name] = chain = _chain(v.fat, entry_cluster(entry))
+        (size,) = struct.unpack_from("<I", entry, 28)
+        found[name] = b"".join(map(v.cluster, chain.clusters))[:size] if chain.whole else None
+    return MappingProxyType(found), MappingProxyType(links)
 
 
-def contents(image: Path) -> Mapping[bytes, bytes | None]:
+def fats_differ(image: Path | Disk) -> bool:
+    """Whether any FAT copy differs from the first. packages.disk has one."""
+    v = _Volume.open(image)
+    first = v.fat_copy(0)
+    return any(v.fat_copy(k) != first for k in range(1, v.fats))
+
+
+def contents(image: Path | Disk) -> Mapping[bytes, bytes | None]:
     """Each root-level file's bytes, or None where its chain is broken."""
     return survey(image)[0]
 
 
-def chains(image: Path) -> Mapping[bytes, Chain]:
+def chains(image: Path | Disk) -> Mapping[bytes, Chain]:
     """Each root-level file's cluster chain."""
     return survey(image)[1]
 
@@ -168,19 +272,15 @@ class Root:
         return sum(raw[at] in (0, DELETED) for at in range(0, len(raw), ENTRY))
 
 
-def root(image: Path) -> Root:
-    with _volume(image) as (volume, _, raw, start):
-        bpb = volume.bpb_header
-        size, first = bpb["BPB_BytsPerSec"], bpb["BPB_RootClus"]
-        record_at = start + (bpb["BPB_RsvdSecCnt"] - 1) * size
-        chain = _chain(_fat(volume, raw, start), first).owned
-        sectors: list[bytes] = []
-        for cluster in chain:
-            at = start + volume.get_data_cluster_address(cluster)
-            sectors += [
-                raw[at + k : at + k + size] for k in range(0, volume.bytes_per_cluster, size)
-            ]
-        return Root(first, size, tuple(sectors), raw[record_at : record_at + size], chain)
+def root(image: Path | Disk) -> Root:
+    v = _Volume.open(image)
+    record = v.disk.read(v.start + (v.reserved - 1) * v.sector, v.sector)
+    chain = _chain(v.fat, v.root_cluster).owned
+    sectors: list[bytes] = []
+    for cluster in chain:
+        raw = v.cluster(cluster)
+        sectors += [raw[k : k + v.sector] for k in range(0, v.cluster_size, v.sector)]
+    return Root(v.root_cluster, v.sector, tuple(sectors), record, chain)
 
 
 # A fuzz name, so the probes and `crashcheck.held` read it with nothing new.
@@ -200,23 +300,22 @@ def dirty_free_clusters(image: Path, count: int) -> frozenset[int]:
     free cluster, which the FAT does not hold. File data landing on these
     clusters overwrites them whole, so only a directory can expose them.
     Allocation starts after FSInfo's next-free hint, so the search does too."""
-    with _volume(image) as (volume, _, raw, start):
-        fat = _fat(volume, raw, start)
-        size = volume.bpb_header["BPB_BytsPerSec"]
-        (fsinfo,) = struct.unpack_from("<H", raw, start + BPB_FS_INFO)
-        (hint,) = struct.unpack_from("<I", raw, start + fsinfo * size + FSI_NXT_FREE)
-        first = hint + 1 if FIRST_CLUSTER <= hint < fat.entries else FIRST_CLUSTER
+    v = _Volume.open(image)
+    fat, size = v.fat, v.sector
+    (fsinfo,) = struct.unpack_from("<H", v.disk.read(v.start + BPB_FS_INFO, 2))
+    (hint,) = struct.unpack_from("<I", v.disk.read(v.start + fsinfo * size + FSI_NXT_FREE, 4))
+    first = hint + 1 if FIRST_CLUSTER <= hint < fat.entries else FIRST_CLUSTER
 
-        def free(c: int) -> bool:
-            (link,) = struct.unpack_from("<I", fat.table, c * FAT32_ENTRY)
-            return int(link) & ENTRY_MASK == 0
+    def free(c: int) -> bool:
+        (link,) = struct.unpack_from("<I", fat.table, c * FAT32_ENTRY)
+        return int(link) & ENTRY_MASK == 0
 
-        candidates = [c for c in range(first, fat.entries) if free(c)]
-        ghost_at = next(c for c in reversed(range(fat.entries)) if free(c))
-        dirty = candidates[:count]
-        if len(dirty) < count or ghost_at in dirty:
-            raise ValueError(f"{image}: not {count} free clusters to dirty")
-        at = {c: start + volume.get_data_cluster_address(c) for c in dirty}
+    candidates = [c for c in range(first, fat.entries) if free(c)]
+    ghost_at = next(c for c in reversed(range(fat.entries)) if free(c))
+    dirty = candidates[:count]
+    if len(dirty) < count or ghost_at in dirty:
+        raise ValueError(f"{image}: not {count} free clusters to dirty")
+    at = {c: v.cluster_at(c) for c in dirty}
     entry = bytearray(ENTRY)
     entry[:11] = GHOST
     entry[11] = 0x20  # archive
@@ -248,54 +347,43 @@ class Accounting:
     unowned: frozenset[int]
 
 
-def accounting(image: Path) -> Accounting:
+def accounting(image: Path | Disk) -> Accounting:
     """Classify every cluster. The walk covers the whole tree, since the store
     disk keeps OTP under subdirectories, and reads directories itself with a
     guard, since a crash can leave a directory chain that loops. A broken
     chain owns nothing: `judge` reports it."""
-    with _volume(image) as (volume, _, raw, start):
-        fat = _fat(volume, raw, start)
-
-        def link(c: int) -> int:
-            (value,) = struct.unpack_from("<I", fat.table, c * FAT32_ENTRY)
-            return int(value) & ENTRY_MASK
-
-        def directory(chain: tuple[int, ...]) -> Iterator[bytes]:
-            for c in chain:
-                at = start + volume.get_data_cluster_address(c)
-                for k in range(at, at + volume.bytes_per_cluster, ENTRY):
-                    if raw[k] == 0:
-                        return  # past the last entry
-                    yield raw[k : k + ENTRY]
-
-        owned: set[int] = set()
-        pending = [volume.bpb_header["BPB_RootClus"]]
-        while pending:
-            chain = _chain(fat, pending.pop()).owned
-            if owned.intersection(chain):
-                continue  # a directory reached twice
-            owned.update(chain)
-            for entry in directory(chain):
-                attr = entry[11]
-                if entry[0] == DELETED or attr & 0x3F == LONG_NAME or attr & ATTR_VOLUME_ID:
-                    continue
-                if attr & ATTR_DIRECTORY:
-                    if entry[0] != ord("."):  # "." and ".." point back up
-                        pending.append(entry_cluster(entry))
-                else:
-                    owned.update(_chain(fat, entry_cluster(entry)).owned)
-        every = range(FIRST_CLUSTER, fat.entries)
-        free = frozenset(c for c in every if link(c) == 0)
-        bad = frozenset(c for c in every if link(c) == BAD_CLUSTER)
-        held = frozenset(owned)
-        return Accounting(held, free, bad, frozenset(every) - held - free - bad)
+    v = _Volume.open(image)
+    fat = v.fat
+    links = [
+        e & ENTRY_MASK for (e,) in struct.iter_unpack("<I", fat.table[: fat.entries * FAT32_ENTRY])
+    ]
+    owned: set[int] = set()
+    pending = [v.root_cluster]
+    while pending:
+        chain = _chain(fat, pending.pop()).owned
+        if owned.intersection(chain):
+            continue  # a directory reached twice
+        owned.update(chain)
+        for _, entry in v.entries(chain):
+            attr = entry[11]
+            if entry[0] == DELETED or attr & 0x3F == LONG_NAME or attr & ATTR_VOLUME_ID:
+                continue
+            if attr & ATTR_DIRECTORY:
+                if entry[0] != ord("."):  # "." and ".." point back up
+                    pending.append(entry_cluster(entry))
+            else:
+                owned.update(_chain(fat, entry_cluster(entry)).owned)
+    every = range(FIRST_CLUSTER, fat.entries)
+    free = frozenset(c for c in every if links[c] == 0)
+    bad = frozenset(c for c in every if links[c] == BAD_CLUSTER)
+    held = frozenset(owned)
+    return Accounting(held, free, bad, frozenset(every) - held - free - bad)
 
 
-def cluster_bytes(image: Path, cluster: int) -> range:
+def cluster_bytes(image: Path | Disk, cluster: int) -> range:
     """The image's byte offsets that hold `cluster`."""
-    with _volume(image) as (volume, _, _, start):
-        at = start + volume.get_data_cluster_address(cluster)
-        return range(at, at + volume.bytes_per_cluster)
+    v = _Volume.open(image)
+    return range(v.cluster_at(cluster), v.cluster_at(cluster) + v.cluster_size)
 
 
 def entry_cluster(raw: bytes) -> int:
@@ -318,7 +406,7 @@ def sfn_checksum(sfn: bytes) -> int:
     return total
 
 
-def intent_for(image: Path, src: str) -> Record:
+def intent_for(image: Path | Disk, src: str) -> Record:
     """The record the fork's f_rename writes to rename root file `src` within
     the root, derived from the image alone, never from the fork's own bytes,
     so comparing the two checks the C encoder.
@@ -377,21 +465,9 @@ class _Fat:
     entries: int
 
 
-def _fat(volume: Any, raw: bytes, start: int) -> _Fat:
-    bpb = volume.bpb_header
-    per_sector = bpb["BPB_BytsPerSec"]
-    at = start + bpb["BPB_RsvdSecCnt"] * per_sector
-    table = memoryview(raw)[at : at + bpb["BPB_FATSz32"] * per_sector]
-    data_sectors = (
-        bpb["BPB_TotSec32"] - (at - start) // per_sector - (bpb["BPB_NumFATs"] * bpb["BPB_FATSz32"])
-    )
-    clusters = data_sectors // bpb["BPB_SecPerClus"] + FIRST_CLUSTER
-    return _Fat(table, min(clusters, len(table) // FAT32_ENTRY))
-
-
 def _chain(fat: _Fat, first: int) -> Chain:
-    """The clusters from `first` to the end mark. pyfatfs's own walk has no
-    loop guard, and a crash can leave a cyclic FAT."""
+    """The clusters from `first` to the end mark, with a loop guard, since a
+    crash can leave a cyclic FAT."""
     if first < FIRST_CLUSTER:
         return Chain((), whole=True)  # an empty file has no cluster
     chain: list[int] = []
@@ -405,50 +481,3 @@ def _chain(fat: _Fat, first: int) -> Chain:
         (link,) = struct.unpack_from("<I", fat.table, link * FAT32_ENTRY)
         link &= ENTRY_MASK
     return Chain(tuple(chain), whole=True)
-
-
-def _extents(volume: Any, root: Any, raw: bytes, start: int) -> list[tuple[bytes, Extent]]:
-    bpb = volume.bpb_header
-    fat_start = start + bpb["BPB_RsvdSecCnt"] * bpb["BPB_BytsPerSec"]
-
-    def sector(offset: int) -> int:
-        return offset // SECTOR
-
-    def cluster_sectors(first: int) -> list[int]:
-        """Every sector of a cluster chain, in order."""
-        per_cluster = volume.bytes_per_cluster // SECTOR
-        return [
-            sector(start + volume.get_data_cluster_address(c)) + i
-            for c in volume.get_cluster_chain(first)
-            for i in range(per_cluster)
-        ]
-
-    directory = cluster_sectors(bpb["BPB_RootClus"])
-    _, files, _ = root.get_entries()
-    extents = []
-    for entry in files:
-        if (cluster := entry.get_cluster()) < 2:
-            continue
-        name = short_name(entry.get_short_name())
-        holder = next(
-            (s for s in directory if name in _entries(raw[s * SECTOR : (s + 1) * SECTOR])),
-            None,
-        )
-        if holder is None:
-            raise ValueError(f"no directory entry holds {name!r}")
-        extents.append(
-            (
-                name,
-                Extent(
-                    data=sector(start + volume.get_data_cluster_address(cluster)),
-                    fat=sector(fat_start + cluster * FAT32_ENTRY),
-                    entry=holder,
-                ),
-            )
-        )
-    return extents
-
-
-def _entries(directory_sector: bytes) -> set[bytes]:
-    """The 8.3 names a directory sector's 32-byte entries hold."""
-    return {directory_sector[i : i + 11] for i in range(0, len(directory_sector), 32)}

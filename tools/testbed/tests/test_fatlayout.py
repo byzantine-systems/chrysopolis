@@ -1,5 +1,6 @@
-"""The FAT32 layout reader against mtools and the raw boot sector, never
-pyfatfs itself. Planted defects:
+"""The FAT32 layout reader against mtools and the raw boot sector. pyfatfs is
+only the reference of one differential law: the reader no longer uses it.
+Planted defects:
 
 | Planted defect | Caught by |
 |---|---|
@@ -12,10 +13,15 @@ pyfatfs itself. Planted defects:
 | `free_slots` counting only never-used entries | test_free_slots_count_never_used_and_... |
 | `accounting` not walking subdirectories | test_every_cluster_is_owned_free_bad_or_lost |
 | `accounting` leaving free clusters out of `free` | test_every_cluster_is_owned_free_bad_or_lost |
+| `fats_differ` comparing no copy past the first | test_a_crash_between_the_fat_copies_is_reported |
+| a cluster's address one data sector late | test_each_extent_is_where_mtools_and_the_bpb_... |
+| `files` keeping long names (filtering directories only) | test_the_reader_agrees_with_pyfatfs |
+| a judge that reads the whole image | test_a_judge_reads_a_small_part_of_the_image |
 """
 
 from __future__ import annotations
 
+import contextlib
 import re
 import shutil
 import struct
@@ -27,6 +33,7 @@ from typing import Final
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from pyfatfs.PyFat import PyFat
 
 from chryso_testbed.allowed import Allowed
 from chryso_testbed.crashcheck import (
@@ -38,6 +45,7 @@ from chryso_testbed.crashcheck import (
     judge,
     judge_after_mount,
 )
+from chryso_testbed.disk import FileDisk
 from chryso_testbed.fatlayout import (
     ENTRY,
     GHOST,
@@ -45,6 +53,7 @@ from chryso_testbed.fatlayout import (
     SECTOR,
     accounting,
     chains,
+    cluster_bytes,
     contents,
     dirty_free_clusters,
     entry_cluster,
@@ -54,6 +63,7 @@ from chryso_testbed.fatlayout import (
     root,
     sfn_checksum,
     short_name,
+    survey,
     write_record,
 )
 from chryso_testbed.renaming import Record
@@ -481,6 +491,23 @@ def zero_cluster(image: Path, cluster: int) -> None:
         disk.write(bytes(per_cluster * per_sector))
 
 
+def seal_root(image: Path) -> None:
+    """Turn the root's never-used entries into deleted ones. FatFs's scans
+    stop at the first never-used entry and pass deleted ones, and dir_alloc
+    grows a directory only once no slot is free, so a sealed root is the one
+    a growth could follow."""
+    with image.open("r+b") as disk:
+        for cluster in root(image).clusters:
+            span = cluster_bytes(image, cluster)
+            disk.seek(span.start)
+            raw = bytearray(disk.read(len(span)))
+            for at in range(0, len(raw), ENTRY):
+                if raw[at] == 0:
+                    raw[at] = 0xE5
+            disk.seek(span.start)
+            disk.write(raw)
+
+
 def grow_root(image: Path, cluster: int) -> None:
     """Link `cluster` to the end of the root's chain and end the chain there."""
     set_fat(image, root(image).clusters[-1], cluster)
@@ -523,10 +550,12 @@ def test_a_leftover_linked_unzeroed_shows_the_ghost(
     tmp_path: Path, files: dict[str, bytes], sector_size: int
 ) -> None:
     """The root grown into a dirtied cluster without zeroing it shows the
-    ghost on clusters the FAT does not hold. Zeroed first, nothing shows."""
+    ghost on clusters the FAT does not hold. Zeroed first, nothing shows.
+    The root is sealed first, since FatFs grows only a full directory."""
     for old in tmp_path.iterdir():
         old.unlink()
     image, _ = volume(tmp_path, files, sector_size)
+    seal_root(image)
     (grown,) = dirty_free_clusters(image, 1)
     unzeroed = tmp_path / "unzeroed.img"
     shutil.copyfile(image, unzeroed)
@@ -636,3 +665,75 @@ def test_every_cluster_is_owned_free_bad_or_lost(
     assert after.unowned == lost
     assert after.owned == clean.owned
     assert after.free == clean.free - lost
+
+
+# --- the sector-source reader against pyfatfs, and what it reads -------------------------
+
+
+class Counting:
+    """A disk that counts the bytes read from it."""
+
+    def __init__(self, path: Path) -> None:
+        self.disk = FileDisk(path)
+        self.read_bytes = 0
+
+    def read(self, offset: int, size: int) -> bytes:
+        data = self.disk.read(offset, size)
+        self.read_bytes += len(data)
+        return data
+
+
+long_names = st.from_regex(r"[a-z][a-z0-9_]{8,20}\.bin", fullmatch=True)
+
+
+@needs_tools
+@settings(
+    max_examples=10, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(
+    files=st.dictionaries(st.one_of(names, long_names), file_bytes, min_size=1, max_size=4),
+    sector_size=sector_sizes,
+)
+def test_the_reader_agrees_with_pyfatfs(
+    tmp_path: Path, files: dict[str, bytes], sector_size: int
+) -> None:
+    """Representation change: the reader that parses the volume itself sees
+    the files, sizes, chains and cluster addresses pyfatfs sees, long names
+    included."""
+    for old in tmp_path.iterdir():
+        old.unlink()
+    image, _ = volume(tmp_path, files, sector_size)
+    start = START_LBA * SECTOR
+    with contextlib.closing(PyFat(offset=start)) as ref:
+        ref.open(str(image), read_only=True)
+        assert ref.root_dir is not None
+        _, entries, _ = ref.root_dir.get_entries()
+        want = {
+            short_name(e.get_short_name()): (
+                e.filesize,
+                tuple(ref.get_cluster_chain(e.get_cluster())),
+            )
+            for e in entries
+        }
+        address = {
+            c: start + ref.get_data_cluster_address(c) for _, ch in want.values() for c in ch
+        }
+    found, links = survey(image)
+    assert {name: (len(data or b""), links[name].clusters) for name, data in found.items()} == want
+    assert {c: cluster_bytes(image, c).start for c in address} == address
+
+
+@needs_tools
+@settings(
+    max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+@given(files=st.dictionaries(names, file_bytes, min_size=1, max_size=4))
+def test_a_judge_reads_a_small_part_of_the_image(tmp_path: Path, files: dict[str, bytes]) -> None:
+    """Judging reads the boot sector, the FAT copies, the root and the files'
+    clusters: a few hundred KiB of a 320 MiB image, never all of it."""
+    for old in tmp_path.iterdir():
+        old.unlink()
+    image, _ = volume(tmp_path, files, 4096)
+    disk = Counting(image)
+    assert not judge(disk, {}).problems
+    assert 0 < disk.read_bytes < 4 * 1024 * 1024

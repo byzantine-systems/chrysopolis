@@ -9,16 +9,14 @@ from __future__ import annotations
 import os
 import struct
 import subprocess
-import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
-from pyfatfs import PyFATException
-
 from chryso_testbed import renaming
 from chryso_testbed.allowed import Allowed
+from chryso_testbed.disk import Disk
 from chryso_testbed.fatlayout import (
     DELETED,
     ENTRY,
@@ -27,6 +25,7 @@ from chryso_testbed.fatlayout import (
     Chain,
     Root,
     entry_cluster,
+    fats_differ,
     partition_start,
     root,
     short_name,
@@ -178,7 +177,7 @@ class Verdict:
 
 
 def judge(
-    image: Path, expected: Mapping[int, Allowed[Content]], *, cut: Iterable[Move] = ()
+    image: Path | Disk, expected: Mapping[int, Allowed[Content]], *, cut: Iterable[Move] = ()
 ) -> Verdict:
     """Where a crash image breaks `expected`, as `allowed` gives it, or a cut
     rename, as `moves` gives it. Two entries on one cluster are a problem,
@@ -186,12 +185,10 @@ def judge(
     the old one: that cross-link is counted, not failed, since the image is
     not yet mounted. `judge_after_mount` checks that a mount ends it."""
     try:
-        with warnings.catch_warnings(record=True) as warned:
-            warnings.simplefilter("always")
-            found, links = survey(image)
-    except (PyFATException, ValueError, OSError, struct.error, IndexError) as error:
+        found, links = survey(image)
+        diverged = fats_differ(image)
+    except (ValueError, OSError, struct.error, IndexError) as error:
         return Verdict((f"volume unreadable: {error!r}",), ())
-    diverged = any("FATs differ" in str(w.message) for w in warned)
     broken = tuple(name.decode() for name, data in found.items() if data is None)
     problems = [f"{name}: entry on clusters the FAT does not hold" for name in broken]
     if diverged:  # packages.disk has one FAT, so two copies that disagree are a fault
@@ -289,13 +286,13 @@ def _intent(r: Root) -> renaming.Intent | None:
             return None
 
 
-def after_mount(image: Path) -> set[bytes]:
+def after_mount(image: Path | Disk) -> set[bytes]:
     """The short names a mount of `image` leaves live, by the model's recovery."""
     names = renaming.settled(as_volume(root(image))).names()
     return {key.removeprefix("root/").encode("latin-1") for key in names}
 
 
-def judge_after_mount(image: Path) -> tuple[str, ...]:
+def judge_after_mount(image: Path | Disk) -> tuple[str, ...]:
     """What a mount of `image` would still leave wrong: two names on a chain."""
     if shared := renaming.settled(as_volume(root(image))).shared():
         return (f"after mount, clusters {sorted(shared)} hold two names",)
