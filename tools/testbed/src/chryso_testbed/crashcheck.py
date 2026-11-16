@@ -227,7 +227,7 @@ def _sharing(links: Mapping[bytes, Chain]) -> list[tuple[bytes, bytes]]:
     owner: dict[int, bytes] = {}
     pairs: set[tuple[bytes, bytes]] = set()
     for name, chain in sorted(links.items()):
-        for cluster in chain or ():
+        for cluster in chain.owned:
             if (other := owner.setdefault(cluster, name)) != name:
                 pairs.add((other, name))
     return sorted(pairs)

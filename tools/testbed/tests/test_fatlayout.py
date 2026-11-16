@@ -270,7 +270,7 @@ def test_each_chain_is_the_one_mtools_reads(
     for old in tmp_path.iterdir():
         old.unlink()
     image, target = volume(tmp_path, files, sector_size)
-    found = chains(image)
+    found = {name: chain.clusters for name, chain in chains(image).items() if chain.whole}
     assert found == {short_name(n): chain_of(target, n) for n in files}
     assert not judge(image, {}).problems
 
@@ -291,7 +291,7 @@ def test_a_looping_chain_reads_as_broken(
     victim = data.draw(st.sampled_from(sorted(files)))
     chain = chain_of(target, victim)
     fat_entry(image, chain[-1], data.draw(st.sampled_from(chain)))
-    assert chains(image)[short_name(victim)] is None
+    assert not chains(image)[short_name(victim)].whole
     verdict = judge(image, {})
     assert verdict.broken == (short_name(victim).decode(),)
 

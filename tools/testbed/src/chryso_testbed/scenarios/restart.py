@@ -814,7 +814,8 @@ def growth_states(
     match span.step:
         case Put(file=file):
             name = fatlayout.short_name(f"fuzz{file}.bin")
-            put, own = True, fatlayout.chains(after).get(name) or ()
+            chain = fatlayout.chains(after).get(name)
+            put, own = True, chain.owned if chain is not None else ()
         case _:
             put, own = False, ()
     after.unlink()

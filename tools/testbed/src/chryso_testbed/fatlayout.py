@@ -101,14 +101,25 @@ def layout(image: Path) -> Layout:
         return Layout(MappingProxyType(dict(_extents(volume, root, raw, start))))
 
 
-type Chain = tuple[int, ...] | None  # None: broken
+@dataclass(frozen=True, slots=True)
+class Chain:
+    """A cluster chain as walked from its first cluster. A broken one (a free,
+    bad or out-of-range link, or a loop) keeps the clusters walked before the
+    break."""
+
+    clusters: tuple[int, ...]
+    whole: bool
+
+    @property
+    def owned(self) -> tuple[int, ...]:
+        """The clusters the chain holds: all of them if whole, none if broken."""
+        return self.clusters if self.whole else ()
 
 
 def survey(image: Path) -> tuple[Mapping[bytes, bytes | None], Mapping[bytes, Chain]]:
     """Each root-level file's bytes and cluster chain, keyed by 8.3 name, in
-    one read of the image. Both are None where the chain is broken (a free,
-    bad or out-of-range link, or a loop), as a crash can leave an entry on
-    clusters already freed."""
+    one read of the image. The bytes are None where the chain is broken, as a
+    crash can leave an entry on clusters already freed."""
     with _volume(image) as (volume, root, raw, start):
         view, size = memoryview(raw), volume.bytes_per_cluster
         fat = _fat(volume, raw, start)
@@ -123,7 +134,9 @@ def survey(image: Path) -> tuple[Mapping[bytes, bytes | None], Mapping[bytes, Ch
         for entry in files:
             name = short_name(entry.get_short_name())
             links[name] = chain = _chain(fat, entry.get_cluster())
-            found[name] = None if chain is None else b"".join(map(cluster, chain))[: entry.filesize]
+            found[name] = (
+                b"".join(map(cluster, chain.clusters))[: entry.filesize] if chain.whole else None
+            )
         return MappingProxyType(found), MappingProxyType(links)
 
 
@@ -133,7 +146,7 @@ def contents(image: Path) -> Mapping[bytes, bytes | None]:
 
 
 def chains(image: Path) -> Mapping[bytes, Chain]:
-    """Each root-level file's cluster chain, or None where it is broken."""
+    """Each root-level file's cluster chain."""
     return survey(image)[1]
 
 
@@ -160,7 +173,7 @@ def root(image: Path) -> Root:
         bpb = volume.bpb_header
         size, first = bpb["BPB_BytsPerSec"], bpb["BPB_RootClus"]
         record_at = start + (bpb["BPB_RsvdSecCnt"] - 1) * size
-        chain = _chain(_fat(volume, raw, start), first) or ()
+        chain = _chain(_fat(volume, raw, start), first).owned
         sectors: list[bytes] = []
         for cluster in chain:
             at = start + volume.get_data_cluster_address(cluster)
@@ -258,7 +271,7 @@ def accounting(image: Path) -> Accounting:
         owned: set[int] = set()
         pending = [volume.bpb_header["BPB_RootClus"]]
         while pending:
-            chain = _chain(fat, pending.pop()) or ()
+            chain = _chain(fat, pending.pop()).owned
             if owned.intersection(chain):
                 continue  # a directory reached twice
             owned.update(chain)
@@ -270,7 +283,7 @@ def accounting(image: Path) -> Accounting:
                     if entry[0] != ord("."):  # "." and ".." point back up
                         pending.append(entry_cluster(entry))
                 else:
-                    owned.update(_chain(fat, entry_cluster(entry)) or ())
+                    owned.update(_chain(fat, entry_cluster(entry)).owned)
         every = range(FIRST_CLUSTER, fat.entries)
         free = frozenset(c for c in every if link(c) == 0)
         bad = frozenset(c for c in every if link(c) == BAD_CLUSTER)
@@ -380,18 +393,18 @@ def _chain(fat: _Fat, first: int) -> Chain:
     """The clusters from `first` to the end mark. pyfatfs's own walk has no
     loop guard, and a crash can leave a cyclic FAT."""
     if first < FIRST_CLUSTER:
-        return ()  # an empty file has no cluster
+        return Chain((), whole=True)  # an empty file has no cluster
     chain: list[int] = []
     seen: set[int] = set()
     link = first
     while link < END_OF_CHAIN:
         if link < FIRST_CLUSTER or link >= fat.entries or link in seen:
-            return None
+            return Chain(tuple(chain), whole=False)
         seen.add(link)
         chain.append(link)
         (link,) = struct.unpack_from("<I", fat.table, link * FAT32_ENTRY)
         link &= ENTRY_MASK
-    return tuple(chain)
+    return Chain(tuple(chain), whole=True)
 
 
 def _extents(volume: Any, root: Any, raw: bytes, start: int) -> list[tuple[bytes, Extent]]:
