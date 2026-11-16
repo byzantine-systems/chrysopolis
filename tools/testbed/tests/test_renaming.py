@@ -40,9 +40,11 @@ from chryso_testbed.renaming import (
     FIXED,
     SIZE,
     Design,
+    Directory,
     Entry,
     Plan,
     Record,
+    Slot,
     Volume,
     create,
     placement,
@@ -70,13 +72,12 @@ class Case:
 
     def kind(self) -> str:
         at = placement(self.volume, self.dst)
-        sector, _ = at.slot
-        (old, _), _ = self.volume.locate("P", "a")
+        old, _ = self.volume.locate("P", "a")
         if at.zero:
-            return "grows-into-leftovers" if any(self.volume.cells(sector)) else "grows"
+            return "grows-into-leftovers" if any(self.volume.cells(at.slot.sector)) else "grows"
         if self.dst != "P":
             return "other-dir"
-        return "same-sector" if sector == old else "other-sector"
+        return "same-sector" if at.slot.sector == old.sector else "other-sector"
 
 
 @st.composite
@@ -91,11 +92,11 @@ def cases(draw: st.DrawFn, *, empty: bool = False, leftovers: bool | None = None
     what a mount's twin scan must never get to see."""
     width = draw(st.integers(1, 3))
     p = draw(st.integers(1, 2))
-    slots = [(s, i) for s in range(p + 1) for i in range(width)]
+    slots = [Slot(s, i) for s in range(p + 1) for i in range(width)]
     src = draw(st.sampled_from(slots[: p * width]))
     clusters = iter(range(2, 100))
     source = Entry("a", 0 if empty else next(clusters))
-    cells: dict[tuple[int, int], Entry | None] = {src: source}
+    cells: dict[Slot, Entry | None] = {src: source}
     others = iter(OTHERS * 2)
     for slot in slots:
         if slot == src:
@@ -110,7 +111,7 @@ def cases(draw: st.DrawFn, *, empty: bool = False, leftovers: bool | None = None
                 cells[slot] = Entry(name, next(clusters), live=False)
             case _:
                 cells[slot] = None
-    sectors = [tuple(cells.get((s, i)) for i in range(width)) for s in range(p + 1)]
+    sectors = [tuple(cells.get(Slot(s, i)) for i in range(width)) for s in range(p + 1)]
     if draw(st.booleans()) if leftovers is None else leftovers:
         old = st.builds(
             Entry,
@@ -119,7 +120,9 @@ def cases(draw: st.DrawFn, *, empty: bool = False, leftovers: bool | None = None
             live=st.booleans(),
         )
         sectors.append(tuple(draw(st.lists(old, min_size=width, max_size=width))))
-    volume = Volume(sectors=tuple(sectors), dirs=(("P", tuple(range(p))), ("Q", (p,))))
+    volume = Volume(
+        sectors=tuple(sectors), dirs=(Directory("P", tuple(range(p))), Directory("Q", (p,)))
+    )
     return Case(volume, draw(st.sampled_from(["P", "Q"])))
 
 
@@ -216,7 +219,7 @@ def stale(draw: st.DrawFn) -> Volume:
     c = draw(cases())
     v = Plan(c.plan().epochs[:-1]).done(c.volume)
     for _ in range(draw(st.integers(0, 4))):
-        live = [(d, e.name) for d, _ in v.dirs for _, e in v.entries(d)]
+        live = [(d.name, e.name) for d in v.dirs for _, e in v.entries(d.name)]
         if draw(st.booleans()) and live:
             slot, entry = v.locate(*draw(st.sampled_from(live)))
             v = put(v, slot, replace(entry, live=False)).onto(v)
@@ -225,7 +228,7 @@ def stale(draw: st.DrawFn) -> Volume:
         name = draw(st.sampled_from(("a", "b", *OTHERS)))
         if any(e.name == name for _, e in v.entries(d)):
             continue
-        used = {e.cluster for dd, _ in v.dirs for _, e in v.entries(dd)}
+        used = {e.cluster for dd in v.dirs for _, e in v.entries(dd.name)}
         cluster = draw(st.sampled_from([0, *(x for x in range(2, 12) if x not in used)]))
         v = create(v, d, name, cluster).done(v)
     return v
@@ -286,7 +289,10 @@ def test_the_generator_reaches_every_kind_of_rename(kind: str) -> None:
 
 def test_a_cut_rename_is_cross_linked_until_a_mount_finishes_it() -> None:
     """The anchor: identity laws alone pass for a model that never renames."""
-    v = Volume(sectors=((Entry("a", 7),), (None,), (None,)), dirs=(("P", (0, 1)), ("Q", (2,))))
+    v = Volume(
+        sectors=((Entry("a", 7),), (None,), (None,)),
+        dirs=(Directory("P", (0, 1)), Directory("Q", (2,))),
+    )
     intent, register, _, _ = rename(v, ("P", "a"), ("P", "b")).epochs
     cut = Plan((intent, register)).done(v)
     assert cut.names() == {"P/a": 7, "P/b": 7}

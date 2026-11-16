@@ -264,7 +264,9 @@ def as_volume(r: Root) -> renaming.Volume:
         tuple(_entry(s[i : i + ENTRY]) for i in range(0, len(s), ENTRY)) for s in r.sectors
     )
     return renaming.Volume(
-        sectors=sectors, dirs=(("root", tuple(range(len(sectors)))),), record=_intent(r)
+        sectors=sectors,
+        dirs=(renaming.Directory("root", tuple(range(len(sectors)))),),
+        record=_intent(r),
     )
 
 
@@ -281,7 +283,7 @@ def _intent(r: Root) -> renaming.Intent | None:
         case renaming.Record(old_dir=old, new_dir=new, dptr=dptr, sfn=sfn, cluster=cluster) if (
             old == new == r.cluster
         ):
-            slot = (dptr // r.sector_size, dptr % r.sector_size // ENTRY)
+            slot = renaming.Slot(dptr // r.sector_size, dptr % r.sector_size // ENTRY)
             return renaming.Intent(slot, sfn.decode("latin-1"), cluster, "root")
         case _:
             return None

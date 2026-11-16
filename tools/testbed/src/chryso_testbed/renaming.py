@@ -27,11 +27,27 @@ class Entry:
 
 
 @dataclass(frozen=True, slots=True)
-class Intent:
-    """A rename in flight: the old entry's (sector, index), its file and the
-    new directory."""
+class Slot:
+    """Where a directory entry sits: a sector and its index in that sector."""
 
-    old: tuple[int, int]
+    sector: int
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
+class Directory:
+    """A directory's name and its chain of sectors, in order."""
+
+    name: str
+    sectors: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Intent:
+    """A rename in flight: the old entry's slot, its file and the new
+    directory."""
+
+    old: Slot
     name: str
     cluster: int
     new_dir: str
@@ -45,32 +61,32 @@ class Volume:
     grows into it shows them unless it is zeroed first."""
 
     sectors: tuple[tuple[Entry | None, ...], ...]
-    dirs: tuple[tuple[str, tuple[int, ...]], ...]
+    dirs: tuple[Directory, ...]
     record: Intent | None = None
     freed: frozenset[int] = frozenset()
 
     def chain(self, d: str) -> tuple[int, ...]:
-        return dict(self.dirs)[d]
+        return next(x.sectors for x in self.dirs if x.name == d)
 
     def cells(self, sector: int) -> tuple[Entry | None, ...]:
         return self.sectors[sector] if sector < len(self.sectors) else ()
 
-    def entries(self, d: str) -> Iterator[tuple[tuple[int, int], Entry]]:
+    def entries(self, d: str) -> Iterator[tuple[Slot, Entry]]:
         """The live entries of directory `d` and their slots, in order."""
         for sector in self.chain(d):
             for i, entry in enumerate(self.cells(sector)):
                 if entry is not None and entry.live:
-                    yield (sector, i), entry
+                    yield Slot(sector, i), entry
 
-    def locate(self, d: str, name: str) -> tuple[tuple[int, int], Entry]:
+    def locate(self, d: str, name: str) -> tuple[Slot, Entry]:
         return next((slot, e) for slot, e in self.entries(d) if e.name == name)
 
     def names(self) -> dict[str, int | Literal["broken"]]:
         """The observation: every live name and its chain, broken once freed."""
         return {
-            f"{d}/{e.name}": "broken" if e.cluster in self.freed else e.cluster
-            for d, _ in self.dirs
-            for _, e in self.entries(d)
+            f"{d.name}/{e.name}": "broken" if e.cluster in self.freed else e.cluster
+            for d in self.dirs
+            for _, e in self.entries(d.name)
         }
 
     def shared(self) -> set[int]:
@@ -100,7 +116,7 @@ class SectorWrite:
 
 @dataclass(frozen=True, slots=True)
 class FatWrite:
-    dirs: tuple[tuple[str, tuple[int, ...]], ...]
+    dirs: tuple[Directory, ...]
     freed: frozenset[int]
 
     def onto(self, v: Volume) -> Volume:
@@ -115,12 +131,11 @@ class RecordWrite:
         return replace(v, record=self.intent)
 
 
-def put(v: Volume, slot: tuple[int, int], entry: Entry | None) -> SectorWrite:
+def put(v: Volume, slot: Slot, entry: Entry | None) -> SectorWrite:
     """The write that puts `entry` in `slot`, carrying the rest of its sector."""
-    sector, i = slot
-    cells = list(v.cells(sector))
-    cells[i] = entry
-    return SectorWrite(sector, tuple(cells))
+    cells = list(v.cells(slot.sector))
+    cells[slot.index] = entry
+    return SectorWrite(slot.sector, tuple(cells))
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +189,7 @@ class Placement:
     """Where a new entry of a directory goes. When the directory is full it
     grows by a sector: `zero` clears it and `link` adds it to the chain."""
 
-    slot: tuple[int, int]
+    slot: Slot
     zero: tuple[Write, ...] = ()
     link: tuple[Write, ...] = ()
 
@@ -196,13 +211,13 @@ def placement(v: Volume, d: str) -> Placement:
     for sector in v.chain(d):
         for i, entry in enumerate(v.cells(sector)):
             if entry is None or not entry.live:
-                return Placement((sector, i))
-    chained = {s for _, chain in v.dirs for s in chain}
+                return Placement(Slot(sector, i))
+    chained = {s for x in v.dirs for s in x.sectors}
     new = next(s for s in range(len(v.sectors) + 1) if s not in chained)
     width = len(v.cells(v.chain(d)[0]))
-    dirs = tuple((k, (*s, new) if k == d else s) for k, s in v.dirs)
+    dirs = tuple(Directory(x.name, (*x.sectors, new)) if x.name == d else x for x in v.dirs)
     return Placement(
-        (new, 0), zero=(SectorWrite(new, (None,) * width),), link=(FatWrite(dirs, v.freed),)
+        Slot(new, 0), zero=(SectorWrite(new, (None,) * width),), link=(FatWrite(dirs, v.freed),)
     )
 
 
@@ -236,9 +251,8 @@ def recover(v: Volume, design: Design = FIXED) -> Plan:
     then clear the record."""
     if (intent := v.record) is None:
         return Plan()
-    sector, i = intent.old
-    cells = v.cells(sector)
-    old = cells[i] if i < len(cells) else None
+    cells = v.cells(intent.old.sector)
+    old = cells[intent.old.index] if intent.old.index < len(cells) else None
     twin = any(
         e.cluster == intent.cluster and s != intent.old for s, e in v.entries(intent.new_dir)
     )
