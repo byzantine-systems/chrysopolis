@@ -7,7 +7,7 @@
     {registered, [
         chryso_orchestrator_sup, chryso_controller_sup, chryso_root_port, chryso_lifecycle_ctl
     ]},
-    {applications, [kernel, stdlib]},
+    {applications, [kernel, stdlib, chryso_core, chryso_abi]},
     {mod, {chryso_orchestrator_app, []}},
     {modules, [
         chryso_controller_sup,

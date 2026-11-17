@@ -12,7 +12,9 @@ child row and the lifecycle's context.
 | `degraded` | `budget - lifetime =< floor` (`low_budget`), or stopped or quarantined |
 | `ready` | otherwise |
 
-Laws: unknown in, unknown out. A gone row is `gone`. The result depends on
+Laws: unknown in, unknown out. A gone row is `gone`. A live row with a want
+that does not hold is `restarting`, whatever its budget or age, with reason
+`rate_limited` exactly when Root's rate limit holds it back. The result depends on
 the row and context only.
 
 Non-law: `recovering` is a time window, not proof the driver re-initialised.

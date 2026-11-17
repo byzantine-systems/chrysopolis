@@ -6,6 +6,7 @@ Laws of `chryso_condition`.
 |---|---|
 | a gone row reported `restarting` while a want is open | prop_gone_dominates |
 | `low_budget` at `budget - lifetime < floor` (off by one) | prop_floor_is_exact |
+| a recent restart reported `recovering` while a want is open | prop_a_requested_live_driver_is_restarting |
 """.
 -include_lib("proper/include/proper.hrl").
 
@@ -13,8 +14,27 @@ Laws of `chryso_condition`.
     prop_unknown_in_unknown_out/0,
     prop_gone_dominates/0,
     prop_floor_is_exact/0,
-    prop_recent_restart_is_recovering/0
+    prop_recent_restart_is_recovering/0,
+    prop_a_requested_live_driver_is_restarting/0
 ]).
+
+%% Whatever the budget, the age of the last restart or the settle window, a
+%% live driver with an open want is restarting, and Root's rate limit is the
+%% only thing that changes the reason.
+prop_a_requested_live_driver_is_restarting() ->
+    ?FORALL(
+        {Row, C},
+        {row(), context()},
+        begin
+            Want =
+                case maps:get(held, C) of
+                    true -> {restarting, rate_limited};
+                    false -> {restarting, restart_requested}
+                end,
+            Got = chryso_condition:classify(Row#{state := live}, C#{requested := true}),
+            aggregate([element(2, Want)], Got =:= Want)
+        end
+    ).
 -compile([nowarn_missing_spec, nowarn_missing_doc]).
 
 prop_unknown_in_unknown_out() ->

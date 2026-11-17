@@ -9,6 +9,9 @@ The SUT is `lifecycle_world`. The model holds the oracle's bookkeeping, and
 - **sent once**: one controller incarnation resends a command only after a
   deadline or `rate_limited`, the cases where the page cannot move.
 - **at most once**: each want causes at most one restart Root accepts.
+- **status_matches_page**, **held_is_never_commanded**,
+  **nothing_open_nothing_commanded**, **open_iff_restarting**: the laws of
+  `chryso_lifecycle:wants_status/1`.
 
 After the run, fair rounds must leave no open want (**converges**).
 
@@ -18,6 +21,7 @@ After the run, fair rounds must leave no open want (**converges**).
 | planning while nothing is known | unknown postpones |
 | `rate_limited` given up for good | converges |
 | `merge` keeping the older page | converges |
+| `held` read off the condition's name | status_matches_page (on a gone driver) |
 """.
 -include_lib("proper/include/proper.hrl").
 
@@ -126,6 +130,7 @@ postcondition(S, _Call, #{emitted := Emitted, accepted := Accepted, known := Kno
             unique(Emitted) andalso
                 [X || X <- Emitted, lists:member(X, Sent), not lists:member(X, Late)] =:= []},
         {at_most_once, unique(Accepted) andalso [P || P <- Accepted, maps:is_key(P, Counts)] =:= []}
+        | status_laws(?W:controller())
     ],
     case [Law || {Law, false} <- Checks] of
         [] ->
@@ -153,6 +158,47 @@ next_state(S, _Symbolic, _Call) ->
     S.
 
 %% --- helpers -------------------------------------------------------------------
+
+%% The want-status laws on one controller state, each by name. Re-evaluating
+%% with a tick that does not move time asks the pure step what it would
+%% command now.
+status_laws(Ctl) ->
+    Status = chryso_lifecycle:wants_status(Ctl),
+    Wants = chryso_lifecycle:wants(Ctl),
+    Known = chryso_lifecycle:known(Ctl),
+    Conditions = chryso_lifecycle:conditions(Ctl),
+    {Effects, _} = chryso_lifecycle:step({tick, 0}, Ctl),
+    Commanded = [C || {command, _, C, _} <- Effects],
+    Anchor = lists:all(
+        fun({C, St}) ->
+            case {St, chryso_observe:child(Known, C)} of
+                {held, #{last_restart := Last}} -> Last >= maps:get(C, Wants);
+                {held, unknown} -> false;
+                {open, #{state := live, last_restart := Last}} -> Last < maps:get(C, Wants);
+                _ -> true
+            end
+        end,
+        maps:to_list(Status)
+    ),
+    HeldQuiet = [C || C <- Commanded, maps:get(C, Status, open) =:= held] =:= [],
+    Fixpoint = lists:member(open, maps:values(Status)) orelse Commanded =:= [],
+    Interaction = lists:all(
+        fun({C, St}) ->
+            case chryso_observe:child(Known, C) of
+                #{state := live} ->
+                    (St =:= open) =:= (element(1, maps:get(C, Conditions)) =:= restarting);
+                _ ->
+                    true
+            end
+        end,
+        maps:to_list(Status)
+    ),
+    [
+        {status_matches_page, Anchor},
+        {held_is_never_commanded, HeldQuiet},
+        {nothing_open_nothing_commanded, Fixpoint},
+        {open_iff_restarting, Interaction}
+    ].
 
 %% What the run reached, so a pass over trivial histories shows up as such.
 classes(#{accepted := Accepted, gone := Gone, resendable := Resendable}) ->

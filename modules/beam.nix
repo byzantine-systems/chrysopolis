@@ -239,6 +239,9 @@
         # apps/chryso_core's pure modules as guest bytecode, for the in-situ
         # audit in tests/chryso_ctl.erl. Built with the same Erlang as the
         # probes and the disk's OTP libraries; no deps, no rebar3.
+        # The two library packages below each install ebin/<app>.app from
+        # their .app.src, with `modules` set to the sorted beams in ebin, so
+        # an embedded-mode loader can load a declared dependency by name.
         core-modules = pkgs.stdenvNoCC.mkDerivation {
           name = "chryso-core-modules";
           src = pkgs.lib.fileset.toSource {
@@ -251,6 +254,15 @@
             runHook preBuild
             mkdir ebin
             erlc -o ebin +deterministic +warnings_as_errors src/*.erl
+            erl -noshell -eval '
+              [Src, Ebin] = init:get_plain_arguments(),
+              {ok, [{application, Name, Props}]} = file:consult(Src),
+              Mods = lists:sort([list_to_atom(filename:basename(F, ".beam"))
+                                 || F <- filelib:wildcard(filename:join(Ebin, "*.beam"))]),
+              App = {application, Name, [{modules, Mods} | proplists:delete(modules, Props)]},
+              ok = file:write_file(filename:join(Ebin, atom_to_list(Name) ++ ".app"),
+                                   io_lib:format("~tp.~n", [App])),
+              halt().' -extra src/chryso_core.app.src ebin
             runHook postBuild
           '';
           installPhase = ''
@@ -272,6 +284,15 @@
             runHook preBuild
             mkdir ebin
             erlc -o ebin +deterministic +warnings_as_errors -I include src/*.erl
+            erl -noshell -eval '
+              [Src, Ebin] = init:get_plain_arguments(),
+              {ok, [{application, Name, Props}]} = file:consult(Src),
+              Mods = lists:sort([list_to_atom(filename:basename(F, ".beam"))
+                                 || F <- filelib:wildcard(filename:join(Ebin, "*.beam"))]),
+              App = {application, Name, [{modules, Mods} | proplists:delete(modules, Props)]},
+              ok = file:write_file(filename:join(Ebin, atom_to_list(Name) ++ ".app"),
+                                   io_lib:format("~tp.~n", [App])),
+              halt().' -extra ${../apps/chryso_abi/src/chryso_abi.app.src} ebin
             runHook postBuild
           '';
           installPhase = ''

@@ -565,6 +565,130 @@
               );
             };
         });
+
+      # The FAT disk, as a function of the orchestrator's guest beams, so a
+      # negative control can boot a mutated build on the same images.
+      mkDisk =
+        {
+          name ? "chrysopolis-fat.img",
+          core ? config.packages.core-modules,
+          orchestrator ? config.packages.orchestrator-modules,
+        }:
+        let
+          otp = "${pkgs.beamPackages.erlang}/lib/erlang";
+        in
+        pkgs.runCommand name
+          {
+            nativeBuildInputs = [
+              pkgs.dosfstools
+              pkgs.mtools
+              pkgs.util-linux
+            ];
+          }
+          ''
+            otp=${otp}
+            rel=$(ls $otp/releases | grep -E '^[0-9]+$' | head -1)
+
+            # FAT stores local timestamps. Pin the clock, zone and generated
+            # identifiers so identical derivations produce identical bytes.
+            export SOURCE_DATE_EPOCH=315532800 TZ=UTC
+
+            # Build a populated FAT32 partition image.
+            part=part.fat
+            # 4 KiB sectors and clusters, one sDDF transfer block each, so the
+            # FAT server (built with FAT_SECTOR_SIZE=4096) never writes part of a
+            # block. FAT32 needs 65525 clusters, hence 316 MiB.
+            truncate -s 316M $part
+            # One FAT: a crash between FatFs's two unordered copy writes would
+            # leave them different, and FatFs only reads the first.
+            mkfs.fat --invariant -F 32 -S 4096 -s 1 -f 1 -n CHRYSO $part
+            sector=$(od -An -tu2 -j11 -N2 $part | tr -d ' ')
+            fats=$(od -An -tu1 -j16 -N1 $part | tr -d ' ')
+            if [ "$sector" != 4096 ] || [ "$fats" != 1 ]; then
+              echo "disk: BPB_BytsPerSec $sector, BPB_NumFATs $fats, expected 4096 and 1" >&2
+              exit 1
+            fi
+            # The fork's FatFs keeps its rename record in the last reserved
+            # sector, clear of the boot sector, FSInfo and their backups at 0,
+            # 1, 6 and 7. It must start zero, or a mount reads it as foreign.
+            reserved=$(od -An -tu2 -j14 -N2 $part | tr -d ' ')
+            if [ "$reserved" -lt 9 ]; then
+              echo "disk: BPB_RsvdSecCnt $reserved, the rename record needs at least 9" >&2
+              exit 1
+            fi
+            if ! cmp -s -n 4096 -i "$(((reserved - 1) * 4096)):0" "$part" /dev/zero; then
+              echo "disk: reserved sector $((reserved - 1)), the rename record's, is not zero" >&2
+              exit 1
+            fi
+            export MTOOLS_SKIP_CHECK=1
+
+            mmd -i $part ::/dev ::/bin ::/lib ::/releases "::/releases/$rel"
+
+            for app in $otp/lib/kernel-* $otp/lib/stdlib-*; do
+              base=$(basename "$app")
+              mmd -i $part "::/lib/$base" "::/lib/$base/ebin"
+              mcopy -i $part "$app"/ebin/*.beam "::/lib/$base/ebin/"
+            done
+
+            # The console-driving test probes (tests/*.erl, built by rebar3 in
+            # modules/beam.nix). Nothing ever starts this application: ERTS
+            # boots -mode embedded and start_clean's path covers only kernel
+            # and stdlib, so these beams are inert unless a test script asks
+            # for them by name (load_test_modules in tools/testbed). They ride
+            # the one shared disk rather than a test-only variant because,
+            # unlike the debug-restart channels and crasher PD that
+            # production-sdf-gate keeps out of the shipped topology, bytecode
+            # nothing loads grants no capability to anything.
+            #
+            # Landed UNVERSIONED even though buildRebar3 emits the usual
+            # <app>-<vsn> directory: the guest path is hard-coded in the
+            # loader (code:add_patha) and in chryso_test itself, and a version
+            # bump should not have to be chased through both.
+            mmd -i $part ::/lib/chryso_test ::/lib/chryso_test/ebin
+            mcopy -i $part \
+              ${config.packages.test-modules}/lib/erlang/lib/chryso_test-*/ebin/* \
+              ::/lib/chryso_test/ebin/
+
+            # apps/chryso_core's pure model, for the probes' in-situ audit.
+            # Inert for the same reason: only the test loader asks for it.
+            mmd -i $part ::/lib/chryso_core ::/lib/chryso_core/ebin
+            mcopy -i $part ${core}/ebin/* ::/lib/chryso_core/ebin/
+
+            # apps/chryso_orchestrator and the codec it decodes Root with.
+            # Nothing starts the application yet.
+            mmd -i $part ::/lib/chryso_abi ::/lib/chryso_abi/ebin
+            mcopy -i $part ${config.packages.abi-modules}/ebin/* ::/lib/chryso_abi/ebin/
+            mmd -i $part ::/lib/chryso_orchestrator ::/lib/chryso_orchestrator/ebin
+            mcopy -i $part ${orchestrator}/ebin/* ::/lib/chryso_orchestrator/ebin/
+
+            # A large inert read target for blk-fault-smoke. Small BEAM files
+            # can cross the virtio block path before the coordinated fault
+            # worker gets scheduled, leaving no driver request to reconcile.
+            # This file keeps the guest client read pending long enough for
+            # the injected fault to land, and is never loaded or executed.
+            truncate -s 16M fault-inflight.bin
+            mcopy -i $part fault-inflight.bin ::/fault-inflight.bin
+
+            # Boot script: the clean boot (kernel + stdlib) as start.boot.
+            cp "$otp/releases/$rel/start_clean.boot" start.boot
+            mcopy -i $part start.boot "::/releases/$rel/start.boot"
+
+            # Device files ERTS opens (empty: reads EOF, /dev/null sink).
+            # NOT /dev/urandom or /dev/random: runtime_sys_devices.c's openat backs
+            # those with the DRBG (an empty FAT file would just read EOF).
+            : > empty
+            mcopy -i $part empty ::/dev/null
+            mcopy -i $part empty ::/dev/zero
+
+            # Wrap the FAT image in an MBR table, partition 1 (the blk
+            # virt's partition 0) starts at sector 2048 (1 MiB aligned).
+            off=2048
+            truncate -s 320M $out
+            echo "label: dos
+            label-id: 0x43485259
+            start=$off, type=c" | sfdisk $out
+            dd if=$part of=$out bs=512 seek=$off conv=notrunc status=none
+          '';
     in
     {
       packages = {
@@ -625,122 +749,36 @@
             --without-control-pages
         '';
 
-        disk =
-          let
-            otp = "${pkgs.beamPackages.erlang}/lib/erlang";
-          in
-          pkgs.runCommand "chrysopolis-fat.img"
-            {
-              nativeBuildInputs = [
-                pkgs.dosfstools
-                pkgs.mtools
-                pkgs.util-linux
-              ];
-            }
-            ''
-              otp=${otp}
-              rel=$(ls $otp/releases | grep -E '^[0-9]+$' | head -1)
+        disk = mkDisk { };
 
-              # FAT stores local timestamps. Pin the clock, zone and generated
-              # identifiers so identical derivations produce identical bytes.
-              export SOURCE_DATE_EPOCH=315532800 TZ=UTC
-
-              # Build a populated FAT32 partition image.
-              part=part.fat
-              # 4 KiB sectors and clusters, one sDDF transfer block each, so the
-              # FAT server (built with FAT_SECTOR_SIZE=4096) never writes part of a
-              # block. FAT32 needs 65525 clusters, hence 316 MiB.
-              truncate -s 316M $part
-              # One FAT: a crash between FatFs's two unordered copy writes would
-              # leave them different, and FatFs only reads the first.
-              mkfs.fat --invariant -F 32 -S 4096 -s 1 -f 1 -n CHRYSO $part
-              sector=$(od -An -tu2 -j11 -N2 $part | tr -d ' ')
-              fats=$(od -An -tu1 -j16 -N1 $part | tr -d ' ')
-              if [ "$sector" != 4096 ] || [ "$fats" != 1 ]; then
-                echo "disk: BPB_BytsPerSec $sector, BPB_NumFATs $fats, expected 4096 and 1" >&2
-                exit 1
-              fi
-              # The fork's FatFs keeps its rename record in the last reserved
-              # sector, clear of the boot sector, FSInfo and their backups at 0,
-              # 1, 6 and 7. It must start zero, or a mount reads it as foreign.
-              reserved=$(od -An -tu2 -j14 -N2 $part | tr -d ' ')
-              if [ "$reserved" -lt 9 ]; then
-                echo "disk: BPB_RsvdSecCnt $reserved, the rename record needs at least 9" >&2
-                exit 1
-              fi
-              if ! cmp -s -n 4096 -i "$(((reserved - 1) * 4096)):0" "$part" /dev/zero; then
-                echo "disk: reserved sector $((reserved - 1)), the rename record's, is not zero" >&2
-                exit 1
-              fi
-              export MTOOLS_SKIP_CHECK=1
-
-              mmd -i $part ::/dev ::/bin ::/lib ::/releases "::/releases/$rel"
-
-              for app in $otp/lib/kernel-* $otp/lib/stdlib-*; do
-                base=$(basename "$app")
-                mmd -i $part "::/lib/$base" "::/lib/$base/ebin"
-                mcopy -i $part "$app"/ebin/*.beam "::/lib/$base/ebin/"
-              done
-
-              # The console-driving test probes (tests/*.erl, built by rebar3 in
-              # modules/beam.nix). Nothing ever starts this application: ERTS
-              # boots -mode embedded and start_clean's path covers only kernel
-              # and stdlib, so these beams are inert unless a test script asks
-              # for them by name (load_test_modules in tools/testbed). They ride
-              # the one shared disk rather than a test-only variant because,
-              # unlike the debug-restart channels and crasher PD that
-              # production-sdf-gate keeps out of the shipped topology, bytecode
-              # nothing loads grants no capability to anything.
-              #
-              # Landed UNVERSIONED even though buildRebar3 emits the usual
-              # <app>-<vsn> directory: the guest path is hard-coded in the
-              # loader (code:add_patha) and in chryso_test itself, and a version
-              # bump should not have to be chased through both.
-              mmd -i $part ::/lib/chryso_test ::/lib/chryso_test/ebin
-              mcopy -i $part \
-                ${config.packages.test-modules}/lib/erlang/lib/chryso_test-*/ebin/* \
-                ::/lib/chryso_test/ebin/
-
-              # apps/chryso_core's pure model, for the probes' in-situ audit.
-              # Inert for the same reason: only the test loader asks for it.
-              mmd -i $part ::/lib/chryso_core ::/lib/chryso_core/ebin
-              mcopy -i $part ${config.packages.core-modules}/ebin/*.beam ::/lib/chryso_core/ebin/
-
-              # apps/chryso_orchestrator and the codec it decodes Root with.
-              # Nothing starts the application yet.
-              mmd -i $part ::/lib/chryso_abi ::/lib/chryso_abi/ebin
-              mcopy -i $part ${config.packages.abi-modules}/ebin/*.beam ::/lib/chryso_abi/ebin/
-              mmd -i $part ::/lib/chryso_orchestrator ::/lib/chryso_orchestrator/ebin
-              mcopy -i $part ${config.packages.orchestrator-modules}/ebin/* ::/lib/chryso_orchestrator/ebin/
-
-              # A large inert read target for blk-fault-smoke. Small BEAM files
-              # can cross the virtio block path before the coordinated fault
-              # worker gets scheduled, leaving no driver request to reconcile.
-              # This file keeps the guest client read pending long enough for
-              # the injected fault to land, and is never loaded or executed.
-              truncate -s 16M fault-inflight.bin
-              mcopy -i $part fault-inflight.bin ::/fault-inflight.bin
-
-              # Boot script: the clean boot (kernel + stdlib) as start.boot.
-              cp "$otp/releases/$rel/start_clean.boot" start.boot
-              mcopy -i $part start.boot "::/releases/$rel/start.boot"
-
-              # Device files ERTS opens (empty: reads EOF, /dev/null sink).
-              # NOT /dev/urandom or /dev/random: runtime_sys_devices.c's openat backs
-              # those with the DRBG (an empty FAT file would just read EOF).
-              : > empty
-              mcopy -i $part empty ::/dev/null
-              mcopy -i $part empty ::/dev/zero
-
-              # Wrap the FAT image in an MBR table, partition 1 (the blk
-              # virt's partition 0) starts at sector 2048 (1 MiB aligned).
-              off=2048
-              truncate -s 320M $out
-              echo "label: dos
-              label-id: 0x43485259
-              start=$off, type=c" | sfdisk $out
-              dd if=$part of=$out bs=512 seek=$off conv=notrunc status=none
+        # Negative controls for orch-driver-smoke. Each mutates one rule, and
+        # --replace-fail stops the build if the source no longer matches.
+        # nc-gone: the plan no longer skips drivers Root gave up on.
+        disk-nc-gone = mkDisk {
+          name = "chrysopolis-fat-nc-gone.img";
+          core = config.packages.core-modules.overrideAttrs (old: {
+            postPatch = (old.postPatch or "") + ''
+              substituteInPlace src/chryso_plan.erl --replace-fail \
+                '#{state := live, last_restart := Last} = Row <- [' \
+                '#{last_restart := Last} = Row <- ['
             '';
+          });
+        };
+        # nc-twice: the controller sends every command twice, and logs both.
+        disk-nc-twice = mkDisk {
+          name = "chrysopolis-fat-nc-twice.img";
+          orchestrator = config.packages.orchestrator-modules.overrideAttrs (old: {
+            postPatch = (old.postPatch or "") + ''
+              substituteInPlace src/chryso_lifecycle_ctl.erl \
+                --replace-fail \
+                'ok = chryso_root_port:command(Ref, Child, Fence, At, self()),' \
+                'ok = chryso_root_port:command(Ref, Child, Fence, At, self()), ok = chryso_root_port:command(Ref, Child, Fence, At, self()),' \
+                --replace-fail \
+                '    {Effects, Actions}.' \
+                '    {lists:flatmap(fun({command, _, _, _} = E) -> [E, E]; (E) -> [E] end, Effects), Actions}.'
+            '';
+          });
+        };
 
         # Bring-up image (console + clock + heap, no ERTS).
         default = withImageTests (mkSel4Image {

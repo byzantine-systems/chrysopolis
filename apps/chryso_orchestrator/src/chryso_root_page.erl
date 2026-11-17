@@ -17,7 +17,11 @@ knowledge(Bytes, Drivers) ->
         {error, _} -> chryso_observe:unknown()
     end.
 
--spec from_rows(map(), [map()], [non_neg_integer()]) -> chryso_observe:knowledge().
+-spec from_rows(
+    chryso_abi_codec:root_status_header(), [chryso_abi_codec:root_child_status()], [
+        non_neg_integer()
+    ]
+) -> chryso_observe:knowledge().
 from_rows(Header, Rows, Drivers) ->
     #{
         root_generation := G,
@@ -41,7 +45,7 @@ from_rows(Header, Rows, Drivers) ->
     end.
 
 %% A row the codec cannot name stays a bad row, so from_page refuses the page.
--spec row(map()) -> map().
+-spec row(chryso_abi_codec:root_child_status()) -> chryso_observe:child_row() | #{}.
 row(#{
     state := Wire,
     lifetime_count := L,

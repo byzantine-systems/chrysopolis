@@ -25,13 +25,16 @@ comes back as `{chryso_reply, Ref, Result}`.
 -define(NAME, ?MODULE).
 -define(META, #{domain => [chryso, orchestrator]}).
 
+-type state() :: #{device := module()}.
+
 -doc "Start the port over `Device`, a `chryso_root_device` module.".
 -spec start_link(Device :: module()) -> gen_server:start_ret().
 start_link(Device) ->
     gen_server:start_link({local, ?NAME}, ?MODULE, Device, []).
 
 -doc "One read of Root's status, as knowledge of `Drivers`. Exits on timeout.".
--spec read(Drivers :: [non_neg_integer()], Timeout :: timeout()) -> chryso_observe:knowledge().
+-spec read(Drivers :: [non_neg_integer()], Timeout :: non_neg_integer()) ->
+    chryso_observe:knowledge().
 read(Drivers, Timeout) ->
     gen_server:call(?NAME, {read, Drivers}, Timeout).
 
@@ -50,7 +53,7 @@ command(Ref, Child, Fence, At, ReplyTo) ->
     gen_server:cast(?NAME, {command, Ref, Child, Fence, At, ReplyTo}).
 
 -doc "Returns once every earlier cast has been handled.".
--spec sync(Timeout :: timeout()) -> ok.
+-spec sync(Timeout :: non_neg_integer()) -> ok.
 sync(Timeout) ->
     gen_server:call(?NAME, sync, Timeout).
 
@@ -59,12 +62,12 @@ sync(Timeout) ->
 %% Opens nothing: the channel is held per command, and a raw file closes with
 %% its owner if the port dies mid-call.
 -doc false.
--spec init(module()) -> {ok, map()}.
+-spec init(module()) -> {ok, state()}.
 init(Device) ->
     {ok, #{device => Device}}.
 
 -doc false.
--spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
+-spec handle_call(term(), gen_server:from(), state()) -> {reply, term(), state()}.
 handle_call({read, Drivers}, _From, #{device := Device} = State) ->
     Known =
         case Device:read_status() of
@@ -78,7 +81,7 @@ handle_call(_Other, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
 -doc false.
--spec handle_cast(term(), map()) -> {noreply, map()}.
+-spec handle_cast(term(), state()) -> {noreply, state()}.
 handle_cast({command, Ref, Child, Fence, At, ReplyTo}, State) ->
     case erlang:monotonic_time(millisecond) >= At of
         true ->
@@ -88,17 +91,19 @@ handle_cast({command, Ref, Child, Fence, At, ReplyTo}, State) ->
             ok = send(Ref, Child, Fence, ReplyTo, State),
             {noreply, State}
     end;
-handle_cast(_Other, State) ->
+handle_cast(Other, State) ->
+    ?LOG_WARNING(#{what => unexpected, type => cast, content => Other}, ?META),
     {noreply, State}.
 
 -doc false.
--spec handle_info(term(), map()) -> {noreply, map()}.
-handle_info(_Info, State) ->
+-spec handle_info(term(), state()) -> {noreply, state()}.
+handle_info(Info, State) ->
+    ?LOG_WARNING(#{what => unexpected, type => info, content => Info}, ?META),
     {noreply, State}.
 
 %% --- internals ------------------------------------------------------------------
 
--spec send(pos_integer(), non_neg_integer(), chryso_plan:fence(), pid(), map()) -> ok.
+-spec send(pos_integer(), non_neg_integer(), chryso_plan:fence(), pid(), state()) -> ok.
 send(Ref, Child, Fence, ReplyTo, #{device := Device}) ->
     #{root_generation := G, seq := S, lifetime := L} = Fence,
     Command = chryso_abi_codec:ctl_command_to_binary(#{
@@ -125,7 +130,7 @@ reply({ok, Result}, Ref, Child, ReplyTo) ->
     ReplyTo ! {chryso_reply, Ref, Result},
     ok;
 reply({error, Reason}, Ref, Child, _ReplyTo) ->
-    ?LOG_NOTICE(#{what => command_lost, ref => Ref, child => Child, reason => Reason}, ?META),
+    ?LOG_WARNING(#{what => command_lost, ref => Ref, child => Child, reason => Reason}, ?META),
     ok.
 
 -spec result({ok, binary()} | {error, term()}) -> {ok, chryso_lifecycle:result()} | {error, term()}.

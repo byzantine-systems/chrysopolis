@@ -15,6 +15,10 @@ Laws, through `commands/1`:
 - **bounded**: `next` plans at most one command.
 
 Non-law: a fault restart after `T` also satisfies the want.
+
+`then/2` has no caller in the driver slice, where `next/3` plans one command
+at most. It stays because a rollout composes plans in sequence, and its laws
+are what that composition will rely on.
 """.
 
 -export([none/0, restart/2, then/2, commands/1, next/3]).

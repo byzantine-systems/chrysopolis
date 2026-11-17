@@ -9,10 +9,11 @@ when the controller does not answer in time.
 -define(TIMEOUT, 5000).
 
 -doc """
-Each watched driver's `{Condition, Reason}`, and the page they come from
-(`root_generation`, `beam_incarnation`, `seq`), or `unknown`.
+Each watched driver's `{Condition, Reason}` under `conditions`, each want's
+`held`, `open` or `failed` under `wants`, and the page they come from under
+`observed` (`root_generation`, `beam_incarnation`, `seq`), or `unknown`.
 """.
--spec status() -> map().
+-spec status() -> chryso_lifecycle_ctl:status().
 status() ->
     chryso_lifecycle_ctl:status(?TIMEOUT).
 

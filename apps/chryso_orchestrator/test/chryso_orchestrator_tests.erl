@@ -108,9 +108,9 @@ lost_reply_restarts_once(_) ->
     ok = chryso_fake_root:drop_next(),
     {ok, _} = chryso_orchestrator:want(1),
     ok = chryso_root_port:sync(1000),
-    timer:sleep(2 * ?DEADLINE),
+    ok = until(fun deadline_fired/0),
     ok = rounds(3),
-    timer:sleep(2 * ?DEADLINE),
+    ok = until(fun deadline_fired/0),
     ok = rounds(3),
     [
         ?_assertMatch([{1, _}], chryso_fake_root:accepted()),
@@ -159,7 +159,7 @@ busy_channel_restarts_once(_) ->
     {ok, _} = chryso_orchestrator:want(1),
     ok = chryso_root_port:sync(1000),
     Refused = chryso_fake_root:accepted(),
-    timer:sleep(2 * ?DEADLINE),
+    ok = until(fun deadline_fired/0),
     ok = until(fun() -> length(chryso_fake_root:accepted()) =:= 1 end),
     ok = rounds(3),
     [
@@ -190,6 +190,12 @@ crash_looping_port_stops_the_tree(Sup) ->
     ?_assertEqual(shutdown, Down).
 
 %% --- helpers --------------------------------------------------------------------
+
+%% The explicit event a lost command waits for: its deadline reached the
+%% controller, as the decision log shows.
+deadline_fired() ->
+    {Entries, _Dropped} = chryso_orchestrator:decisions(),
+    lists:any(fun({Input, _}) -> element(1, Input) =:= deadline end, Entries).
 
 %% Let queued commands reach the fake, their replies reach the controller, and
 %% the controller read the result.

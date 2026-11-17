@@ -404,7 +404,7 @@
                                {ok, R} <- [xref:analyze(s, A)], R =/= []],
               case Bad of [] -> ok; _ -> io:format("xref: ~p~n", [Bad]), halt(1) end,
               ok = eunit:test([chryso_orchestrator_tests], [verbose]),
-              Mods = [prop_root_page, prop_decisions, prop_orchestrator],
+              Mods = [prop_root_page, prop_decisions, prop_orchestrator, prop_config],
               Failed = [{M, R} || M <- Mods, R <- [proper:module(M, [{numtests, 200}])], R =/= []],
               io:format("~nproperty failures: ~p~n", [Failed]),
               halt(case Failed of [] -> 0; _ -> 1 end).'

@@ -20,8 +20,8 @@ convergence under fair delivery, and duplicate or older reads change nothing.
 Non-law: latency is unbounded, and a lost reply's outcome waits for a read.
 """.
 
--export([new/1, step/2, conditions/1, wants/1, known/1]).
--export_type([params/0, state/0, input/0, effect/0, result/0, conditions/0]).
+-export([new/1, step/2, conditions/1, wants/1, known/1, wants_status/1]).
+-export_type([params/0, state/0, input/0, effect/0, result/0, conditions/0, want_status/0]).
 
 -doc """
 `drivers` are the children the controller watches. `deadline_ms` bounds a
@@ -62,6 +62,12 @@ limit, and `settle_ms` and `floor` feed `chryso_condition`.
     {command, pos_integer(), non_neg_integer(), chryso_plan:fence()}
     | {arm, pos_integer(), non_neg_integer()}
     | {publish, conditions()}.
+
+-doc """
+Whether a want holds: `held` once the known page shows a restart at or after
+its tick, `failed` once Root refused it for good, else `open`.
+""".
+-type want_status() :: held | open | failed.
 
 -doc "Each watched driver's condition and reason.".
 -type conditions() :: #{
@@ -155,7 +161,29 @@ known(#{known := Known}) ->
 wants(#{wants := Wants}) ->
     Wants.
 
+-doc """
+Each want's status, from the known page and Root's refusals only, so a reader
+waits on this rather than guessing from a condition's name.
+
+Laws (`prop_lifecycle`): a `held` want's page shows `last_restart >= T`, and
+a live `open` one's does not. A `held` want is never commanded. With no want
+`open`, nothing is commanded. For a live driver, a want is `open` exactly
+when its condition is `restarting`.
+""".
+-spec wants_status(State :: state()) -> #{non_neg_integer() => want_status()}.
+wants_status(#{known := Known, wants := Wants} = State) ->
+    #{C => want_status(C, T, Known, State) || C := T <- Wants}.
+
 %% --- internals ------------------------------------------------------------------
+
+-spec want_status(non_neg_integer(), non_neg_integer(), chryso_observe:knowledge(), state()) ->
+    want_status().
+want_status(Child, T, Known, State) ->
+    case {is_failed(Child, State), chryso_observe:child(Known, Child)} of
+        {true, _} -> failed;
+        {false, #{last_restart := Last}} when Last >= T -> held;
+        {false, _} -> open
+    end.
 
 %% Lift the waits this read settles. Only reads run this: a gone child stays
 %% gone because Root keeps it gone and only the newest page is known.

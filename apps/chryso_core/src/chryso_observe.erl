@@ -10,7 +10,10 @@ Laws, through `view/1`:
 - **identity**: `unknown()` is its identity, so a failed read loses nothing.
 - **newest wins**: the merge of two pages is the one with the greater stamp.
 
-Non-law: a newer `beam_incarnation` is a different reader, not a newer page.
+Non-laws: a newer `beam_incarnation` is a different reader, not a newer page.
+Two pages with one stamp but different bytes are a Root fault, not a tie
+(`root_status_observe` treats them so). `merge` still picks one, by term
+order, so it stays total and deterministic, but neither choice is a claim.
 """.
 
 -export([unknown/0, from_page/1, merge/2, view/1, child/2, stamp/1]).

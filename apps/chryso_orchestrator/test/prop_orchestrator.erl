@@ -105,7 +105,13 @@ postcondition(#{wants := Wants}, {call, _, Name, _}, _Result) ->
             kill -> true;
             _ -> chryso_orchestrator:replay() =:= match
         end,
-    Once andalso Replay.
+    case [Law || {Law, false} <- [{at_most_once, Once}, {replay, Replay}]] of
+        [] ->
+            true;
+        Broken ->
+            io:format("broken: ~p~n", [Broken]),
+            false
+    end.
 
 %% --- the system under test ------------------------------------------------------
 
