@@ -326,10 +326,11 @@
             export CHRYSO_ROOT_TRACES=${config.packages.root-traces}
             mkdir ebin
             erlc -o ebin +debug_info +warnings_as_errors +warn_missing_spec +warn_missing_doc src/*.erl
-            erlc -o ebin +debug_info +warnings_as_errors -pa ebin test/prop_*.erl
+            erlc -o ebin +debug_info +warnings_as_errors -pa ebin test/lifecycle_world.erl test/prop_*.erl
             # Status 2 means warnings inside OTP's own apps; the PLT is still built.
             dialyzer --build_plt --apps erts kernel stdlib --output_plt core.plt >/dev/null || [ $? -eq 2 ]
-            dialyzer --plt core.plt -Wunmatched_returns -Werror_handling ebin/chryso_root*.beam ebin/chryso_frame.beam
+            dialyzer --plt core.plt -Wunmatched_returns -Werror_handling ebin/chryso_root*.beam ebin/chryso_frame.beam \
+              ebin/chryso_observe.beam ebin/chryso_condition.beam ebin/chryso_plan.beam ebin/chryso_lifecycle.beam
             erl -noshell -pa ebin -eval '
               xref:start(s), xref:set_default(s, [{warnings, false}]),
               ok = xref:set_library_path(s, code:get_path()),
@@ -338,7 +339,8 @@
                                {ok, R} <- [xref:analyze(s, A)], R =/= []],
               case Bad of [] -> ok; _ -> io:format("xref: ~p~n", [Bad]), halt(1) end,
               Mods = [prop_root_policy, prop_root_spec, prop_root_bucket,
-                      prop_root_command, prop_root, prop_root_traces, prop_frame],
+                      prop_root_command, prop_root, prop_root_traces, prop_frame,
+                      prop_observe, prop_condition, prop_plan, prop_lifecycle],
               Failed = [{M, R} || M <- Mods, R <- [proper:module(M, [{numtests, 300}])], R =/= []],
               io:format("~nproperty failures: ~p~n", [Failed]),
               halt(case Failed of [] -> 0; _ -> 1 end).'
