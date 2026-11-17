@@ -45,7 +45,7 @@ MAX_STEPS: Final = 16
 # Status is listed, or a step allowed only an unlisted one has no nominal.
 PREFERENCE: Final[tuple[Status, ...]] = (
     Status.OK, Status.PRESENT, Status.DIFFERS, Status.ENOENT, Status.EEXIST, Status.GONE,
-    Status.UNREACHABLE, Status.EIO, Status.ERROR, Status.ABSENT,
+    Status.UNASKED, Status.UNREACHABLE, Status.EIO, Status.ERROR, Status.ABSENT,
 )  # fmt: skip
 
 

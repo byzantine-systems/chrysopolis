@@ -1,14 +1,16 @@
 """The smokes' programs against the model. A smoke shows a fix only if the
 model makes its claim strict: an overwrite allowed to fail, or a remove or
 rename allowed to be refused, would let the smoke pass on the old system.
-Planted defect: an `Overwrite` that inherits a get's read-fault expectation
-fails test_the_latent_overwrite_must_succeed."""
+Planted defects: an `Overwrite` that inherits a get's read-fault expectation
+fails test_the_latent_overwrite_must_succeed, and a want of a gone driver that
+may reach Root fails test_the_orch_driver_program_is_strict."""
 
 from __future__ import annotations
 
 from chryso_testbed.allowed import Allowed
 from chryso_testbed.faults import Model, Program, expect
-from chryso_testbed.outcomes import Outcome, Seed, Status
+from chryso_testbed.outcomes import Condition, GaveUp, Outcome, Restarted, Seed, Status
+from chryso_testbed.scenarios.orch import orch_driver
 from chryso_testbed.scenarios.restart import AFTER_RECOVERY, LATENT_OVERWRITE, RENAME, UNLINK
 from chryso_testbed.steer import nominal
 
@@ -48,3 +50,26 @@ def test_after_recovery_only_the_new_name_holds_the_file() -> None:
     assert put == expect(Status.OK)
     assert old == expect(Status.ENOENT)
     assert new == expect(Seed(7))
+
+
+def test_the_orch_driver_program_is_strict() -> None:
+    """Every step of the orchestrator smoke allows exactly one outcome, so the
+    smoke cannot pass on a system that does something else. The table is the
+    model's fold of the program, with the parts that carry the orchestrator's
+    laws pinned by hand."""
+    parts = dict(orch_driver(BUDGET))
+    folded = expectations(tuple(step for _, program in orch_driver(BUDGET) for step in program))
+    assert all(a.only() is not None for a in folded)
+    ready = expect(Condition("ready", "settled"))
+    offset = len(parts["fault"]) + len(parts["ready"])
+    want = folded[offset : offset + len(parts["want"])]
+    assert want == [expect(Restarted("ctl-restart", 1)), expect(Status.UNASKED), ready]
+    gone = folded[offset + len(parts["want"]) : offset + len(parts["want"]) + len(parts["gone"])]
+    assert gone[BUDGET:] == [
+        expect(Condition("degraded", "low_budget")),
+        expect(GaveUp("budget-exhausted")),
+        expect(Condition("gone", "gave_up")),
+        expect(Status.UNASKED),
+        expect(Condition("gone", "gave_up")),
+    ]
+    assert folded[-1] == expect(Restarted("ctl-restart", 2))

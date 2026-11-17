@@ -125,7 +125,10 @@ def decision(kind: str, count: str | None, reason: str | None) -> Outcome:
 
 
 # Root's lines for a command from the orchestrator, by child.
-CTL_DECISION: Final = r"ROOT\|(ctl-restart|giveup)\|child={child}\|(?:count=(\d+)|reason=([\w-]+))"
+CTL_DECISION: Final = (
+    r"ROOT\|(ctl-restart|giveup|gone)\|child={child}\|"
+    r"(?:count=(\d+)|reason=([\w-]+)|ignored=ctl-restart)"
+)
 
 
 def condition_outcome(name: str, reason: str) -> Outcome:
@@ -134,12 +137,17 @@ def condition_outcome(name: str, reason: str) -> Outcome:
     return Status.ERROR if parsed is None else parsed
 
 
-def want_outcome(reported: str, root: Outcome | None) -> Outcome:
-    """A want's outcome: Root's line when it printed one, else what the
-    probe saw. A want that held with no Root line, or timed out, is ERROR."""
+def want_outcome(reported: str, root: Outcome | None, asked: int) -> Outcome:
+    """A want's outcome: Root's line when it printed one. Otherwise, for a
+    gone driver, whether Root counted any command (`asked`, from Root's own
+    tallies): Root refuses a command for a gone driver without a line, so
+    `GONE` when it was asked, `UNASKED` when it was not. A want that held
+    with no Root line, or timed out, is ERROR."""
     if root is not None:
         return root
-    return Status.GONE if reported == "gone" else Status.ERROR
+    if reported == "gone":
+        return Status.GONE if asked > 0 else Status.UNASKED
+    return Status.ERROR
 
 
 async def root_decision(
@@ -296,13 +304,13 @@ async def perform(
                 return Status.ABSENT
             await m.overwrite(sector, 1, CORRUPTION)
             return Status.PRESENT
-        case Want(driver=d):
+        case Want(driver=d, flood=flood):
             mark = m.console.mark()
-            result = await probes.run(
-                m, f"chryso_orch:want({tag}, {abi.child(d)}).", f"ORCH_WANT.{tag.upper()}"
-            )
+            call = f"chryso_orch:want({tag}, {abi.child(d)}, {str(flood).lower()})."
+            result = await probes.run(m, call, f"ORCH_WANT.{tag.upper()}")
             (want,) = probes.records(result, "want")
-            return want_outcome(want.get("outcome"), ctl_decision(m, abi.child(d), mark))
+            root = ctl_decision(m, abi.child(d), mark)
+            return want_outcome(want.get("outcome"), root, int(want.get("asked")))
         case Rewant(driver=d):
             mark = m.console.mark()
             result = await probes.run(
@@ -311,7 +319,7 @@ async def perform(
             (rewant,) = probes.records(result, "rewant")
             if (root := ctl_decision(m, abi.child(d), mark)) is not None:
                 return root
-            return Status.OK if rewant.get("applied") in {"true", "false"} else Status.ERROR
+            return Status.UNASKED if rewant.get("applied") in {"true", "false"} else Status.ERROR
         case Look(driver=d):
             result = await probes.run(
                 m, f"chryso_orch:look({tag}, {abi.child(d)}).", f"ORCH_LOOK.{tag.upper()}"

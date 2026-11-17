@@ -34,6 +34,10 @@
         builtins.toJSON {
           images = lib.genAttrs images (name: "${config.packages.${name}}");
           disk = "${config.packages.disk}";
+          disks = {
+            nc-gone = "${config.packages.disk-nc-gone}";
+            nc-twice = "${config.packages.disk-nc-twice}";
+          };
           abi = "${../interfaces/generated/system-abi.json}";
           qemu = "${pkgs.qemu}/bin/qemu-system-aarch64";
           qemu_img = "${pkgs.qemu}/bin/qemu-img";

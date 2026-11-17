@@ -25,7 +25,11 @@ state they need instead of waiting for it. Each caught a planted defect:
 | an overwrite expects a get's read errors | test_an_overwrite_never_reads_file_data |
 | only a get may fail on a dirty window | test_a_dirty_window_may_fail_any_volume_step |
 | a want leaves Root's budget unspent | test_a_want_is_a_restart_through_the_orchestrator |
-| a rewant allows a second restart | test_applying_a_want_again_changes_nothing |
+| a rewant allows a second restart | test_applying_a_want_again_asks_nothing |
+| a want of a gone driver allows `GONE` | test_a_want_is_a_restart_through_the_orchestrator |
+| a gone want spends Root's budget | test_a_want_of_a_gone_driver_asks_nothing |
+| a flooded want gives up a restart early | test_a_flood_is_invisible_to_the_restart_algebra |
+| a flooded want restarts as debug | test_restarts_count_up_then_give_up_once_then_stay_gone |
 | a look marks its driver wanted | test_a_look_changes_nothing |
 | a look reads what is wanted | test_a_look_reads_root_alone |
 | a gone driver looks ready once wanted | test_a_gone_driver_looks_gone_until_a_reset |
@@ -234,6 +238,23 @@ def test_every_step_allows_something(trace: list[Seen]) -> None:
 # --- Root ----------------------------------------------------------------------------
 
 
+def nth_answer(step: Fault | Restart | Want, n: int) -> Outcome:
+    """The `n`th (from 0) answer to a driver's requests since boot: a restart
+    numbered `n + 1` on the path the request names, one give-up, then Root's
+    `GONE`, or `UNASKED` for a want, which the orchestrator never sends."""
+    if n < BUDGET:
+        match step:
+            case Fault():
+                return Restarted("restart", n + 1)
+            case Restart():
+                return Restarted("debug-restart", n + 1)
+            case Want():
+                return Restarted("ctl-restart", n + 1)
+    if n == BUDGET:
+        return GaveUp("budget-exhausted")
+    return Status.UNASKED if isinstance(step, Want) else Status.GONE
+
+
 def between_resets(trace: list[Seen]) -> list[list[Seen]]:
     """The trace cut at every reset, since Root starts over at each."""
     stretches: list[list[Seen]] = [[]]
@@ -250,23 +271,15 @@ def test_restarts_count_up_then_give_up_once_then_stay_gone(trace: list[Seen]) -
     """Per driver, between resets: restarts numbered 1 to the budget, then one
     give-up, then gone. Faults, debug restarts and wants share the count, and
     each takes the path its request names."""
-    paths = {Fault: "restart", Restart: "debug-restart", Want: "ctl-restart"}
     for stretch in between_resets(trace):
-        seen: dict[str, list[Outcome]] = {}
+        seen: dict[str, list[tuple[Fault | Restart | Want, Outcome]]] = {}
         for step, result in ((row.step, row.outcome) for row in stretch):
             if isinstance(step, Fault | Restart | Want):
-                seen.setdefault(step.driver, []).append(result)
-                if isinstance(result, Restarted):
-                    assert result.path == paths[type(step)]
-        for outcomes in seen.values():
-            restarts = [o for o in outcomes if isinstance(o, Restarted)]
-            assert [r.count for r in restarts] == list(range(1, len(restarts) + 1))
-            expected: list[Outcome] = [
-                *restarts,
-                *[GaveUp("budget-exhausted")] * (len(outcomes) > BUDGET),
-                *[Status.GONE] * max(0, len(outcomes) - BUDGET - 1),
+                seen.setdefault(step.driver, []).append((step, result))
+        for requests in seen.values():
+            assert [o for _, o in requests] == [
+                nth_answer(step, i) for i, (step, _) in enumerate(requests)
             ]
-            assert outcomes == expected
 
 
 @given(
@@ -279,16 +292,14 @@ def test_a_driver_is_restarted_budget_times_then_given_up_on(
     """Root's answers are deterministic, so following them for any run of
     requests to one driver gives exactly that sequence, whoever asks."""
     model = Model.start(BUDGET)
-    answers = []
+    answers: list[Outcome] = []
     for kind in kinds:
         step = STEP.validate_python({"kind": kind, "driver": driver})
         (only,) = model.expect(step).values
+        assert isinstance(step, Fault | Restart | Want)
+        assert only == nth_answer(step, len(answers))
         answers.append(only)
         model = model.after(step, only)
-    counts = [a.count for a in answers if isinstance(a, Restarted)]
-    assert counts == list(range(1, min(len(kinds), BUDGET) + 1))
-    assert answers[BUDGET : BUDGET + 1] == [GaveUp("budget-exhausted")][: len(kinds) - BUDGET]
-    assert all(a == Status.GONE for a in answers[BUDGET + 1 :])
 
 
 @given(
@@ -760,9 +771,39 @@ def settled(model: Model) -> Model:
     return replace(model, root=model.root.settled(DRIVERS))
 
 
-def as_root_word(outcome: Outcome, path: Literal["debug-restart", "ctl-restart"]) -> Outcome:
-    """The same Root decision under another request's name."""
-    return Restarted(path, outcome.count) if isinstance(outcome, Restarted) else outcome
+def to_ctl(outcome: Outcome) -> Outcome:
+    """Law 1's renaming, stated independently of the model: a debug restart's
+    answer as a want's. Root's decision keeps its count under `ctl-restart`,
+    and where Root would ignore the request the orchestrator never sends it."""
+    match outcome:
+        case Restarted(count=n):
+            return Restarted("ctl-restart", n)
+        case Status.GONE:
+            return Status.UNASKED
+        case _:
+            return outcome
+
+
+def to_debug(outcome: Outcome) -> Outcome:
+    match outcome:
+        case Restarted(count=n):
+            return Restarted("debug-restart", n)
+        case Status.UNASKED:
+            return Status.GONE
+        case _:
+            return outcome
+
+
+def faulted(model: Model, driver: Driver, times: int) -> Model:
+    """`model` after `times` faults of `driver`, each with the one outcome
+    Root's determinism allows. Built from Root's steps only, so a law about
+    wants does not lean on the semantics it tests."""
+    fault = Fault(kind="fault", driver=driver)
+    for _ in range(times):
+        only = model.expect(fault).only()
+        assert only is not None
+        model = model.after(fault, only)
+    return model
 
 
 def wanted(model: Model, driver: Driver, times: int) -> Model:
@@ -776,41 +817,66 @@ def wanted(model: Model, driver: Driver, times: int) -> Model:
     return model
 
 
-@given(model=states(), driver=drivers)
-def test_a_want_is_a_restart_through_the_orchestrator(model: Model, driver: Driver) -> None:
-    """Law 1, observed through `expect` and the components' keys: a want
-    allows what a settled debug restart allows, under Root's word
-    `ctl-restart`, and leaves Root, storage and network as that restart does."""
+@given(model=states(), driver=drivers, exhausted=st.booleans())
+def test_a_want_is_a_restart_through_the_orchestrator(
+    model: Model, driver: Driver, exhausted: bool
+) -> None:
+    """Law 1, total, observed through `expect` and the components' keys: a
+    want allows what a settled debug restart allows under the renaming, and
+    leaves Root, storage and network as that restart does. Half the cases
+    first spend the driver's whole budget, so the gone boundary is always
+    reached rather than left to chance."""
+    if exhausted:
+        model = faulted(settled(model), driver, BUDGET + 1)
+    event(f"gone={not model.root.up(driver)}")
     want = Want(kind="want", driver=driver)
     restart = Restart(kind="restart", driver=driver)
     allowed = model.expect(want)
     debug = model.expect(restart)
     assert not allowed.anything
     assert not debug.anything
-    assert allowed.values == {as_root_word(o, "ctl-restart") for o in debug.values}
+    assert allowed.values == {to_ctl(o) for o in debug.values}
     for seen in allowed.values:
         event(render(seen))
         via_ctl = model.after(want, seen)
-        via_debug = model.after(restart, as_root_word(seen, "debug-restart"))
+        via_debug = model.after(restart, to_debug(seen))
         assert via_ctl.root.key() == via_debug.root.key()
         assert via_ctl.storage.key() == via_debug.storage.key()
         assert via_ctl.net.key() == via_debug.net.key()
 
 
 @given(model=states(), driver=drivers, first=st.booleans(), data=st.data())
-def test_applying_a_want_again_changes_nothing(
+def test_applying_a_want_again_asks_nothing(
     model: Model, driver: Driver, first: bool, data: st.DataObject
 ) -> None:
-    """Law 2: re-applying the newest want, or none when nothing was wanted,
-    allows only `OK` and leaves the model as it was."""
+    """Law 2 for a want that holds: re-applying the newest want, or none when
+    nothing was wanted, allows only `UNASKED` and leaves the model as it was."""
     model = settled(model)
     if first:
         want = Want(kind="want", driver=driver)
         model = model.after(want, data.draw(outcome(model.expect(want))))
     event(f"wanted={driver in model.orch.wanted}")
     rewant = Rewant(kind="rewant", driver=driver)
-    assert model.expect(rewant) == expect(Status.OK)
-    assert model.after(rewant, Status.OK).key() == model.key()
+    assert model.expect(rewant) == expect(Status.UNASKED)
+    assert model.after(rewant, Status.UNASKED).key() == model.key()
+
+
+@given(driver=drivers, extra=st.integers(0, 2), program=programs, data=st.data())
+def test_a_want_of_a_gone_driver_asks_nothing(
+    driver: Driver, extra: int, program: Program, data: st.DataObject
+) -> None:
+    """Law 2 for a want that can never hold: once Root gives a driver up, a
+    want of it allows only `UNASKED` and leaves Root settled as it was, after
+    any later steps that are not a reset."""
+    model = faulted(Model.start(BUDGET), driver, BUDGET + 1 + extra)
+    want = Want(kind="want", driver=driver)
+    assert model.expect(want) == expect(Status.UNASKED)
+    for step in program:
+        if isinstance(step, Reset | CrashPut):
+            break
+        model = model.after(step, data.draw(outcome(model.expect(step))))
+        assert model.expect(want) == expect(Status.UNASKED)
+        assert model.after(want, Status.UNASKED).root.key() == settled(model).root.key()
 
 
 @given(model=states(), driver=drivers)
@@ -899,7 +965,7 @@ def test_a_want_commutes_with_what_a_restart_commutes_with(
     seen = data.draw(outcome(model.expect(want)))
     seen_other = data.draw(outcome(model.expect(other)))
     via_ctl = commutes(model, want, seen, other, seen_other)
-    via_debug = commutes(model, restart, as_root_word(seen, "debug-restart"), other, seen_other)
+    via_debug = commutes(model, restart, to_debug(seen), other, seen_other)
     event(f"commutes={via_ctl}")
     assert via_ctl == via_debug
 
@@ -939,6 +1005,18 @@ def test_looks_and_rewants_commute_with_every_step(
     assert one.key() == two.key()
 
 
+@given(model=states(), driver=drivers)
+def test_a_flood_is_invisible_to_the_restart_algebra(model: Model, driver: Driver) -> None:
+    """Law 8: a want made under a flood allows what a want allows and leaves
+    the same model, for every allowed outcome."""
+    plain = Want(kind="want", driver=driver)
+    flooded = Want(kind="want", driver=driver, flood=True)
+    assert model.expect(flooded) == model.expect(plain)
+    for seen in model.expect(plain).values:
+        event(render(seen))
+        assert model.after(flooded, seen).key() == model.after(plain, seen).key()
+
+
 @given(model=states(), driver=drivers, data=st.data())
 def test_a_reset_forgets_every_want(model: Model, driver: Driver, data: st.DataObject) -> None:
     """Law 7: after a reset nothing is wanted, so a rewant is the identity."""
@@ -947,7 +1025,7 @@ def test_a_reset_forgets_every_want(model: Model, driver: Driver, data: st.DataO
     model = model.after(Reset(kind="reset"), Status.OK)
     assert model.orch.wanted == frozenset()
     rewant = Rewant(kind="rewant", driver=driver)
-    assert model.after(rewant, Status.OK).key() == model.key()
+    assert model.after(rewant, Status.UNASKED).key() == model.key()
 
 
 def test_a_wanted_driver_degrades_then_is_given_up_on() -> None:
@@ -962,8 +1040,8 @@ def test_a_wanted_driver_degrades_then_is_given_up_on() -> None:
     assert model.expect(want) == expect(GaveUp("budget-exhausted"))
     model = model.after(want, GaveUp("budget-exhausted"))
     assert model.expect(look) == expect(Condition("gone", "gave_up"))
-    assert model.expect(want) == expect(Status.GONE)
-    assert model.expect(Rewant(kind="rewant", driver=eth)) == expect(Status.OK)
+    assert model.expect(want) == expect(Status.UNASKED)
+    assert model.expect(Rewant(kind="rewant", driver=eth)) == expect(Status.UNASKED)
 
 
 def _gave_up_a_want(trace: list[Seen]) -> bool:
@@ -1055,15 +1133,20 @@ def test_a_look_parses_exactly_the_closed_conditions(
         st.none(),
         st.builds(Restarted, path=st.just("ctl-restart"), count=st.integers(1, 64)),
         st.just(GaveUp("budget-exhausted")),
+        st.just(Status.GONE),
     ),
+    asked=st.integers(0, 3),
 )
 def test_root_decides_a_want_and_the_probe_only_fills_in(
-    reported: str, root: Outcome | None
+    reported: str, root: Outcome | None, asked: int
 ) -> None:
-    """Root's line is the outcome whenever it printed one. Without it, only a
-    driver the probe saw gone is GONE, and anything else is ERROR."""
-    got = want_outcome(reported, root)
+    """Root's line is the outcome whenever it printed one. Without it, a gone
+    driver is `GONE` when Root counted a command for it and `UNASKED` when it
+    counted none, and anything else is ERROR."""
+    got = want_outcome(reported, root, asked)
     if root is not None:
         assert got == root
+    elif reported == "gone":
+        assert got == (Status.GONE if asked > 0 else Status.UNASKED)
     else:
-        assert got == (Status.GONE if reported == "gone" else Status.ERROR)
+        assert got == Status.ERROR

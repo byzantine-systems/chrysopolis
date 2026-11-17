@@ -17,6 +17,7 @@ class Status(Enum):
     EEXIST = "eexist"  # a rename onto a name that exists
     DIFFERS = "differs"  # a file read back with the wrong contents
     GONE = "gone"  # Root ignored a request for a driver it gave up on
+    UNASKED = "unasked"  # the orchestrator sent Root no command
     PRESENT = "present"  # a disk fault found its target
     ABSENT = "absent"  # the target file has no data on disk
     UNREACHABLE = "unreachable"  # the guest could not reach the host

@@ -295,7 +295,10 @@
       "with the BEAM gone Root still faults and restarts the timer for the fallback peer",
       "with no status or spec page the compiled driver budget decides exactly",
       "probe results from /dev/chrysostat and /dev/chrysoctl arrive as framed runs and a damaged run fails at once",
-      "orch-fallback-smoke runs alone, after the other orch scenarios"
+      "orch-fallback-smoke runs alone, after the other orch scenarios",
+      "the driver orchestrator's every outcome is one the fault model allows while drivers fault, restart, exhaust their budget and get rate limited",
+      "the orchestrator's decision log replays through the pure step after every part, and Root's ring records exactly the commands it sent",
+      "Root counts no command for a driver it gave up on, and a want that held asked Root exactly once"
     ],
     "required_markers": [
       "ROOT_STATUS|boot|incarnation=1",
@@ -318,7 +321,8 @@
       "PEER|fallback|timer|count=2",
       "PEER|done",
       "CTL_STAT|FB_NOMAP|error=enodev",
-      "@@CHRYSO|LAT.FB_FLOOD"
+      "@@CHRYSO|LAT.FB_FLOOD",
+      "@@CHRYSO|ORCH_REPLAY.P4|n=0|k=replay|verdict=match"
     ],
     "forbidden_markers": [
       "unexpected PD fault"

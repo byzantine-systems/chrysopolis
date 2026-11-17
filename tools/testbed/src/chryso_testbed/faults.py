@@ -9,9 +9,13 @@ under budget so the console and clock survive.
 The orchestrator's steps (`Want`, `Rewant`, `Look`) obey these laws, each
 stated over `expect` and `key()` and tested in `tests/test_faults.py`:
 
-1. A `Want` is a settled `Restart` routed through the orchestrator: the same
-   outcomes with Root's word `ctl-restart`, and the same Root state after.
-2. Applying a want again changes nothing: `Rewant` allows only `OK`.
+1. A `Want` is a settled `Restart` routed through the orchestrator, total
+   under one renaming: `debug-restart` becomes `ctl-restart`, and `GONE`
+   (Root ignored the request) becomes `UNASKED` (the orchestrator never
+   sent it). Root's state after is the same either way.
+2. A want that already holds, or can never hold, asks nothing: `Rewant`,
+   and a `Want` of a gone driver, allow only `UNASKED` and leave Root as it
+   was.
 3. `Look` is an observation: with no driver recovering, it changes nothing.
 4. `Look` is level-triggered: a function of Root's chart for the driver
    only, never of history (`condition`, the table `chryso_condition` holds).
@@ -19,6 +23,10 @@ stated over `expect` and `key()` and tested in `tests/test_faults.py`:
 6. Derived from 1 to 3: a `Want` commutes with what a `Restart` commutes
    with, and `Look` and `Rewant` commute with every step.
 7. A reset forgets every want, as it forgets Root's budgets.
+8. A flood is invisible to the restart algebra: `Want(flood=True)` allows
+   what `Want` allows and leaves an equal model. Root's token bucket is not
+   modelled because a rate-limited command has no effect, and the flood has
+   stopped before the want is judged.
 
 Non-laws: a fault restart after a want's stamp also satisfies it (the probe
 reads Root before it stamps and each `Want` waits, so a program never lands
@@ -166,10 +174,13 @@ class Corrupt(_Step):
 
 class Want(_Step):
     """Ask the orchestrator for one restart of the driver after the page it
-    reads now, and wait until the want holds or Root gives the driver up."""
+    reads now, and wait until the want holds or Root gives the driver up.
+    With `flood`, another process floods Root with SYNC commands until Root
+    rate-limits it, and the flood stops before the want is settled."""
 
     kind: Literal["want"]
     driver: Driver
+    flood: bool = False
 
 
 class Rewant(_Step):
@@ -329,7 +340,10 @@ type RowState = Literal["unset", "live", "stopped", "gone", "quarantined"]
 
 def condition(state: RowState, lifetime: int, budget: int) -> Condition:
     """The orchestrator's condition for one Root row, as `chryso_condition`
-    classifies it on the guest (`settle_ms` 0, `floor` 0, every want held)."""
+    classifies it on the guest (`settle_ms` 0, `floor` 0, every want held).
+    That scope is why it never answers `restarting` or `recovering`: each
+    `Want` settles before the next step, and a zero settle window has no
+    recovery to report."""
     match state:
         case "gone":
             return Condition("gone", "gave_up")
@@ -342,13 +356,27 @@ def condition(state: RowState, lifetime: int, budget: int) -> Condition:
 
 
 def _as_ctl(outcome: Outcome) -> Outcome:
-    """Root's answer to a debug restart, as it answers the same command from
-    the orchestrator."""
-    return Restarted("ctl-restart", outcome.count) if isinstance(outcome, Restarted) else outcome
+    """Root's answer to a debug restart, as the orchestrator's want ends: the
+    same decision under Root's word `ctl-restart`, and no command at all where
+    Root would ignore one."""
+    match outcome:
+        case Restarted(count=n):
+            return Restarted("ctl-restart", n)
+        case Status.GONE:
+            return Status.UNASKED
+        case _:
+            return outcome
 
 
 def _as_debug(outcome: Outcome) -> Outcome:
-    return Restarted("debug-restart", outcome.count) if isinstance(outcome, Restarted) else outcome
+    """The inverse of `_as_ctl`."""
+    match outcome:
+        case Restarted(count=n):
+            return Restarted("debug-restart", n)
+        case Status.UNASKED:
+            return Status.GONE
+        case _:
+            return outcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -714,7 +742,12 @@ class Model:
         )
 
     def key(self) -> tuple[object, ...]:
-        """Equal keys mean equal lifecycles and data: the model's identity."""
+        """Equal keys mean equal lifecycles and data: the model's identity.
+        The laws compare models by key rather than by observation. Every field
+        `expect` reads is in the key, so equal keys give equal outcomes for
+        every step: a stronger equality, sound for the laws. State that
+        nothing observes must stay out of the key, or the laws would reject
+        models no step can tell apart."""
         return (self.root.key(), self.storage.key(), self.net.key(), self.orch.key())
 
     def look(self, driver: Driver) -> Condition:
@@ -750,7 +783,7 @@ class Model:
                 restart = Restart(kind="restart", driver=d)
                 return Allowed.of(*map(_as_ctl, self.root.expect(restart).values))
             case Rewant():
-                return expect(OK)
+                return expect(Status.UNASKED)
             case Look(driver=d):
                 return expect(self.look(d))
             case Reset() | CrashPut():
