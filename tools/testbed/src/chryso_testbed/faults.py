@@ -1,10 +1,29 @@
 """Fault programs and the model that judges them.
 
 A run is a blkdebug plan plus a `Program` of workload and fault steps.
-`Model` is a product of components (Root, storage, network) built on the
-charts in `lifecycles.py`: `expect` gives the outcomes a step may have,
-`after` folds in the one observed. `trim` keeps serial and timer under
-budget so the console and clock survive.
+`Model` is a product of components (Root, storage, network, orchestrator)
+built on the charts in `lifecycles.py`: `expect` gives the outcomes a step
+may have, `after` folds in the one observed. `trim` keeps serial and timer
+under budget so the console and clock survive.
+
+The orchestrator's steps (`Want`, `Rewant`, `Look`) obey these laws, each
+stated over `expect` and `key()` and tested in `tests/test_faults.py`:
+
+1. A `Want` is a settled `Restart` routed through the orchestrator: the same
+   outcomes with Root's word `ctl-restart`, and the same Root state after.
+2. Applying a want again changes nothing: `Rewant` allows only `OK`.
+3. `Look` is an observation: with no driver recovering, it changes nothing.
+4. `Look` is level-triggered: a function of Root's chart for the driver
+   only, never of history (`condition`, the table `chryso_condition` holds).
+5. With no status page, nothing is known and nothing is commanded.
+6. Derived from 1 to 3: a `Want` commutes with what a `Restart` commutes
+   with, and `Look` and `Rewant` commute with every step.
+7. A reset forgets every want, as it forgets Root's budgets.
+
+Non-laws: a fault restart after a want's stamp also satisfies it (the probe
+reads Root before it stamps and each `Want` waits, so a program never lands
+there). `Look` reports the page it read, not proof the driver
+re-initialised.
 """
 
 from __future__ import annotations
@@ -31,7 +50,7 @@ from chryso_testbed.lifecycles import (
     VolumeLifecycle,
     WindowLifecycle,
 )
-from chryso_testbed.outcomes import GaveUp, Outcome, Restarted, Seed, Status
+from chryso_testbed.outcomes import Condition, GaveUp, Outcome, Restarted, Seed, Status
 
 type Driver = Literal["serial", "timer", "blk", "eth"]
 DRIVERS: Final[tuple[Driver, ...]] = ("serial", "timer", "blk", "eth")
@@ -145,6 +164,29 @@ class Corrupt(_Step):
     file: int = Field(ge=0, lt=FILES)
 
 
+class Want(_Step):
+    """Ask the orchestrator for one restart of the driver after the page it
+    reads now, and wait until the want holds or Root gives the driver up."""
+
+    kind: Literal["want"]
+    driver: Driver
+
+
+class Rewant(_Step):
+    """Apply again the newest want made for the driver since boot. With none
+    it applies nothing, so a shrunk program is always legal."""
+
+    kind: Literal["rewant"]
+    driver: Driver
+
+
+class Look(_Step):
+    """Read Root, then the orchestrator's condition for the driver."""
+
+    kind: Literal["look"]
+    driver: Driver
+
+
 class Reset(_Step):
     """Reset the whole system, as a power cycle that keeps the disk."""
 
@@ -174,6 +216,9 @@ type Step = Annotated[
     | Arm
     | Disarm
     | Corrupt
+    | Want
+    | Rewant
+    | Look
     | Reset
     | CrashPut,
     Field(discriminator="kind"),
@@ -277,6 +322,49 @@ class RootModel:
 
     def key(self) -> tuple[object, ...]:
         return tuple(sorted((d, c.at, c.model.spent) for d, c in self.drivers.items()))
+
+
+type RowState = Literal["unset", "live", "stopped", "gone", "quarantined"]
+
+
+def condition(state: RowState, lifetime: int, budget: int) -> Condition:
+    """The orchestrator's condition for one Root row, as `chryso_condition`
+    classifies it on the guest (`settle_ms` 0, `floor` 0, every want held)."""
+    match state:
+        case "gone":
+            return Condition("gone", "gave_up")
+        case "live" if budget - lifetime <= 0:
+            return Condition("degraded", "low_budget")
+        case "live":
+            return Condition("ready", "settled")
+        case "stopped" | "quarantined" | "unset":
+            return Condition("degraded", state)
+
+
+def _as_ctl(outcome: Outcome) -> Outcome:
+    """Root's answer to a debug restart, as it answers the same command from
+    the orchestrator."""
+    return Restarted("ctl-restart", outcome.count) if isinstance(outcome, Restarted) else outcome
+
+
+def _as_debug(outcome: Outcome) -> Outcome:
+    return Restarted("debug-restart", outcome.count) if isinstance(outcome, Restarted) else outcome
+
+
+@dataclass(frozen=True, slots=True)
+class OrchModel:
+    """What the orchestrator holds that Root's page cannot show: the drivers
+    wanted since boot. `observable` is fixed by the image: false where Root
+    publishes no status page."""
+
+    wanted: frozenset[Driver] = frozenset()
+    observable: bool = True
+
+    def rebooted(self) -> OrchModel:
+        return replace(self, wanted=frozenset())
+
+    def key(self) -> tuple[object, ...]:
+        return (tuple(sorted(self.wanted)), self.observable)
 
 
 type StorageStep = Put | Overwrite | Get | Remove | Rename | Arm | Disarm | Corrupt
@@ -583,14 +671,16 @@ class NetModel:
         return ()
 
 
-type Component = Literal["root", "storage", "net", "system"]
+type Component = Literal["root", "storage", "net", "orch", "system"]
 
 
 def owner(step: Step) -> Component:
     """The component whose state a step reads and changes."""
     match step:
-        case Fault() | Restart():
+        case Fault() | Restart() | Want():
             return "root"
+        case Rewant() | Look():
+            return "orch"
         case Put() | Overwrite() | Get() | Remove() | Rename() | Arm() | Disarm() | Corrupt():
             return "storage"
         case Ping() | Unplug() | Pause():
@@ -608,18 +698,32 @@ class Model:
     root: RootModel
     storage: StorageModel = field(default_factory=StorageModel)
     net: NetModel = field(default_factory=NetModel)
+    orch: OrchModel = field(default_factory=OrchModel)
 
     @classmethod
-    def start(cls, budget: int, disk: Expected = CLEAN_DISK) -> Model:
-        return cls(RootModel(budget), StorageModel(disk))
+    def start(cls, budget: int, disk: Expected = CLEAN_DISK, *, observable: bool = True) -> Model:
+        return cls(RootModel(budget), StorageModel(disk), orch=OrchModel(observable=observable))
 
     def rebooted(self) -> Model:
         """Root, every driver and the BEAM start over on the same disk."""
-        return replace(self, root=RootModel(self.root.budget), storage=self.storage.rebooted())
+        return replace(
+            self,
+            root=RootModel(self.root.budget),
+            storage=self.storage.rebooted(),
+            orch=self.orch.rebooted(),
+        )
 
     def key(self) -> tuple[object, ...]:
         """Equal keys mean equal lifecycles and data: the model's identity."""
-        return (self.root.key(), self.storage.key(), self.net.key())
+        return (self.root.key(), self.storage.key(), self.net.key(), self.orch.key())
+
+    def look(self, driver: Driver) -> Condition:
+        """Law 4: the condition is a function of Root's chart only."""
+        if not self.orch.observable:
+            return Condition("unknown", "no_observation")
+        chart = self.root.chart(driver)
+        state: RowState = "gone" if chart.at == "gone" else "live"
+        return condition(state, chart.model.spent, chart.model.budget)
 
     def expect(self, step: Step) -> Allowed[Outcome]:
         match step:
@@ -640,6 +744,15 @@ class Model:
                 )
             case Unplug() | Pause():
                 return self.net.expect(step, up=self.root.up("eth"))
+            case Want(driver=d):
+                if not self.orch.observable:
+                    return expect(ERROR)
+                restart = Restart(kind="restart", driver=d)
+                return Allowed.of(*map(_as_ctl, self.root.expect(restart).values))
+            case Rewant():
+                return expect(OK)
+            case Look(driver=d):
+                return expect(self.look(d))
             case Reset() | CrashPut():
                 # A damaged volume may not mount, and then nothing boots.
                 return ANYTHING if self.storage.damaged else expect(OK)
@@ -663,4 +776,13 @@ class Model:
                 model = replace(self, storage=self.storage.after(step, outcome))
             case Ping() | Unplug() | Pause():
                 model = replace(self, net=self.net.after(step, outcome))
+            case Want(driver=d) if self.orch.observable:
+                restart = Restart(kind="restart", driver=d)
+                model = replace(
+                    self,
+                    root=self.root.after(restart, _as_debug(outcome)),
+                    orch=replace(self.orch, wanted=self.orch.wanted | {d}),
+                )
+            case Want() | Rewant() | Look():
+                model = self
         return replace(model, root=model.root.settled(recovering)) if recovering else model

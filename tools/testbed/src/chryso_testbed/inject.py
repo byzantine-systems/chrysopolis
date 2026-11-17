@@ -24,6 +24,7 @@ from chryso_testbed.faults import (
     Driver,
     Fault,
     Get,
+    Look,
     Model,
     Overwrite,
     Pause,
@@ -34,11 +35,21 @@ from chryso_testbed.faults import (
     Rename,
     Reset,
     Restart,
+    Rewant,
     Step,
     Unplug,
+    Want,
 )
 from chryso_testbed.machine import Machine
-from chryso_testbed.outcomes import GaveUp, Outcome, Restarted, Seed, Status, render
+from chryso_testbed.outcomes import (
+    Condition,
+    GaveUp,
+    Outcome,
+    Restarted,
+    Seed,
+    Status,
+    render,
+)
 from chryso_testbed.ports import Ports
 
 log = structlog.get_logger(__name__)
@@ -103,7 +114,7 @@ def get_outcome(reported: str) -> Outcome:
 def decision(kind: str, count: str | None, reason: str | None) -> Outcome:
     """A `ROOT|<kind>|child=N|...` line as an outcome."""
     match kind, count, reason:
-        case "restart" | "debug-restart" as path, str(n), _:
+        case "restart" | "debug-restart" | "ctl-restart" as path, str(n), _:
             return Restarted(path, int(n))
         case "giveup", _, str(why):
             return GaveUp(why)
@@ -111,6 +122,24 @@ def decision(kind: str, count: str | None, reason: str | None) -> Outcome:
             return Status.GONE
         case _:
             raise ValueError(f"unreadable Root decision: {kind} {count} {reason}")
+
+
+# Root's lines for a command from the orchestrator, by child.
+CTL_DECISION: Final = r"ROOT\|(ctl-restart|giveup)\|child={child}\|(?:count=(\d+)|reason=([\w-]+))"
+
+
+def condition_outcome(name: str, reason: str) -> Outcome:
+    """A look's frame fields as a `Condition`, or ERROR outside the closed sets."""
+    parsed = Condition.parse(name, reason)
+    return Status.ERROR if parsed is None else parsed
+
+
+def want_outcome(reported: str, root: Outcome | None) -> Outcome:
+    """A want's outcome: Root's line when it printed one, else what the
+    probe saw. A want that held with no Root line, or timed out, is ERROR."""
+    if root is not None:
+        return root
+    return Status.GONE if reported == "gone" else Status.ERROR
 
 
 async def root_decision(
@@ -126,6 +155,17 @@ async def root_decision(
     kind, count, reason = hit.groups
     if settle and (settled := SETTLED.get((driver, kind or ""))) is not None:
         await m.console.wait(settled, since=m.console.at(hit.end))
+    return decision(kind or "", count, reason)
+
+
+def ctl_decision(m: Machine, child: int, since: Mark) -> Outcome | None:
+    """Root's answer to an orchestrator command for `child` printed since
+    `since`, if any. Root's line goes out through its own debug channel, never
+    the serial driver a want may be restarting, so it is the authority."""
+    hit = m.console.search(CTL_DECISION.format(child=child), since=since)
+    if hit is None:
+        return None
+    kind, count, reason = hit.groups
     return decision(kind or "", count, reason)
 
 
@@ -256,6 +296,28 @@ async def perform(
                 return Status.ABSENT
             await m.overwrite(sector, 1, CORRUPTION)
             return Status.PRESENT
+        case Want(driver=d):
+            mark = m.console.mark()
+            result = await probes.run(
+                m, f"chryso_orch:want({tag}, {abi.child(d)}).", f"ORCH_WANT.{tag.upper()}"
+            )
+            (want,) = probes.records(result, "want")
+            return want_outcome(want.get("outcome"), ctl_decision(m, abi.child(d), mark))
+        case Rewant(driver=d):
+            mark = m.console.mark()
+            result = await probes.run(
+                m, f"chryso_orch:rewant({tag}, {abi.child(d)}).", f"ORCH_REWANT.{tag.upper()}"
+            )
+            (rewant,) = probes.records(result, "rewant")
+            if (root := ctl_decision(m, abi.child(d), mark)) is not None:
+                return root
+            return Status.OK if rewant.get("applied") in {"true", "false"} else Status.ERROR
+        case Look(driver=d):
+            result = await probes.run(
+                m, f"chryso_orch:look({tag}, {abi.child(d)}).", f"ORCH_LOOK.{tag.upper()}"
+            )
+            (look,) = probes.records(result, "look")
+            return condition_outcome(look.get("condition"), look.get("reason"))
         case Reset():
             await reboot(m, modules)
             return Status.OK

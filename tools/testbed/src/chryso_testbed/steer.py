@@ -38,7 +38,7 @@ from chryso_testbed.faults import (
     Unplug,
     trim,
 )
-from chryso_testbed.outcomes import GaveUp, Outcome, Restarted, Seed, Status
+from chryso_testbed.outcomes import Condition, GaveUp, Outcome, Restarted, Seed, Status
 
 MAX_STEPS: Final = 16
 # When several outcomes are allowed, look ahead as if things went well. Every
@@ -55,7 +55,7 @@ def nominal(model: Model, step: Step) -> Outcome:
     if allowed.anything:
         return Status.PRESENT if isinstance(step, Arm | Corrupt) else Status.OK
     for outcome in allowed.values:
-        if isinstance(outcome, Restarted | GaveUp | Seed):
+        if isinstance(outcome, Restarted | GaveUp | Seed | Condition):
             return outcome
     for status in PREFERENCE:
         if status in allowed.values:

@@ -136,7 +136,9 @@
       "the testbed package passes ruff and strict mypy",
       "the Python frame reader reproduces every Erlang golden vector, whole and at every split point",
       "a planted CRC change or driver fragment in a frame is refused as damaged",
-      "the fast frame reader equals the bytewise reference on generated logs"
+      "the fast frame reader equals the bytewise reference on generated logs",
+      "the fault model's orchestrator steps keep their laws: a want is a restart through the orchestrator, a rewant and a look change nothing, a look reads Root alone, nothing is commanded without a status page, and a reset forgets every want",
+      "the fault model's condition table agrees with chryso_condition on every row of the Erlang condition vectors"
     ]
   },
   "testbed-boot": {

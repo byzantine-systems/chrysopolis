@@ -101,6 +101,7 @@
         dontConfigure = true;
         dontInstall = true;
         env.CHRYSO_FRAME_VECTORS = "${config.packages.frame-vectors}";
+        env.CHRYSO_CONDITION_VECTORS = "${config.packages.condition-vectors}";
         buildPhase = ''
           runHook preBuild
           export HOME=$TMPDIR PYTHONPATH=$PWD/src
@@ -191,6 +192,38 @@
           python.pkgs.typer
         ];
         pythonImportsCheck = [ "chryso_testbed" ];
+      };
+
+      # Driver conditions from apps/chryso_core's classifier, for the fault
+      # model's table. Generated twice and compared, as the frame vectors.
+      packages.condition-vectors = pkgs.stdenvNoCC.mkDerivation {
+        name = "chrysopolis-condition-vectors";
+        src = pkgs.lib.fileset.toSource {
+          root = ../apps/chryso_core;
+          fileset = pkgs.lib.fileset.unions [
+            ../apps/chryso_core/src/chryso_condition.erl
+            ../apps/chryso_core/src/chryso_observe.erl
+            ../apps/chryso_core/test/chryso_condition_vectors.erl
+          ];
+        };
+        nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+        dontConfigure = true;
+        buildPhase = ''
+          runHook preBuild
+          mkdir ebin first second
+          erlc -o ebin +deterministic +warnings_as_errors \
+            src/chryso_observe.erl src/chryso_condition.erl test/chryso_condition_vectors.erl
+          erl -noshell -pa ebin -eval 'ok = chryso_condition_vectors:write("first"), halt().'
+          (cd second && umask 077 && TZ=Pacific/Kiritimati \
+            erl -noshell -pa ../ebin -eval 'ok = chryso_condition_vectors:write("."), halt().')
+          diff -r first second
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          cp -r first $out
+          runHook postInstall
+        '';
       };
 
       # Console-frame vectors from the Erlang reader. Generated twice and

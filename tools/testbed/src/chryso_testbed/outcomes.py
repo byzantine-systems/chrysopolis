@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal
+from typing import Literal, TypeIs, get_args
 
 
 class Status(Enum):
@@ -31,9 +31,10 @@ class Seed:
 
 @dataclass(frozen=True, slots=True)
 class Restarted:
-    """Root restarted a driver, through a fault or a debug request."""
+    """Root restarted a driver, through a fault, a debug request or a command
+    from the orchestrator. `path` is Root's own word for it."""
 
-    path: Literal["restart", "debug-restart"]
+    path: Literal["restart", "debug-restart", "ctl-restart"]
     count: int
 
 
@@ -44,7 +45,46 @@ class GaveUp:
     reason: str
 
 
-type Outcome = Status | Seed | Restarted | GaveUp
+type ConditionName = Literal["unknown", "gone", "restarting", "recovering", "degraded", "ready"]
+type Reason = Literal[
+    "no_observation",
+    "gave_up",
+    "restart_requested",
+    "rate_limited",
+    "restarted",
+    "low_budget",
+    "stopped",
+    "quarantined",
+    "unset",
+    "settled",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class Condition:
+    """A driver's condition as the orchestrator reports it, the closed sets
+    of `chryso_condition`."""
+
+    name: ConditionName
+    reason: Reason
+
+    @classmethod
+    def parse(cls, name: str, reason: str) -> Condition | None:
+        """The condition a probe reported, or None outside the closed sets."""
+        if _is_name(name) and _is_reason(reason):
+            return cls(name, reason)
+        return None
+
+
+def _is_name(value: str) -> TypeIs[ConditionName]:
+    return value in get_args(ConditionName.__value__)
+
+
+def _is_reason(value: str) -> TypeIs[Reason]:
+    return value in get_args(Reason.__value__)
+
+
+type Outcome = Status | Seed | Restarted | GaveUp | Condition
 
 
 def render(outcome: Outcome) -> str:
@@ -58,3 +98,5 @@ def render(outcome: Outcome) -> str:
             return f"{p}:{c}"
         case GaveUp(reason=r):
             return f"giveup:{r}"
+        case Condition(name=n, reason=r):
+            return f"{n}:{r}"
