@@ -1,7 +1,8 @@
 """The ring oracle against histories built the way Root publishes them,
 as observed on the guest: injection, fault, restart or give-up per fault
-request, a bare restart per debug restart, a `restart_child` control then the
-outcome per want Root answered, nothing once gone or never asked.
+request and per absorb, a bare restart per debug restart, a `restart_child`
+control then the outcome per want Root answered, nothing once gone or never
+asked.
 
 | Planted defect | Caught by |
 |---|---|
@@ -15,17 +16,19 @@ from typing import Final, Literal
 from hypothesis import given
 from hypothesis import strategies as st
 
-from chryso_testbed.faults import STEP, Driver, Fault, Model, Step, Want
+from chryso_testbed.faults import STEP, Absorb, Driver, Fault, Model, Step, Want
 from chryso_testbed.outcomes import GaveUp, Outcome, Restarted
 from chryso_testbed.rootlog import Kind, RootEvent, disagreements
 
 BUDGET: Final = 3
 CHILDREN: Final[dict[Driver, int]] = {"blk": 2, "eth": 3}
 
-type Request = Literal["fault", "restart", "want"]
+type Request = Literal["fault", "restart", "want", "absorb"]
 
 requests = st.lists(
-    st.tuples(st.sampled_from(["blk", "eth"]), st.sampled_from(["fault", "restart", "want"])),
+    st.tuples(
+        st.sampled_from(["blk", "eth"]), st.sampled_from(["fault", "restart", "want", "absorb"])
+    ),
     max_size=12,
 )
 
@@ -56,7 +59,7 @@ def history(
         (seen,) = model.expect(step).values
         child = CHILDREN[driver]
         answered = isinstance(seen, Restarted | GaveUp)
-        if answered and isinstance(step, Fault):
+        if answered and isinstance(step, Fault | Absorb):
             publish(Kind.CONTROL, child, "fault_inject")
             publish(Kind.FAULT, child, "6")
         if answered and isinstance(step, Want):

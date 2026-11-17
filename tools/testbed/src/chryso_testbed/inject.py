@@ -17,6 +17,7 @@ from chryso_testbed.blkdebug import SectorRead, SectorWrite
 from chryso_testbed.console import Mark
 from chryso_testbed.fatlayout import Region, layout
 from chryso_testbed.faults import (
+    Absorb,
     Arm,
     Corrupt,
     CrashPut,
@@ -57,14 +58,11 @@ PING_TIMEOUT: Final = 20.0
 # What a corrupted sector is filled with. Only one of a file's sixteen
 # sectors changes, so it reads back as differs whatever its seed.
 CORRUPTION: Final = 0xEE
-RECLAIMED: Final = r"ETH\|restart\|reclaimed\|rx=\d+\|tx=\d+"
-# What each driver prints once it is serving again, or has been stopped.
+# What a driver prints once it has been stopped. A restarted driver is
+# confirmed by service instead (`serving`), since another console writer can
+# splice into its line (FINDINGS W3).
 SETTLED: Final[dict[tuple[Driver, str], str]] = {
-    ("blk", "restart"): r"driver restarted: failed \d+ client request",
-    ("blk", "debug-restart"): r"driver restarted: failed \d+ client request",
     ("blk", "giveup"): r"driver stopped: \d+ client\(s\) marked not ready",
-    ("eth", "restart"): RECLAIMED,
-    ("eth", "debug-restart"): RECLAIMED,
 }
 
 
@@ -177,7 +175,47 @@ def ctl_decision(m: Machine, child: int, since: Mark) -> Outcome | None:
     return decision(kind or "", count, reason)
 
 
+def absorb_outcome(reported: str, root: Outcome, asked: int) -> Outcome:
+    """An absorb's outcome is the fault's decision, provided the orchestrator
+    asked Root nothing and its want settled (held, or the driver gone). A
+    command that reached Root, or a want that did not settle, is ERROR."""
+    if asked == 0 and reported in {"held", "gone"}:
+        return root
+    return Status.ERROR
+
+
+async def settled_after(m: Machine, driver: Driver, root: Outcome | None, since: Mark) -> None:
+    """Law 1 makes a want a settled restart: once Root restarted or stopped
+    the driver for it, wait for the driver's own line saying it serves again
+    or has stopped, as a settled `Restart` does."""
+    kind: str
+    match root:
+        case Restarted(path=path):
+            kind = path
+        case GaveUp():
+            kind = "giveup"
+        case _:
+            return
+    if (settled := SETTLED.get((driver, kind))) is not None:
+        await m.console.wait(settled, since=since)
+
+
 SERVING_TRIES: Final = 20
+
+
+def settled_restart(step: Step, seen: Outcome) -> Driver | None:
+    """The driver a settled step restarted, which must serve before the next
+    step: a settled fault or restart, a want, or an absorb, answered with a
+    restart. Only blk and eth have a service to confirm."""
+    if not isinstance(seen, Restarted):
+        return None
+    match step:
+        case Fault(driver=d, settle=True) | Restart(driver=d, settle=True) if d in {"blk", "eth"}:
+            return d
+        case Want(driver=d) | Absorb(driver=d) if d in {"blk", "eth"}:
+            return d
+        case _:
+            return None
 
 
 async def serving(m: Machine, driver: Driver, tag: str, ports: Ports) -> bool:
@@ -310,7 +348,15 @@ async def perform(
             result = await probes.run(m, call, f"ORCH_WANT.{tag.upper()}")
             (want,) = probes.records(result, "want")
             root = ctl_decision(m, abi.child(d), mark)
+            await settled_after(m, d, root, mark)
             return want_outcome(want.get("outcome"), root, int(want.get("asked")))
+        case Absorb(driver=d):
+            mark = m.console.mark()
+            call = f"chryso_orch:absorb({tag}, {abi.child(d)}, {d})."
+            result = await probes.run(m, call, f"ORCH_ABSORB.{tag.upper()}")
+            (absorb,) = probes.records(result, "absorb")
+            root = await root_decision(m, d, abi.child(d), mark)
+            return absorb_outcome(absorb.get("outcome"), root, int(absorb.get("asked")))
         case Rewant(driver=d):
             mark = m.console.mark()
             result = await probes.run(
@@ -360,6 +406,10 @@ async def check(
         allowed = model.expect(step)
         async with asyncio.timeout(step_timeout):
             seen = await perform(m, step, tag=f"s{n}", abi=abi, port=ports.take(), modules=modules)
+            if (driver := settled_restart(step, seen)) is not None and not await serving(
+                m, driver, f"s{n}{driver}", ports
+            ):
+                raise m.console.fail(f"step {n} {step!r}: {driver} did not serve after its restart")
             if isinstance(step, Reset | CrashPut):
                 pending.clear()  # a reboot starts every driver afresh
             unsettled: Driver | None = None

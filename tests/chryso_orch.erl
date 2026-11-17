@@ -1,14 +1,14 @@
 -module(chryso_orch).
 -moduledoc """
 Probes for `apps/chryso_orchestrator`, one per testbed step: `want/3`,
-`rewant/2`, `look/2`, and `replay/1` for the in-situ audit. Each starts the
+`rewant/2`, `absorb/3`, `look/2`, and `replay/1` for the in-situ audit. Each starts the
 application on first use and emits one framed run after its work, so a frame
 never crosses a restart it asked for. Results are data in the frame, never a
 crash. Waits poll Root a bounded number of times, since Root publishes no
 completion notification.
 """.
 
--export([want/3, rewant/2, look/2, replay/1, ensure/0]).
+-export([want/3, rewant/2, absorb/3, look/2, replay/1, ensure/0]).
 
 -define(APPS, [
     {chryso_core, "/lib/chryso_core/ebin"},
@@ -81,6 +81,39 @@ rewant(Tag, Child) ->
         end,
     ok = read_for(?QUIET),
     emit("ORCH_REWANT.", Tag, [{rewant, [{child, Child}, {applied, Applied}]}]).
+
+-doc """
+A fault of driver `Class` (child `Child`) forced inside a want: hold
+`/dev/chrysoctl`, which has one opener, so the orchestrator's command cannot
+reach Root; make the want; fault the driver; wait until the page shows Root's
+decision (the want `held`, or the driver `gone`); release; settle. `outcome`
+is the want's settled status and `asked` the commands Root counted, which
+must be zero.
+""".
+-spec absorb(atom(), non_neg_integer(), atom()) -> ok.
+absorb(Tag, Child, Class) ->
+    ok = ensure(),
+    ok = chryso_orchestrator:scan(),
+    {Before, _} = tallies(),
+    Held = hold(?ROUNDS),
+    Requested = chryso_orchestrator:want(Child),
+    ok = chryso_test:fault_pd(Class),
+    Decided = poll(fun() -> settled(Child) end, ?ROUNDS, timeout),
+    ok = release(Held),
+    Outcome =
+        case Requested of
+            {ok, _Tick} -> poll(fun() -> settled(Child) end, ?ROUNDS, timeout);
+            {error, Reason} -> Reason
+        end,
+    {After, Retries} = tallies(),
+    emit("ORCH_ABSORB.", Tag, [
+        {absorb, [
+            {child, Child},
+            {decided, Decided},
+            {outcome, Outcome},
+            {asked, After - Before - 1 - Retries}
+        ]}
+    ]).
 
 -doc "Read Root, then report the orchestrator's condition for `Child`.".
 -spec look(atom(), non_neg_integer()) -> ok.
@@ -179,6 +212,24 @@ unflood(none) ->
     #{sent => 0, limited => 0, busy => 0, other => 0};
 unflood(Flood) ->
     chryso_orch_flood:stop(Flood).
+
+%% Open the command device and keep it, retrying while the orchestrator's
+%% port holds it for one command.
+-spec hold(non_neg_integer()) -> file:io_device().
+hold(0) ->
+    error(device_held);
+hold(Tries) ->
+    case file:open("/dev/chrysoctl", [read, write, raw, binary]) of
+        {ok, F} ->
+            F;
+        {error, ebusy} ->
+            timer:sleep(?PAUSE),
+            hold(Tries - 1)
+    end.
+
+-spec release(file:io_device()) -> ok.
+release(F) ->
+    file:close(F).
 
 %% Flood rounds Root answered, so counted.
 -spec reached(chryso_orch_flood:tally()) -> non_neg_integer().

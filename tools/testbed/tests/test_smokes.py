@@ -8,7 +8,7 @@ may reach Root fails test_the_orch_driver_program_is_strict."""
 from __future__ import annotations
 
 from chryso_testbed.allowed import Allowed
-from chryso_testbed.faults import Model, Program, expect
+from chryso_testbed.faults import Get, Model, Program, Put, Want, expect
 from chryso_testbed.outcomes import Condition, GaveUp, Outcome, Restarted, Seed, Status
 from chryso_testbed.scenarios.orch import orch_driver
 from chryso_testbed.scenarios.restart import AFTER_RECOVERY, LATENT_OVERWRITE, RENAME, UNLINK
@@ -73,3 +73,13 @@ def test_the_orch_driver_program_is_strict() -> None:
         expect(Condition("gone", "gave_up")),
     ]
     assert folded[-1] == expect(Restarted("ctl-restart", 2))
+
+
+def test_a_want_settles_its_driver() -> None:
+    """Law 1 makes a want a settled restart, so a read right after a want of
+    the block driver must succeed, not be allowed to fail with `eio`."""
+    _, want, get = expectations(
+        (Put(kind="put", file=1, seed=4), Want(kind="want", driver="blk"), Get(kind="get", file=1))
+    )
+    assert want == expect(Restarted("ctl-restart", 1))
+    assert get == expect(Seed(4))

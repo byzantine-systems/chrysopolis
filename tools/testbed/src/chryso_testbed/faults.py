@@ -27,6 +27,8 @@ stated over `expect` and `key()` and tested in `tests/test_faults.py`:
    what `Want` allows and leaves an equal model. Root's token bucket is not
    modelled because a rate-limited command has no effect, and the flood has
    stopped before the want is judged.
+9. A fault inside a want is the only restart: `Absorb` is a settled `Fault`
+   whose want then holds, so Root spends one restart and is asked nothing.
 
 Non-laws: a fault restart after a want's stamp also satisfies it (the probe
 reads Root before it stamps and each `Want` waits, so a program never lands
@@ -191,6 +193,16 @@ class Rewant(_Step):
     driver: Driver
 
 
+class Absorb(_Step):
+    """A fault that lands after a want's stamp and before its command: the
+    probe holds the command device, makes the want, faults the driver, waits
+    for Root's decision on the page, then releases. The want then holds by the
+    fault's restart, so the orchestrator never asks."""
+
+    kind: Literal["absorb"]
+    driver: Literal["blk", "eth"]
+
+
 class Look(_Step):
     """Read Root, then the orchestrator's condition for the driver."""
 
@@ -229,6 +241,7 @@ type Step = Annotated[
     | Corrupt
     | Want
     | Rewant
+    | Absorb
     | Look
     | Reset
     | CrashPut,
@@ -242,13 +255,14 @@ PROGRAM: Final = TypeAdapter[Program](Program)
 
 
 def trim(program: Program, budget: int) -> Program:
-    """Drop serial and timer requests past their budget, so neither gives up."""
+    """Drop serial and timer requests past their budget, so neither gives up.
+    A want spends a restart as a request does, so it counts too."""
 
     def kept(steps: Iterable[Step]) -> Iterator[Step]:
         spent = Counter[Driver]()
         for step in steps:
             match step:
-                case Fault(driver=d) | Restart(driver=d) if d in KEPT:
+                case Fault(driver=d) | Restart(driver=d) | Want(driver=d) if d in KEPT:
                     spent[d] += 1
                     if spent[d] > budget:
                         continue
@@ -705,7 +719,7 @@ type Component = Literal["root", "storage", "net", "orch", "system"]
 def owner(step: Step) -> Component:
     """The component whose state a step reads and changes."""
     match step:
-        case Fault() | Restart() | Want():
+        case Fault() | Restart() | Want() | Absorb():
             return "root"
         case Rewant() | Look():
             return "orch"
@@ -784,6 +798,8 @@ class Model:
                 return Allowed.of(*map(_as_ctl, self.root.expect(restart).values))
             case Rewant():
                 return expect(Status.UNASKED)
+            case Absorb(driver=d):
+                return self.root.expect(Fault(kind="fault", driver=d))
             case Look(driver=d):
                 return expect(self.look(d))
             case Reset() | CrashPut():
@@ -814,6 +830,13 @@ class Model:
                 model = replace(
                     self,
                     root=self.root.after(restart, _as_debug(outcome)),
+                    orch=replace(self.orch, wanted=self.orch.wanted | {d}),
+                )
+            case Absorb(driver=d):
+                fault = Fault(kind="fault", driver=d)
+                model = replace(
+                    self,
+                    root=self.root.after(fault, outcome),
                     orch=replace(self.orch, wanted=self.orch.wanted | {d}),
                 )
             case Want() | Rewant() | Look():

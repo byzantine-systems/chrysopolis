@@ -10,7 +10,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from chryso_testbed import frames
-from chryso_testbed.faults import Driver, Fault, Restart, Step, Want
+from chryso_testbed.faults import Absorb, Driver, Fault, Restart, Step, Want
 from chryso_testbed.outcomes import GaveUp, Outcome, Restarted
 
 
@@ -71,7 +71,8 @@ def disagreements(
 
     `decisions` are the run's fault, restart and want requests with what the
     console said, in order. Requests Root ignored (gone) leave no event, and
-    neither does a want the orchestrator never sent (`UNASKED`). A want Root
+    neither does a want the orchestrator never sent (`UNASKED`). An absorb
+    publishes as the fault it is, and no command. A want Root
     answered publishes a `restart_child` control, then its restart or give-up
     (`src/pd/root/main.c`, the command path)."""
     problems = []
@@ -80,7 +81,7 @@ def disagreements(
         said = [
             (s, o)
             for s, o in decisions
-            if isinstance(s, Fault | Restart | Want) and s.driver == driver
+            if isinstance(s, Fault | Restart | Want | Absorb) and s.driver == driver
         ]
         restarts = [o.count for _, o in said if isinstance(o, Restarted)]
         published = [e.a for e in mine if e.kind == Kind.RESTART]
@@ -90,7 +91,9 @@ def disagreements(
         giveups = [e for e in mine if e.kind == Kind.GIVEUP]
         if gave_up != len(giveups) or any(e.detail != "budget_exhausted" for e in giveups):
             problems.append(f"{driver}: console gave up {gave_up} times, ring {giveups}")
-        injected = sum(isinstance(s, Fault) and isinstance(o, Restarted | GaveUp) for s, o in said)
+        injected = sum(
+            isinstance(s, Fault | Absorb) and isinstance(o, Restarted | GaveUp) for s, o in said
+        )
         controls = [e for e in mine if e.kind == Kind.CONTROL and e.detail == "fault_inject"]
         faults = [e for e in mine if e.kind == Kind.FAULT]
         if injected != len(controls) or injected != len(faults):

@@ -30,6 +30,12 @@ state they need instead of waiting for it. Each caught a planted defect:
 | a gone want spends Root's budget | test_a_want_of_a_gone_driver_asks_nothing |
 | a flooded want gives up a restart early | test_a_flood_is_invisible_to_the_restart_algebra |
 | a flooded want restarts as debug | test_restarts_count_up_then_give_up_once_then_stay_gone |
+| an absorb also allows a `ctl-restart` | test_an_absorb_spends_exactly_one_restart |
+| an absorb does not mark its driver wanted | test_after_an_absorb_the_want_holds |
+| an absorb leaves the driver up past its budget | test_an_absorb_on_the_last_restart_gives_up |
+| an absorb of blk dirties the window | test_an_absorb_commutes_with_what_a_fault_commutes_with |
+| an absorb takes the path `ctl-restart` | test_restarts_count_up_then_give_up_once_then_stay_gone |
+| `settled_restart` ignores `settle` | test_service_is_confirmed_where_the_model_says_running |
 | a look marks its driver wanted | test_a_look_changes_nothing |
 | a look reads what is wanted | test_a_look_reads_root_alone |
 | a gone driver looks ready once wanted | test_a_gone_driver_looks_gone_until_a_reset |
@@ -64,6 +70,7 @@ from chryso_testbed.faults import (
     KEPT,
     PROGRAM,
     STEP,
+    Absorb,
     Arm,
     Corrupt,
     CrashPut,
@@ -88,10 +95,12 @@ from chryso_testbed.faults import (
     trim,
 )
 from chryso_testbed.inject import (
+    absorb_outcome,
     condition_outcome,
     decision,
     get_outcome,
     put_outcome,
+    settled_restart,
     want_outcome,
 )
 from chryso_testbed.lifecycles import FaultLifecycle, FaultRecord
@@ -191,12 +200,13 @@ def test_a_program_round_trips(program: Program) -> None:
 
 @given(program=programs, budget=st.integers(0, 4))
 def test_trim_keeps_serial_and_timer_within_budget(program: Program, budget: int) -> None:
-    """Trim only drops serial and timer requests past the budget, keeping order."""
+    """Trim only drops serial and timer requests and wants past the budget,
+    keeping order."""
     trimmed = trim(program, budget)
-    spent = Counter(s.driver for s in trimmed if isinstance(s, Fault | Restart))
+    spent = Counter(s.driver for s in trimmed if isinstance(s, Fault | Restart | Want))
     assert all(spent[d] <= budget for d in KEPT)
     dropped = Counter(program) - Counter(trimmed)
-    assert all(isinstance(s, Fault | Restart) and s.driver in KEPT for s in dropped)
+    assert all(isinstance(s, Fault | Restart | Want) and s.driver in KEPT for s in dropped)
     assert trim(trimmed, budget) == trimmed
     it = iter(program)
     assert all(step in it for step in trimmed)
@@ -238,13 +248,14 @@ def test_every_step_allows_something(trace: list[Seen]) -> None:
 # --- Root ----------------------------------------------------------------------------
 
 
-def nth_answer(step: Fault | Restart | Want, n: int) -> Outcome:
+def nth_answer(step: Fault | Restart | Want | Absorb, n: int) -> Outcome:
     """The `n`th (from 0) answer to a driver's requests since boot: a restart
-    numbered `n + 1` on the path the request names, one give-up, then Root's
-    `GONE`, or `UNASKED` for a want, which the orchestrator never sends."""
+    numbered `n + 1` on the path the request names (an absorb's restart is
+    its fault's), one give-up, then Root's `GONE`, or `UNASKED` for a want,
+    which the orchestrator never sends."""
     if n < BUDGET:
         match step:
-            case Fault():
+            case Fault() | Absorb():
                 return Restarted("restart", n + 1)
             case Restart():
                 return Restarted("debug-restart", n + 1)
@@ -272,9 +283,9 @@ def test_restarts_count_up_then_give_up_once_then_stay_gone(trace: list[Seen]) -
     give-up, then gone. Faults, debug restarts and wants share the count, and
     each takes the path its request names."""
     for stretch in between_resets(trace):
-        seen: dict[str, list[tuple[Fault | Restart | Want, Outcome]]] = {}
+        seen: dict[str, list[tuple[Fault | Restart | Want | Absorb, Outcome]]] = {}
         for step, result in ((row.step, row.outcome) for row in stretch):
-            if isinstance(step, Fault | Restart | Want):
+            if isinstance(step, Fault | Restart | Want | Absorb):
                 seen.setdefault(step.driver, []).append((step, result))
         for requests in seen.values():
             assert [o for _, o in requests] == [
@@ -283,11 +294,13 @@ def test_restarts_count_up_then_give_up_once_then_stay_gone(trace: list[Seen]) -
 
 
 @given(
-    driver=st.sampled_from(["serial", "timer", "blk", "eth"]),
-    kinds=st.lists(st.sampled_from(["fault", "restart", "want"]), max_size=2 * BUDGET + 2),
+    driver=st.sampled_from(["blk", "eth"]),
+    kinds=st.lists(
+        st.sampled_from(["fault", "restart", "want", "absorb"]), max_size=2 * BUDGET + 2
+    ),
 )
 def test_a_driver_is_restarted_budget_times_then_given_up_on(
-    driver: Driver, kinds: list[Literal["fault", "restart", "want"]]
+    driver: Literal["blk", "eth"], kinds: list[Literal["fault", "restart", "want", "absorb"]]
 ) -> None:
     """Root's answers are deterministic, so following them for any run of
     requests to one driver gives exactly that sequence, whoever asks."""
@@ -296,7 +309,7 @@ def test_a_driver_is_restarted_budget_times_then_given_up_on(
     for kind in kinds:
         step = STEP.validate_python({"kind": kind, "driver": driver})
         (only,) = model.expect(step).values
-        assert isinstance(step, Fault | Restart | Want)
+        assert isinstance(step, Fault | Restart | Want | Absorb)
         assert only == nth_answer(step, len(answers))
         answers.append(only)
         model = model.after(step, only)
@@ -1005,6 +1018,77 @@ def test_looks_and_rewants_commute_with_every_step(
     assert one.key() == two.key()
 
 
+absorbable = st.sampled_from(["blk", "eth"])
+
+
+@given(model=states(), driver=absorbable)
+def test_an_absorb_spends_exactly_one_restart(model: Model, driver: Literal["blk", "eth"]) -> None:
+    """Law 9: a fault inside a want is the only restart. An absorb allows no
+    `ctl-restart`, and after any outcome it allows, Root has spent at most one
+    more restart of the driver's budget, and exactly one when it restarted."""
+    model = settled(model)
+    absorb = Absorb(kind="absorb", driver=driver)
+    allowed = model.expect(absorb)
+    assert not allowed.anything
+    assert not any(isinstance(o, Restarted) and o.path == "ctl-restart" for o in allowed.values)
+    before = model.root.chart(driver).model.spent
+    for seen in allowed.values:
+        event(render(seen))
+        spent = model.after(absorb, seen).root.chart(driver).model.spent
+        assert spent == before + (1 if isinstance(seen, Restarted) else 0)
+
+
+@given(model=states(), driver=absorbable)
+def test_after_an_absorb_the_want_holds(model: Model, driver: Literal["blk", "eth"]) -> None:
+    """After an absorb the driver is wanted and the want already holds, so a
+    rewant asks nothing."""
+    model = settled(model)
+    absorb = Absorb(kind="absorb", driver=driver)
+    for seen in model.expect(absorb).values:
+        after = model.after(absorb, seen)
+        assert driver in after.orch.wanted
+        assert after.expect(Rewant(kind="rewant", driver=driver)) == expect(Status.UNASKED)
+
+
+@given(driver=absorbable)
+def test_an_absorb_on_the_last_restart_gives_up(driver: Literal["blk", "eth"]) -> None:
+    """With the budget spent, the absorbed fault gives the driver up, and a
+    later want asks nothing."""
+    model = faulted(Model.start(BUDGET), driver, BUDGET)
+    absorb = Absorb(kind="absorb", driver=driver)
+    assert model.expect(absorb) == expect(GaveUp("budget-exhausted"))
+    model = model.after(absorb, GaveUp("budget-exhausted"))
+    assert model.expect(Want(kind="want", driver=driver)) == expect(Status.UNASKED)
+
+
+@given(model=states(), driver=absorbable, other=st.one_of(storage_steps, net_steps), data=st.data())
+def test_an_absorb_commutes_with_what_a_fault_commutes_with(
+    model: Model, driver: Literal["blk", "eth"], other: Step, data: st.DataObject
+) -> None:
+    """Derived from the absorb's definition: with no driver recovering, it
+    commutes with a storage or network step exactly when a settled fault of
+    the same driver does."""
+    model = settled(model)
+    absorb = Absorb(kind="absorb", driver=driver)
+    fault = Fault(kind="fault", driver=driver)
+    seen = data.draw(outcome(model.expect(absorb)))
+    seen_other = data.draw(outcome(model.expect(other)))
+    via_absorb = commutes(model, absorb, seen, other, seen_other)
+    via_fault = commutes(model, fault, seen, other, seen_other)
+    event(f"commutes={via_absorb}")
+    assert via_absorb == via_fault
+
+
+def test_an_absorb_restarts_once_and_asks_nothing() -> None:
+    """The anchor: the laws above also hold for an absorb that allows
+    nothing at all, so pin what a fresh driver shows."""
+    absorb = Absorb(kind="absorb", driver="eth")
+    model = Model.start(BUDGET)
+    assert model.expect(absorb) == expect(Restarted("restart", 1))
+    model = model.after(absorb, Restarted("restart", 1))
+    assert model.expect(Rewant(kind="rewant", driver="eth")) == expect(Status.UNASKED)
+
+
 @given(model=states(), driver=drivers)
 def test_a_flood_is_invisible_to_the_restart_algebra(model: Model, driver: Driver) -> None:
     """Law 8: a want made under a flood allows what a want allows and leaves
@@ -1150,3 +1234,63 @@ def test_root_decides_a_want_and_the_probe_only_fills_in(
         assert got == (Status.GONE if asked > 0 else Status.UNASKED)
     else:
         assert got == Status.ERROR
+
+
+@given(
+    reported=st.sampled_from(["held", "gone", "open", "timeout"]),
+    root=st.one_of(
+        st.builds(Restarted, path=st.just("restart"), count=st.integers(1, 64)),
+        st.just(GaveUp("budget-exhausted")),
+    ),
+    asked=st.integers(0, 3),
+)
+def test_an_absorb_is_its_fault_only_when_nothing_was_asked(
+    reported: str, root: Outcome, asked: int
+) -> None:
+    """The fault's decision stands for the absorb only when Root counted no
+    command and the want settled. Anything else is ERROR, which the model
+    never allows."""
+    got = absorb_outcome(reported, root, asked)
+    assert got == (root if asked == 0 and reported in {"held", "gone"} else Status.ERROR)
+
+
+restarting = st.one_of(
+    st.builds(
+        lambda kind, driver, settle: STEP.validate_python(
+            {"kind": kind, "driver": driver, "settle": settle}
+        ),
+        st.sampled_from(["fault", "restart"]),
+        st.sampled_from(DRIVERS),
+        st.booleans(),
+    ),
+    st.builds(
+        lambda d: STEP.validate_python({"kind": "want", "driver": d}), st.sampled_from(DRIVERS)
+    ),
+    st.builds(
+        lambda d: STEP.validate_python({"kind": "absorb", "driver": d}),
+        st.sampled_from(["blk", "eth"]),
+    ),
+)
+
+
+@given(model=states(), step=restarting)
+def test_service_is_confirmed_where_the_model_says_running(model: Model, step: Step) -> None:
+    """After every restart the model allows, the interpreter confirms blk or
+    eth by service exactly when the model leaves that driver running, and
+    never when it leaves the driver recovering, for the next step to land in."""
+    match step:
+        case Fault(driver=d) | Restart(driver=d) | Want(driver=d) | Absorb(driver=d):
+            driver: Driver = d
+        case _:
+            return
+    for seen in model.expect(step).values:
+        if not isinstance(seen, Restarted):
+            continue
+        after = model.after(step, seen)
+        confirmed = settled_restart(step, seen)
+        if driver in {"blk", "eth"}:
+            assert (confirmed == driver) == (
+                after.root.up(driver) and not after.root.recovering(driver)
+            )
+        else:
+            assert confirmed is None

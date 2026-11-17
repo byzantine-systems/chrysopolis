@@ -1,8 +1,12 @@
 """Laws of steered generation.
 
-Planted defect: `PREFERENCE` without `EEXIST` fails
-test_every_status_has_a_preference and test_a_refused_rename_has_a_nominal
-(a random draw in test_lineage found it first)."""
+| Planted defect | Caught by |
+|---|---|
+| `PREFERENCE` without `EEXIST` (found by test_lineage) | test_a_refused_rename_has_a_nominal |
+| `requestable` ignored for wants | test_no_want_spends_a_kept_driver_past_its_budget |
+| `orchestrate` without its recovery-window step | test_orchestrate_reaches_every_case |
+| `until` bounded by the budget alone | test_orchestrate_reaches_every_case |
+"""
 
 from __future__ import annotations
 
@@ -10,15 +14,19 @@ from typing import Final
 
 from hypothesis import given
 from hypothesis import strategies as st
-from test_faults import BUDGET, disks, states, steps
+from test_faults import BUDGET, disks, faulted, states, steps
 
 from chryso_testbed.blkdebug import Expected
 from chryso_testbed.faults import (
+    KEPT,
     PROGRAM,
+    Absorb,
     Arm,
     Corrupt,
     CrashPut,
+    Driver,
     Fault,
+    Look,
     Model,
     Put,
     Remove,
@@ -26,6 +34,7 @@ from chryso_testbed.faults import (
     Reset,
     Restart,
     Step,
+    Want,
     trim,
 )
 from chryso_testbed.outcomes import Status
@@ -81,9 +90,16 @@ def test_requests_only_go_where_root_will_answer_them(model: Model, data: st.Dat
     """No request to a driver Root gave up on, and serial and timer never
     past their budget, so the console and clock survive every program."""
     step = data.draw(enabled(model))
-    if isinstance(step, Fault | Restart):
-        assert step.driver in requestable(model)
-        assert model.root.up(step.driver)
+    match step:
+        case Fault() | Restart():
+            assert step.driver in requestable(model)
+            assert model.root.up(step.driver)
+        case Want(driver=d) if d in KEPT:
+            assert d in requestable(model)
+        case Absorb(driver=d):
+            assert model.root.up(d)
+        case _:
+            pass
 
 
 @given(name=names, disk=disks, data=st.data())
@@ -166,3 +182,38 @@ def test_the_rename_scenario_moves_a_file_then_removes_one(
         model = advance(model, step)
     assert moved or not could_move
     assert removed
+
+
+@given(budget=st.sampled_from([BUDGET, 8]), data=st.data())
+def test_orchestrate_reaches_every_case(budget: int, data: st.DataObject) -> None:
+    """Every program `orchestrate` draws, at the tests' budget and the shipped
+    one, holds a want, a look or want at a driver the model has recovering at
+    that point, an absorb, eth driven past its budget, and a want of a driver
+    Root gave up on, all within MAX_STEPS."""
+    model = Model.start(budget)
+    program = data.draw(programs(model, "orchestrate"))
+    in_window = wanted_gone = eth_gone = False
+    for step in program:
+        if isinstance(step, Look | Want) and model.root.recovering(step.driver):
+            in_window = True
+        if isinstance(step, Want) and not model.root.up(step.driver):
+            wanted_gone = True
+        model = advance(model, step)
+        eth_gone = eth_gone or not model.root.up("eth")
+    assert any(isinstance(s, Want) for s in program)
+    assert any(isinstance(s, Absorb) for s in program)
+    assert in_window
+    assert eth_gone
+    assert wanted_gone
+
+
+@given(kept=st.sampled_from(sorted(KEPT)), data=st.data())
+def test_no_want_spends_a_kept_driver_past_its_budget(kept: str, data: st.DataObject) -> None:
+    """With serial or timer at its budget, the steering never offers a want
+    of it, so the console and the clock survive. The state is built, not left
+    to the random draw, which seldom reaches it."""
+    driver: Driver = "serial" if kept == "serial" else "timer"
+    model = faulted(Model.start(BUDGET), driver, BUDGET)
+    step = data.draw(enabled(model))
+    if isinstance(step, Want):
+        assert step.driver != driver
