@@ -298,7 +298,10 @@
       "orch-fallback-smoke runs alone, after the other orch scenarios",
       "the driver orchestrator's every outcome is one the fault model allows while drivers fault, restart, exhaust their budget and get rate limited",
       "the orchestrator's decision log replays through the pure step after every part, and Root's ring records exactly the commands it sent",
-      "Root counts no command for a driver it gave up on, and a want that held asked Root exactly once"
+      "Root counts no command for a driver it gave up on, and a want that held asked Root exactly once",
+      "the orchestrator release boots with no shell command on an image patched for it, and an unpatched or unknown-version boot config boots start.boot",
+      "a BEAM halt in the middle of a want reaches Root with no command, and a halt after a want never repeats it",
+      "near the BEAM's restart budget the boot selector boots start.boot, and Root still serves raw commands with the old fence stale"
     ],
     "required_markers": [
       "ROOT_STATUS|boot|incarnation=1",
@@ -322,7 +325,9 @@
       "PEER|done",
       "CTL_STAT|FB_NOMAP|error=enodev",
       "@@CHRYSO|LAT.FB_FLOOD",
-      "@@CHRYSO|ORCH_REPLAY.P4|n=0|k=replay|verdict=match"
+      "@@CHRYSO|ORCH_REPLAY.P4|n=0|k=replay|verdict=match",
+      "BEAM|boot|profile=orch|reason=chosen|remaining=64",
+      "BEAM|boot|profile=start|reason=budget-low|remaining=62"
     ],
     "forbidden_markers": [
       "unexpected PD fault"

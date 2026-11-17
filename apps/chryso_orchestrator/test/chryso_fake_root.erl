@@ -16,12 +16,13 @@ and the handle closes when its opener dies, as a raw file does.
 -include("orchestrator_abi.hrl").
 
 -export([read_status/0, open_ctl/0, call/2, close/1]).
--export([start/0, stop/0, fault/1, tear/1, drop_next/0, busy_next/0, held/0]).
+-export([start/0, stop/0, fault/1, halt/0, tear/1, drop_next/0, busy_next/0, held/0]).
 -export([accepted/0, budgets/0, last/0, states/0]).
 -export([handle_info/2]).
 -export([init/1, handle_call/3, handle_cast/2]).
 -compile([nowarn_missing_spec, nowarn_missing_doc]).
 
+-define(BEAM_CHILD, 5).
 -define(NAME, ?MODULE).
 %% Uneven, so the last driver is gone after two faults.
 -define(BUDGETS, [3, 3, 2, 1]).
@@ -36,6 +37,8 @@ stop() ->
     gen_server:stop(?NAME).
 
 fault(C) -> gen_server:call(?NAME, {fault, C}).
+%% The BEAM faults and Root restarts it: a new beam_incarnation.
+halt() -> gen_server:call(?NAME, halt).
 tear(On) -> gen_server:call(?NAME, {tear, On}).
 drop_next() -> gen_server:call(?NAME, drop_next).
 busy_next() -> gen_server:call(?NAME, busy_next).
@@ -76,6 +79,9 @@ handle_call({fault, C}, _From, #{root := Root, last := Last} = S) ->
     Now = now(S),
     {D, Root1} = chryso_root:fault(Root, C, absent, Now),
     {reply, maps:get(action, D), S#{root := Root1, last := resumed(D, Now, Last)}};
+handle_call(halt, _From, #{root := Root} = S) ->
+    {D, Root1} = chryso_root:fault(Root, ?BEAM_CHILD, absent, now(S)),
+    {reply, maps:get(action, D), S#{root := Root1}};
 handle_call({command, Bin}, _From, S) ->
     {ok, #{opcode := Op, args := Args}} = chryso_abi_codec:decode_ctl_command(Bin),
     #{root := Root, last := Last, accepted := Acc, drop := Drop} = S,

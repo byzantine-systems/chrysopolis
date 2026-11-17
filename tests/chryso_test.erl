@@ -81,11 +81,19 @@ loaded(Mods) ->
             ?LOG_ERROR("TEST_MODULES|missing ~p", [Missing])
     end.
 
--spec load(module()) -> file | binary | error.
+-spec load(module()) -> file | binary | loaded | error.
 load(M) ->
-    case code:load_file(M) of
-        {module, M} -> file;
-        {error, _} -> load_binary(M)
+    %% A boot script may have loaded M already (orch.boot loads chryso_core
+    %% in embedded mode). Loading it again would make the running code old,
+    %% and a later load would fail not_purged, so a loaded module is kept.
+    case code:is_loaded(M) of
+        {file, _} ->
+            loaded;
+        false ->
+            case code:load_file(M) of
+                {module, M} -> file;
+                {error, _} -> load_binary(M)
+            end
     end.
 
 %% Path-free fallback: read the beam and hand ERTS the bytes. Note the plain

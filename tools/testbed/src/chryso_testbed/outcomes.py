@@ -85,7 +85,17 @@ def _is_reason(value: str) -> TypeIs[Reason]:
     return value in get_args(Reason.__value__)
 
 
-type Outcome = Status | Seed | Restarted | GaveUp | Condition
+type BootProfile = Literal["start", "orch"]
+
+
+@dataclass(frozen=True, slots=True)
+class Booted:
+    """The boot script a new BEAM incarnation took, as `boot_info` reports it."""
+
+    profile: BootProfile
+
+
+type Outcome = Status | Seed | Restarted | GaveUp | Condition | Booted
 
 
 def render(outcome: Outcome) -> str:
@@ -101,3 +111,5 @@ def render(outcome: Outcome) -> str:
             return f"giveup:{r}"
         case Condition(name=n, reason=r):
             return f"{n}:{r}"
+        case Booted(profile=p):
+            return f"boot:{p}"

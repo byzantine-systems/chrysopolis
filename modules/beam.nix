@@ -140,6 +140,7 @@
               -Dlibc-dir="$PWD/libalias" \
               -Dlionsos-src=${config.packages.lionsos-src} \
               -Dwith-erts=true \
+              -Dotp-release=${chryso.otpRelease} \
               -Dwith-blk=true \
               -Dwith-fs=true \
               -Dwith-net=true \

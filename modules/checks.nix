@@ -632,8 +632,8 @@
         # and the notification caps between Root and its peers, read from
         # report.txt and cross-checked against the generated SDF and
         # system-abi.json. Check every assembled image: production SDF users
-        # include the bring-up, ERTS, cothread-probe and config-failure
-        # images; both restart images add the crasher and debug channels;
+        # include the bring-up, ERTS, cothread-probe, config-failure and
+        # orch images; both restart images add the crasher and debug channels;
         # the fallback image swaps the crasher for the fallback peer, and the
         # no-map image drops the crasher and both control pages.
         restart-topology = pkgs.runCommand "chrysopolis-restart-topology" { } ''
@@ -643,6 +643,8 @@
           ${checkTopology "production" config.packages.lifecycle-failure-image config.packages.sdf}
           ${checkTopology "production" config.packages.spec-commit-image config.packages.sdf}
           ${checkTopology "production" config.packages.command-image config.packages.sdf}
+          ${checkTopology "production" config.packages.orch-image config.packages.sdf}
+          ${checkTopology "production" config.packages.orch-image-nc config.packages.sdf}
           ${checkTopology "restart" config.packages.restart-image config.packages.sdf-restart}
           ${checkTopology "restart" config.packages.budget-decay-image config.packages.sdf-restart}
           ${checkTopology "fallback" config.packages.fallback-image config.packages.sdf-fallback}

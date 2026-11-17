@@ -1,14 +1,15 @@
 -module(chryso_orch).
 -moduledoc """
 Probes for `apps/chryso_orchestrator`, one per testbed step: `want/3`,
-`rewant/2`, `absorb/3`, `look/2`, and `replay/1` for the in-situ audit. Each starts the
+`rewant/2`, `absorb/3`, `held_want/2`, `look/2`, and `replay/1` for the
+in-situ audit. Each starts the
 application on first use and emits one framed run after its work, so a frame
 never crosses a restart it asked for. Results are data in the frame, never a
 crash. Waits poll Root a bounded number of times, since Root publishes no
 completion notification.
 """.
 
--export([want/3, rewant/2, absorb/3, look/2, replay/1, ensure/0]).
+-export([want/3, rewant/2, absorb/3, held_want/2, look/2, replay/1, ensure/0]).
 
 -define(APPS, [
     {chryso_core, "/lib/chryso_core/ebin"},
@@ -115,6 +116,24 @@ absorb(Tag, Child, Class) ->
         ]}
     ]).
 
+-doc """
+Make a want of `Child` that cannot reach Root, and leave it so: hold
+`/dev/chrysoctl` (one opener) in the shell's evaluator, make the want, and
+return with the device still held. The next step halts the VM, which drops
+the device and the want together, so Root must never see that command.
+`requested` is the want's result.
+""".
+-spec held_want(atom(), non_neg_integer()) -> ok.
+held_want(Tag, Child) ->
+    ok = ensure(),
+    _Held = hold(?ROUNDS),
+    Requested =
+        case chryso_orchestrator:want(Child) of
+            {ok, _Tick} -> ok;
+            {error, Reason} -> Reason
+        end,
+    emit("ORCH_HELD.", Tag, [{held, [{child, Child}, {requested, Requested}]}]).
+
 -doc "Read Root, then report the orchestrator's condition for `Child`.".
 -spec look(atom(), non_neg_integer()) -> ok.
 look(Tag, Child) ->
@@ -149,14 +168,25 @@ Start the application and its declared dependencies if they are not running.
 Embedded mode loads nothing on demand, so each application's listed modules
 are loaded by name first. The orchestrator's log domain is kept off the
 console handler, where it could cut into a frame. Idempotent.
+
+On an image that boots `orch.boot` the application is already running with
+its own configuration, read once at start, so the probe's settings are not
+applied and the probes' bounded waits cover the defaults.
 """.
 -spec ensure() -> ok.
 ensure() ->
     lists:foreach(fun load_app/1, ?APPS),
     ok = quiet_domain(),
-    lists:foreach(fun({K, V}) -> ok = application:set_env(chryso_orchestrator, K, V) end, ?ENV),
-    {ok, _Started} = application:ensure_all_started(chryso_orchestrator),
-    ok.
+    case lists:keymember(chryso_orchestrator, 1, application:which_applications()) of
+        true ->
+            ok;
+        false ->
+            lists:foreach(
+                fun({K, V}) -> ok = application:set_env(chryso_orchestrator, K, V) end, ?ENV
+            ),
+            {ok, _Started} = application:ensure_all_started(chryso_orchestrator),
+            ok
+    end.
 
 %% --- internals ------------------------------------------------------------------
 

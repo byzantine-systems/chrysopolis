@@ -8,9 +8,9 @@ may reach Root fails test_the_orch_driver_program_is_strict."""
 from __future__ import annotations
 
 from chryso_testbed.allowed import Allowed
-from chryso_testbed.faults import Get, Model, Program, Put, Want, expect
-from chryso_testbed.outcomes import Condition, GaveUp, Outcome, Restarted, Seed, Status
-from chryso_testbed.scenarios.orch import orch_driver
+from chryso_testbed.faults import Get, Halt, Model, Program, Put, Want, boot_profile, expect
+from chryso_testbed.outcomes import Booted, Condition, GaveUp, Outcome, Restarted, Seed, Status
+from chryso_testbed.scenarios.orch import ORCH_BOOT, orch_driver
 from chryso_testbed.scenarios.restart import AFTER_RECOVERY, LATENT_OVERWRITE, RENAME, UNLINK
 from chryso_testbed.steer import nominal
 
@@ -83,3 +83,21 @@ def test_a_want_settles_its_driver() -> None:
     )
     assert want == expect(Restarted("ctl-restart", 1))
     assert get == expect(Seed(4))
+
+
+def test_orch_restart_smoke_halts_into_safe_mode() -> None:
+    """orch-restart-smoke on orch-image (BEAM budget 64, safe_below 62): the
+    first incarnation boots orch, a halt keeps it orch, a want after it is the
+    one ctl-restart, and the second halt boots start."""
+    model = Model.start(BUDGET, boot=ORCH_BOOT)
+    assert boot_profile(model.orch) == "orch"
+    seen: list[Allowed[Outcome]] = []
+    for step in (Halt(kind="halt"), Want(kind="want", driver="timer"), Halt(kind="halt")):
+        allowed = model.expect(step)
+        seen.append(allowed)
+        model = model.after(step, nominal(model, step))
+    assert seen == [
+        expect(Booted("orch")),
+        expect(Restarted("ctl-restart", 1)),
+        expect(Booted("start")),
+    ]

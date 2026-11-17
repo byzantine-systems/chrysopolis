@@ -13,7 +13,19 @@ from collections.abc import Sequence
 
 from chryso_testbed import frames, inject, probes, rootlog
 from chryso_testbed.console import ScenarioFailure
-from chryso_testbed.faults import Driver, Fault, Look, Model, Program, Rewant, Step, Want
+from chryso_testbed.faults import (
+    BootConfig,
+    Driver,
+    Fault,
+    Halt,
+    Look,
+    Model,
+    Program,
+    Rewant,
+    Step,
+    Want,
+    boot_profile,
+)
 from chryso_testbed.machine import Machine
 from chryso_testbed.outcomes import Outcome, render
 from chryso_testbed.scenario import BEAM_FAULTS_EXPECTED, Context, registry
@@ -438,3 +450,116 @@ async def orch_driver_negative(ctx: Context) -> None:
         if re.search(required, got) is None:
             raise ScenarioFailure(f"{variant} did not fail as predicted: {got}")
     ctx.record("orch-driver-negative", controls=rows)
+
+
+# --- the orchestrator across BEAM restarts ------------------------------------------
+
+# orch-image's patched request (modules/images.nix).
+ORCH_BOOT = BootConfig(profile="orch", safe_below=62)
+
+
+async def boot_info(m: Machine, tag: str) -> dict[str, str]:
+    (boot,) = probes.records(
+        await probes.run(m, f"chryso_beam:boot_info({tag}).", f"BEAM_BOOT.{tag.upper()}"), "boot"
+    )
+    return dict(boot.fields)
+
+
+def ctl_restarts(m: Machine, child: int) -> int:
+    return len(m.console.findall(rf"ROOT\|ctl-restart\|child={child}\|count=\d+"))
+
+
+@registry.scenario("orch-restart-smoke", group=GROUP, timeout=1800)
+async def orch_restart_smoke(ctx: Context) -> None:
+    """The orchestrator release boots with no shell command, a BEAM halt in the
+    middle of a want leaves Root untouched, a halt after a want never repeats
+    it, and near the BEAM's budget the selector boots start.boot while Root
+    still serves raw commands."""
+    async with ctx.boot("orch-image", failures=BEAM_FAULTS_EXPECTED) as m:
+        await net_ready(ctx, m)
+        facts = await run_orch_restart(ctx, m)
+        ctx.record("orch-restart-smoke", **facts)
+
+
+async def run_orch_restart(ctx: Context, m: Machine) -> dict[str, object]:
+    """The smoke's parts, each judged against the fault model's `Halt`."""
+    timer = ctx.abi.child("timer")
+    modules = ctx.settings.test_modules
+    model = Model.start(ctx.abi.driver_budget, boot=ORCH_BOOT)
+    decisions: list[tuple[Step, Outcome]] = []
+    outcomes: list[str] = []
+
+    def observe(step: Step, seen: Outcome, before: Model) -> None:
+        decisions.append((step, seen))
+        outcomes.append(f"{step.kind} {step.model_dump(exclude={'kind'})}: {render(seen)}")
+
+    async def run(program: Program) -> Model:
+        return await inject.check(m, program, model, abi=ctx.abi, modules=modules, observe=observe)
+
+    async with ctx.step("boot"), asyncio.timeout(120):
+        info = await boot_info(m, "b1")
+        want = boot_profile(model.orch)
+        got = inject.boot_outcome(info.get("boot", ""))
+        if render(got) != f"boot:{want}" or info.get("orchestrator") != "true":
+            raise m.console.fail(f"boot profile {render(got)}, wanted {want}, running: {info}")
+        _, ring = rootlog.read(
+            await probes.run(m, "chryso_ctl:events(start, 0).", "CTL_EVENTS.START")
+        )
+
+    async with ctx.step("halt before Root replies"), asyncio.timeout(600):
+        (held,) = probes.records(
+            await probes.run(m, f"chryso_orch:held_want(h1, {timer}).", "ORCH_HELD.H1"), "held"
+        )
+        if held.get("requested") != "ok":
+            raise m.console.fail(f"the held want was refused: {dict(held.fields)}")
+        model = await run((Halt(kind="halt"),))
+        if ctl_restarts(m, timer):
+            raise m.console.fail("a want halted before its command still reached Root")
+
+    async with ctx.step("halt after Root replies"), asyncio.timeout(600):
+        model = await run((Want(kind="want", driver="timer"),))
+        (replay,) = probes.records(
+            await probes.run(m, "chryso_orch:replay(r2).", "ORCH_REPLAY.R2"), "replay"
+        )
+        if replay.get("verdict") != "match":
+            raise m.console.fail(f"the decision log did not replay: {dict(replay.fields)}")
+        pre = stat_fields(await probes.run(m, f"chryso_ctl:stat(s2, {timer}).", "CTL_STAT.S2"))
+        model = await run((Halt(kind="halt"),))
+        if (n := ctl_restarts(m, timer)) != 1:
+            raise m.console.fail(f"{n} ctl-restarts of the timer across the halts, wanted 1")
+
+    async with ctx.step("safe mode"), asyncio.timeout(600):
+        info = await boot_info(m, "b3")
+        if info.get("orchestrator") != "false":
+            raise m.console.fail(f"the orchestrator runs in safe mode: {info}")
+        events, _ = rootlog.read(
+            await probes.run(m, f"chryso_ctl:events(finish, {ring.head}).", "CTL_EVENTS.FINISH")
+        )
+        children = {d: ctx.abi.child(d) for d in ORCH_DRIVERS}
+        if problems := rootlog.disagreements(decisions, events, children):
+            raise m.console.fail(f"Root's ring disagrees with its console: {problems}")
+        await probes.run_probe(
+            m,
+            f"chryso_ctl:reconcile(r3, {timer}, {pre['incarnation']}, {pre['seq']}, 0).",
+            "CTL_RECONCILE.R3",
+            ["incarnation_advanced", "applied_spec", "old_seq", "fresh"],
+        )
+    return {"outcomes": outcomes, "beam_spent": model.orch.beam_spent}
+
+
+@registry.scenario("orch-restart-negative", group="isolated", timeout=900)
+async def orch_restart_negative(ctx: Context) -> None:
+    """orch-restart-smoke on orch-image-nc, whose boot config has a version the
+    C refuses: the BEAM must boot start.boot, so the smoke fails at its first
+    claim, for exactly that reason."""
+    required = r"boot profile boot:start, wanted orch"
+    got = "passed"
+    async with ctx.boot("orch-image-nc", failures=BEAM_FAULTS_EXPECTED) as m:
+        await net_ready(ctx, m)
+        try:
+            await run_orch_restart(ctx, m)
+        except ScenarioFailure as failure:
+            got = str(failure).split("\n", 1)[0]
+    if re.search(required, got) is None:
+        raise ScenarioFailure(f"orch-image-nc did not fail as predicted: {got}")
+    ctx.record("orch-restart-negative", predicted=required, got=got)

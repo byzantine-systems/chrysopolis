@@ -23,6 +23,8 @@ attrs=(
   .#lifecycle-failure-image
   .#spec-commit-image
   .#command-image
+  .#orch-image
+  .#orch-image-nc
   .#fallback-image
   .#fallback-nomap-image
 )

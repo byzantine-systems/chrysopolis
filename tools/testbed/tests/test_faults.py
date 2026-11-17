@@ -35,6 +35,11 @@ state they need instead of waiting for it. Each caught a planted defect:
 | an absorb leaves the driver up past its budget | test_an_absorb_on_the_last_restart_gives_up |
 | an absorb of blk dirties the window | test_an_absorb_commutes_with_what_a_fault_commutes_with |
 | an absorb takes the path `ctl-restart` | test_restarts_count_up_then_give_up_once_then_stay_gone |
+| a halt keeps the wants | test_a_halt_resets_the_orchestrator_only |
+| a halt spends no BEAM restart | test_a_halt_resets_the_orchestrator_only |
+| orch with exactly safe_below left | test_the_boot_profile_falls_back_at_safe_below |
+| a halt also restarts every driver | test_a_halt_resets_the_orchestrator_only |
+| a halt dirties FatFs's window | test_a_halt_commutes_with_storage_and_network_steps |
 | `settled_restart` ignores `settle` | test_service_is_confirmed_where_the_model_says_running |
 | a look marks its driver wanted | test_a_look_changes_nothing |
 | a look reads what is wanted | test_a_look_reads_root_alone |
@@ -72,14 +77,17 @@ from chryso_testbed.faults import (
     STEP,
     Absorb,
     Arm,
+    BootConfig,
     Corrupt,
     CrashPut,
     Disarm,
     Driver,
     Fault,
     Get,
+    Halt,
     Look,
     Model,
+    OrchModel,
     Overwrite,
     Program,
     Put,
@@ -90,12 +98,14 @@ from chryso_testbed.faults import (
     Rewant,
     Step,
     Want,
+    boot_profile,
     expect,
     owner,
     trim,
 )
 from chryso_testbed.inject import (
     absorb_outcome,
+    boot_outcome,
     condition_outcome,
     decision,
     get_outcome,
@@ -105,6 +115,7 @@ from chryso_testbed.inject import (
 )
 from chryso_testbed.lifecycles import FaultLifecycle, FaultRecord
 from chryso_testbed.outcomes import (
+    Booted,
     Condition,
     ConditionName,
     GaveUp,
@@ -1294,3 +1305,108 @@ def test_service_is_confirmed_where_the_model_says_running(model: Model, step: S
             )
         else:
             assert confirmed is None
+
+
+HALT: Final = Halt(kind="halt")
+boot_configs = st.one_of(
+    st.none(),
+    st.builds(
+        BootConfig, profile=st.sampled_from(["start", "orch"]), safe_below=st.integers(0, 70)
+    ),
+)
+
+
+@st.composite
+def booted_states(draw: st.DrawFn) -> Model:
+    """A reachable model on an image with a drawn boot request and BEAM spend."""
+    model = draw(states())
+    orch = replace(
+        model.orch,
+        boot=draw(boot_configs),
+        observable=draw(st.booleans()),
+        beam_spent=draw(st.integers(0, 63)),
+    )
+    return replace(model, orch=orch)
+
+
+@given(model=booted_states())
+def test_a_halt_resets_the_orchestrator_only(model: Model) -> None:
+    """Law 10: a halt forgets every want, spends one BEAM restart and leaves
+    Root's driver charts and the storage as they were."""
+    (seen,) = model.expect(HALT).values
+    after = model.after(HALT, seen)
+    assert after.orch.wanted == frozenset()
+    assert after.orch.beam_spent == model.orch.beam_spent + 1
+    assert after.root.key() == model.root.settled(DRIVERS).key()
+    assert after.storage.key() == model.storage.key()
+    assert after.net.key() == model.net.key()
+
+
+@given(model=booted_states(), data=st.data())
+def test_a_halt_commutes_with_storage_and_network_steps(model: Model, data: st.DataObject) -> None:
+    """Law 10: the BEAM's restart touches no driver and no file, so a halt
+    commutes with what the storage and network components own."""
+    model = settled(model)
+    step = data.draw(st.one_of(storage_steps, net_steps))
+    seen = data.draw(outcome(model.expect(step)))
+    (halted,) = model.expect(HALT).values
+    assert commutes(model, HALT, halted, step, seen)
+
+
+@given(
+    orch=st.builds(
+        lambda b, o, s: OrchModel(boot=b, observable=o, beam_spent=s),
+        boot_configs,
+        st.booleans(),
+        st.integers(0, 80),
+    )
+)
+def test_the_boot_profile_only_falls_back(orch: OrchModel) -> None:
+    """Law 10, as runtime_boot_select's laws: no request, a start request or no
+    page boots start (identity, no page), the result is start or the request
+    (only down), and once start for lack of budget, every later restart is too
+    (monotone)."""
+    profile = boot_profile(orch)
+    if orch.boot is None or orch.boot.profile == "start" or not orch.observable:
+        assert profile == "start"
+    assert profile in {"start", orch.boot.profile if orch.boot else "start"}
+    if profile == "start":
+        assert boot_profile(replace(orch, beam_spent=orch.beam_spent + 1)) == "start"
+
+
+def test_the_boot_profile_falls_back_at_safe_below() -> None:
+    """The anchor for the boundary: with 64 restarts and safe_below 62, the
+    first two incarnations after boot take orch and the third takes start."""
+    model = Model.start(BUDGET, boot=BootConfig(profile="orch", safe_below=62))
+    seen = []
+    for _ in range(3):
+        (booted,) = model.expect(HALT).values
+        seen.append(booted)
+        model = model.after(HALT, booted)
+    assert seen == [Booted("orch"), Booted("start"), Booted("start")]
+
+
+@given(model=booted_states(), driver=drivers)
+def test_a_want_after_a_halt_is_a_fresh_want(model: Model, driver: Driver) -> None:
+    """Law 10: Root cannot tell a halt happened, so a want after it asks for
+    exactly what it would have asked for without it, and a rewant of a want
+    from the old incarnation finds nothing to repeat."""
+    model = settled(model)
+    (halted,) = model.expect(HALT).values
+    after = model.after(HALT, halted)
+    want = Want(kind="want", driver=driver)
+    assert after.expect(want) == model.expect(want)
+    rewant = Rewant(kind="rewant", driver=driver)
+    assert after.after(rewant, Status.UNASKED).key() == after.key()
+
+
+@given(boot=st.text(min_size=0, max_size=30))
+def test_a_boot_path_names_its_profile_or_is_an_error(boot: str) -> None:
+    """Only the boot table's two names map to a profile."""
+    got = boot_outcome(boot)
+    leaf = boot.rsplit("/", 1)[-1]
+    want = (
+        Booted("start") if leaf == "start" else Booted("orch") if leaf == "orch" else Status.ERROR
+    )
+    assert got == want
+    assert boot_outcome("/releases/28/orch") == Booted("orch")

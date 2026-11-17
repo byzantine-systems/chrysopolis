@@ -25,6 +25,7 @@ from chryso_testbed.faults import (
     Driver,
     Fault,
     Get,
+    Halt,
     Look,
     Model,
     Overwrite,
@@ -43,6 +44,7 @@ from chryso_testbed.faults import (
 )
 from chryso_testbed.machine import Machine
 from chryso_testbed.outcomes import (
+    Booted,
     Condition,
     GaveUp,
     Outcome,
@@ -281,6 +283,40 @@ async def reboot(m: Machine, modules: Sequence[str]) -> None:
     await probes.load_test_modules(m, modules, banner)
 
 
+def boot_outcome(boot: str) -> Outcome:
+    """The profile behind the `-boot` argument `boot_info` reported, or ERROR
+    for any other path: the boot table names /releases/<n>/start and /orch."""
+    match boot.rsplit("/", 1)[-1]:
+        case "start":
+            return Booted("start")
+        case "orch":
+            return Booted("orch")
+        case _:
+            return Status.ERROR
+
+
+async def halt(m: Machine, abi: Abi, modules: Sequence[str], tag: str) -> Outcome:
+    """Halt the BEAM and wait for its next incarnation as for a reboot (Root's
+    decision, the lease if there was one, the prompt, the probes), then report
+    the boot it took. Root giving the BEAM up ends the run here."""
+    leased = m.console.search(DHCP) is not None
+    mark = m.console.mark()
+    await m.console.send("chryso_beam:halt_vm(0).")
+    hit = await m.console.wait(
+        rf"ROOT\|(restart|giveup)\|child={abi.beam}\|(?:count=\d+|reason=([\w-]+))", since=mark
+    )
+    kind, reason = hit.groups
+    if kind == "giveup":
+        return GaveUp(reason or "")
+    if leased:
+        await m.console.wait(DHCP, since=mark)
+    banner = await m.console.wait("Eshell", since=mark)
+    await probes.load_test_modules(m, modules, banner)
+    result = await probes.run(m, f"chryso_beam:boot_info({tag}).", f"BEAM_BOOT.{tag.upper()}")
+    (boot,) = probes.records(result, "boot")
+    return boot_outcome(boot.get("boot"))
+
+
 async def perform(
     m: Machine, step: Step, *, tag: str, abi: Abi, port: int, modules: Sequence[str]
 ) -> Outcome:
@@ -372,6 +408,8 @@ async def perform(
             )
             (look,) = probes.records(result, "look")
             return condition_outcome(look.get("condition"), look.get("reason"))
+        case Halt():
+            return await halt(m, abi, modules, tag)
         case Reset():
             await reboot(m, modules)
             return Status.OK

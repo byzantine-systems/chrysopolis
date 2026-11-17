@@ -105,6 +105,22 @@ static ssize_t stat_read(void *data, size_t count, int fd) {
   return (ssize_t)sizeof(stat_copy);
 }
 
+bool runtime_control_dev_beam_row(uint32_t *lifetime_count,
+                                  uint32_t *effective_budget) {
+  if (root_status_view != chryso_control_status_beam_vaddr) {
+    return false;
+  }
+  if (root_status_read((const chryso_root_status_page *)root_status_view,
+                       &stat_scratch, &stat_copy, sizeof(stat_copy),
+                       stat_attempts) != root_status_read_ok) {
+    return false;
+  }
+  const chryso_root_child_status *row = &stat_copy.children[ROOT_CHILD_BEAM];
+  *lifetime_count = row->lifetime_count;
+  *effective_budget = row->effective_budget;
+  return true;
+}
+
 /* Not a socket, so the poll handlers treat it as an ordinary descriptor. */
 static int stat_fstat(int fd, struct stat *st) {
   (void)fd;

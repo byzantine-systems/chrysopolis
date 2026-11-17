@@ -29,6 +29,13 @@ stated over `expect` and `key()` and tested in `tests/test_faults.py`:
    stopped before the want is judged.
 9. A fault inside a want is the only restart: `Absorb` is a settled `Fault`
    whose want then holds, so Root spends one restart and is asked nothing.
+10. A BEAM halt resets the orchestrator only: `Halt` forgets every want,
+    spends one BEAM restart and leaves Root's driver charts and the storage
+    unchanged, so it commutes with storage and network steps. The new
+    incarnation boots `boot_profile`, beam_server's selector restated:
+    `start` unless the image asks for `orch`, Root's page is readable and
+    more than `safe_below` restarts remain. It moves only from `orch` to
+    `start` as restarts are spent.
 
 Non-laws: a fault restart after a want's stamp also satisfies it (the probe
 reads Root before it stamps and each `Want` waits, so a program never lands
@@ -60,7 +67,16 @@ from chryso_testbed.lifecycles import (
     VolumeLifecycle,
     WindowLifecycle,
 )
-from chryso_testbed.outcomes import Condition, GaveUp, Outcome, Restarted, Seed, Status
+from chryso_testbed.outcomes import (
+    Booted,
+    BootProfile,
+    Condition,
+    GaveUp,
+    Outcome,
+    Restarted,
+    Seed,
+    Status,
+)
 
 type Driver = Literal["serial", "timer", "blk", "eth"]
 DRIVERS: Final[tuple[Driver, ...]] = ("serial", "timer", "blk", "eth")
@@ -210,6 +226,13 @@ class Look(_Step):
     driver: Driver
 
 
+class Halt(_Step):
+    """Halt the BEAM (`erlang:halt/0`): Root restarts beam_server, and the new
+    incarnation reports which boot script it took."""
+
+    kind: Literal["halt"]
+
+
 class Reset(_Step):
     """Reset the whole system, as a power cycle that keeps the disk."""
 
@@ -243,6 +266,7 @@ type Step = Annotated[
     | Rewant
     | Absorb
     | Look
+    | Halt
     | Reset
     | CrashPut,
     Field(discriminator="kind"),
@@ -394,19 +418,53 @@ def _as_debug(outcome: Outcome) -> Outcome:
 
 
 @dataclass(frozen=True, slots=True)
+class BootConfig:
+    """The image's patched boot request (runtime_boot_select.h): a profile
+    and the BEAM restarts left at or below which it boots `start`."""
+
+    profile: BootProfile = "orch"
+    safe_below: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class OrchModel:
     """What the orchestrator holds that Root's page cannot show: the drivers
-    wanted since boot. `observable` is fixed by the image: false where Root
-    publishes no status page."""
+    wanted since boot, and the BEAM restarts Root has spent. `observable`,
+    `boot` and `beam_budget` are fixed by the image: no status page, no boot
+    request (None boots `start`), and Root's BEAM budget."""
 
     wanted: frozenset[Driver] = frozenset()
     observable: bool = True
+    boot: BootConfig | None = None
+    beam_budget: int = 64
+    beam_spent: int = 0
 
     def rebooted(self) -> OrchModel:
-        return replace(self, wanted=frozenset())
+        """A reset starts Root's BEAM count over, and the BEAM forgets wants."""
+        return replace(self, wanted=frozenset(), beam_spent=0)
+
+    def halted(self) -> OrchModel:
+        """A halt: Root counts one more BEAM restart, and the wants are gone."""
+        return replace(self, wanted=frozenset(), beam_spent=self.beam_spent + 1)
 
     def key(self) -> tuple[object, ...]:
-        return (tuple(sorted(self.wanted)), self.observable)
+        return (
+            tuple(sorted(self.wanted)),
+            self.observable,
+            self.boot,
+            self.beam_budget,
+            self.beam_spent,
+        )
+
+
+def boot_profile(orch: OrchModel) -> BootProfile:
+    """Law 10: the profile an incarnation boots, from the image's request and
+    the restarts Root has spent, as runtime_boot_select.c decides it (the boot
+    file is always on the disk here)."""
+    if orch.boot is None or orch.boot.profile == "start" or not orch.observable:
+        return "start"
+    remaining = max(orch.beam_budget - orch.beam_spent, 0)
+    return "orch" if remaining > orch.boot.safe_below else "start"
 
 
 type StorageStep = Put | Overwrite | Get | Remove | Rename | Arm | Disarm | Corrupt
@@ -721,7 +779,7 @@ def owner(step: Step) -> Component:
     match step:
         case Fault() | Restart() | Want() | Absorb():
             return "root"
-        case Rewant() | Look():
+        case Rewant() | Look() | Halt():
             return "orch"
         case Put() | Overwrite() | Get() | Remove() | Rename() | Arm() | Disarm() | Corrupt():
             return "storage"
@@ -743,8 +801,16 @@ class Model:
     orch: OrchModel = field(default_factory=OrchModel)
 
     @classmethod
-    def start(cls, budget: int, disk: Expected = CLEAN_DISK, *, observable: bool = True) -> Model:
-        return cls(RootModel(budget), StorageModel(disk), orch=OrchModel(observable=observable))
+    def start(
+        cls,
+        budget: int,
+        disk: Expected = CLEAN_DISK,
+        *,
+        observable: bool = True,
+        boot: BootConfig | None = None,
+    ) -> Model:
+        orch = OrchModel(observable=observable, boot=boot)
+        return cls(RootModel(budget), StorageModel(disk), orch=orch)
 
     def rebooted(self) -> Model:
         """Root, every driver and the BEAM start over on the same disk."""
@@ -802,6 +868,11 @@ class Model:
                 return self.root.expect(Fault(kind="fault", driver=d))
             case Look(driver=d):
                 return expect(self.look(d))
+            case Halt():
+                halted = self.orch.halted()
+                if halted.beam_spent > halted.beam_budget:
+                    return ANYTHING  # Root gives the BEAM up, and nothing boots
+                return expect(Booted(boot_profile(halted)))
             case Reset() | CrashPut():
                 # A damaged volume may not mount, and then nothing boots.
                 return ANYTHING if self.storage.damaged else expect(OK)
@@ -839,6 +910,8 @@ class Model:
                     root=self.root.after(fault, outcome),
                     orch=replace(self.orch, wanted=self.orch.wanted | {d}),
                 )
+            case Halt():
+                model = replace(self, orch=self.orch.halted())
             case Want() | Rewant() | Look():
                 model = self
         return replace(model, root=model.root.settled(recovering)) if recovering else model

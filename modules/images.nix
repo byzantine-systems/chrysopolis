@@ -18,6 +18,9 @@
 #   packages.command-image
 #     - the ERTS image with the command fixture that drives Root's PPC
 #       commands before ERTS starts.
+#   packages.orch-image, packages.orch-image-nc
+#     - the ERTS image booting the orchestrator release, and the same with a
+#       boot config version the C refuses.
 #   packages.fallback-image
 #     - the restart topology plus the fallback peer and the spec fixture
 #       (BEAM budget 1), so the BEAM can be made gone and driver recovery
@@ -86,27 +89,74 @@
         assert runtimeAbi.microkit.id_count == 62;
         config_sections;
 
-      # Patch a beam_test-only fixture's enabling magic into its 8-byte
-      # section. The section's absence, size or a lost write fails the image
-      # rather than leaving the fixture silently off.
-      patchFixture =
-        { section, magic }:
+      # Patch bytes into one of beam_server.elf's config sections. `emit` is
+      # shell that appends the blob to $blob. The section's absence, size,
+      # alignment, a blob of the wrong length or a lost write fails the image
+      # rather than leaving the feature silently off.
+      patchSection =
+        {
+          section,
+          size,
+          align,
+          emit,
+        }:
         let
           blob = "${builtins.substring 1 64 section}.bin";
         in
         ''
-          : > ${blob}
-          emit_u64 ${blob} ${magic}
-          check_section_layout build/beam_server.elf ${section} 8 8
-          llvm-objcopy --update-section ${section}=${blob} build/beam_server.elf
-          llvm-objcopy --dump-section ${section}=${blob}.readback \
-            build/beam_server.elf ${blob}.readback.elf
-          if ! cmp -s ${blob} ${blob}.readback; then
-            echo "fixture: beam_server.elf ${section} does not hold the patched magic" >&2
+          blob=${blob}
+          : > $blob
+          ${emit}
+          if [ "$(stat -c %s $blob)" -ne ${toString size} ]; then
+            echo "patch: ${section} blob is $(stat -c %s $blob) bytes, expected ${toString size}" >&2
             exit 1
           fi
-          rm ${blob}.readback ${blob}.readback.elf
+          check_section_layout build/beam_server.elf ${section} ${toString size} ${toString align}
+          llvm-objcopy --update-section ${section}=$blob build/beam_server.elf
+          llvm-objcopy --dump-section ${section}=$blob.readback \
+            build/beam_server.elf $blob.readback.elf
+          if ! cmp -s $blob $blob.readback; then
+            echo "patch: beam_server.elf ${section} does not hold the patched bytes" >&2
+            exit 1
+          fi
+          rm $blob.readback $blob.readback.elf
         '';
+
+      # A beam_test-only fixture's enabling magic in its 8-byte section.
+      patchFixture =
+        { section, magic }:
+        patchSection {
+          inherit section;
+          size = 8;
+          align = 8;
+          emit = "emit_u64 $blob ${magic}";
+        };
+
+      # The boot profile (src/pd/beam/payload/runtime_boot_select.h): the magic
+      # as text, the very bytes the C compares, then version, profile and
+      # safe_below as little-endian u32, then 12 zero bytes.
+      bootProfiles = {
+        start = 0;
+        orch = 1;
+      };
+      patchOrchBoot =
+        {
+          profile,
+          safeBelow,
+          version ? 1,
+        }:
+        patchSection {
+          section = ".orchestrator_boot_config";
+          size = 32;
+          align = 8;
+          emit = ''
+            printf 'ORCHBOOT' >> $blob
+            emit_u32 $blob ${toString version}
+            emit_u32 $blob ${toString bootProfiles.${profile}}
+            emit_u32 $blob ${toString safeBelow}
+            head -c 12 /dev/zero >> $blob
+          '';
+        };
 
       # Synthesize a bootable image from a beam_server ELF: gather every
       # PD ELF into the search path, embed the per-PD config blobs the
@@ -146,6 +196,10 @@
           # Enable the beam_test-only PPC command fixture
           # (src/pd/test_support/command_fixture.c) by patching its magic.
           commandFixture ? false,
+          # Patch the boot profile beam_server's selector reads, as
+          # { profile = "orch"; safeBelow = N; } (version for negative controls).
+          # null leaves the section zero, so the BEAM boots start.boot.
+          orchBoot ? null,
         }:
         pkgs.stdenvNoCC.mkDerivation {
           name = imgName;
@@ -277,6 +331,13 @@
             emit_u64() {
               local out=$1 v=$(( $2 )) i byte
               for i in 0 1 2 3 4 5 6 7; do
+                byte=$(( (v >> (i * 8)) & 0xff ))
+                printf "\\$(printf '%03o' "$byte")" >> "$out"
+              done
+            }
+            emit_u32() {
+              local out=$1 v=$(( $2 )) i byte
+              for i in 0 1 2 3; do
                 byte=$(( (v >> (i * 8)) & 0xff ))
                 printf "\\$(printf '%03o' "$byte")" >> "$out"
               done
@@ -521,6 +582,7 @@
               section = ".command_fixture_config";
               magic = "0x3130584946444d43";
             })}
+            ${pkgs.lib.optionalString (orchBoot != null) (patchOrchBoot orchBoot)}
             # Generated from the configSections list above.
             ${pkgs.lib.concatMapStringsSep "\n            " (
               c: "oc ${c.section} ${c.blob} ${c.elf}"
@@ -566,6 +628,18 @@
             };
         });
 
+      # orch.boot and orch.config: the orchestrator release, built by systools
+      # from the same beams the disk carries (nix/orch-release.escript). Host
+      # OTP is the OTP ERTS is cross-built from, so its kernel and stdlib are
+      # the guest's.
+      mkOrchRelease =
+        { core, orchestrator }:
+        pkgs.runCommand "chrysopolis-orch-release" { nativeBuildInputs = [ pkgs.beamPackages.erlang ]; } ''
+          export HOME=$TMPDIR
+          escript ${../nix/orch-release.escript} $out \
+            ${core} ${config.packages.abi-modules} ${orchestrator}
+        '';
+
       # The FAT disk, as a function of the orchestrator's guest beams, so a
       # negative control can boot a mutated build on the same images.
       mkDisk =
@@ -576,6 +650,7 @@
         }:
         let
           otp = "${pkgs.beamPackages.erlang}/lib/erlang";
+          release = mkOrchRelease { inherit core orchestrator; };
         in
         pkgs.runCommand name
           {
@@ -588,6 +663,11 @@
           ''
             otp=${otp}
             rel=$(ls $otp/releases | grep -E '^[0-9]+$' | head -1)
+            # beam_server's boot table names /releases/${chryso.otpRelease}.
+            if [ "$rel" != "${chryso.otpRelease}" ]; then
+              echo "disk: OTP release $rel, beam_server boots ${chryso.otpRelease}" >&2
+              exit 1
+            fi
 
             # FAT stores local timestamps. Pin the clock, zone and generated
             # identifiers so identical derivations produce identical bytes.
@@ -672,6 +752,10 @@
             # Boot script: the clean boot (kernel + stdlib) as start.boot.
             cp "$otp/releases/$rel/start_clean.boot" start.boot
             mcopy -i $part start.boot "::/releases/$rel/start.boot"
+            # The orchestrator release, chosen by beam_server's boot selector
+            # only on an image patched for the orch profile.
+            mcopy -i $part ${release}/orch.boot "::/releases/$rel/orch.boot"
+            mcopy -i $part ${release}/orch.config "::/releases/$rel/orch.config"
 
             # Device files ERTS opens (empty: reads EOF, /dev/null sink).
             # NOT /dev/urandom or /dev/random: runtime_sys_devices.c's openat backs
@@ -818,6 +902,30 @@
           beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
           commandFixture = true;
         }) [ "testbed-orch" ];
+
+        # The production topology booting the orchestrator release. The third
+        # incarnation has 62 of the BEAM's 64 restarts left, so with
+        # safeBelow 62 it boots start.boot (safe mode), which the smoke checks.
+        orch-image = withImageTests (mkSel4Image {
+          imgName = "sel4-beam-orch-image";
+          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+          orchBoot = {
+            profile = "orch";
+            safeBelow = 62;
+          };
+        }) [ "testbed-orch" ];
+
+        # orch-image with a layout version the C does not know: the BEAM must
+        # boot start.boot with reason bad-version (orch-restart-negative).
+        orch-image-nc = mkSel4Image {
+          imgName = "sel4-beam-orch-image-nc";
+          beamElf = "${config.packages.beam-zig}/bin/beam_test.elf";
+          orchBoot = {
+            profile = "orch";
+            safeBelow = 62;
+            version = 2;
+          };
+        };
 
         # The ERTS test topology with the wake-path trace built in. For
         # debugging the cothread and poll paths; see runtime_trace.h.

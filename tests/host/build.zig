@@ -62,6 +62,7 @@ const suites = [_]Suite{
     .{ .name = "wake_pipe", .source = "beam/compat/fd/suite_wake_pipe.c", .unit_dir = "../../src/pd/beam/compat/fd", .sources = &.{"prop.c"}, .units = &.{"runtime_wake_pipe.c"} },
     .{ .name = "epoll", .source = "beam/compat/poll/suite_epoll.c", .unit_dir = "../../src/pd/beam/compat/poll", .units = &.{"runtime_epoll_table.c"} },
     .{ .name = "status", .source = "beam/config/suite_status.c", .unit_dir = "../../src/pd/beam/config", .extra_include_dirs = &.{ "../../src/pd/beam/compat/syscall", "../../src/pd/beam/compat/time" }, .units = &.{"runtime_status.c"} },
+    .{ .name = "boot_select", .source = "beam/payload/suite_boot_select.c", .unit_dir = "../../src/pd/beam/payload", .extra_flags = &abi_flags, .sources = &.{"prop.c"}, .units = &.{"runtime_boot_select.c"} },
     .{ .name = "pd_restart", .source = "beam/restart/suite_pd_restart.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{"runtime_pd_restart_parse.c"} },
     .{ .name = "trace_ring", .source = "beam/config/suite_trace_ring.c", .unit_dir = "../../src/pd/beam/config", .units = &.{"runtime_trace_ring.c"} },
     .{ .name = "pthread", .source = "beam/compat/pthread/suite_pthread.c", .unit_dir = "../../src/pd/beam/compat/pthread", .units = &.{"runtime_tls_row.c"} },

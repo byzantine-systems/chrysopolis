@@ -9,6 +9,8 @@ Laws, checked after every command:
 - **at most once**: Root accepts no more restarts of a driver from commands
   than wants were made for it.
 - **replay**: the decision log replays through the pure step.
+- **fresh**: after a BEAM halt the new incarnation wants nothing. Wants are
+  counted across incarnations, so a halt that resends breaks at most once.
 
 After the run, with fair rounds, every want of a driver Root still runs holds.
 
@@ -17,13 +19,14 @@ After the run, with fair rounds, every want of a driver Root still runs holds.
 | the controller sends every command twice | replay |
 | wants not kept across a controller restart | converges |
 | the port makes up `refused` when another opener holds the channel | converges |
+| the controller re-asserts every driver at startup | fresh |
 """.
 -behaviour(proper_statem).
 -include_lib("proper/include/proper.hrl").
 
 -export([prop_orchestrator/0]).
 -export([initial_state/0, command/1, precondition/2, postcondition/3, next_state/3]).
--export([want/1, fault/1, tear/1, drop/0, busy/0, kill/1, scan/0, expire/0]).
+-export([want/1, fault/1, tear/1, drop/0, busy/0, kill/1, halt/0, scan/0, expire/0]).
 -compile([nowarn_missing_spec, nowarn_missing_doc]).
 
 -define(DRIVERS, [0, 1, 2, 3]).
@@ -63,8 +66,13 @@ prop_orchestrator() ->
 %% Wants made per driver: all the laws need, since Root holds the rest. Kills
 %% stay under each supervisor's intensity (port 3, controller 5, in 10 s),
 %% so neither gives up.
+%% Halts stay within the fake Root's BEAM budget (2), so Root never gives the
+%% BEAM up.
 initial_state() ->
-    #{wants => #{}, tear => false, kills => #{chryso_root_port => 0, chryso_lifecycle_ctl => 0}}.
+    #{wants => #{}, tear => false, kills => kills(), halts => 0}.
+
+kills() ->
+    #{chryso_root_port => 0, chryso_lifecycle_ctl => 0}.
 
 command(#{tear := Tear}) ->
     frequency([
@@ -74,12 +82,15 @@ command(#{tear := Tear}) ->
         {1, {call, ?MODULE, drop, []}},
         {1, {call, ?MODULE, busy, []}},
         {1, {call, ?MODULE, kill, [elements([chryso_root_port, chryso_lifecycle_ctl])]}},
+        {1, {call, ?MODULE, halt, []}},
         {4, {call, ?MODULE, scan, []}},
         {2, {call, ?MODULE, expire, []}}
     ]).
 
 precondition(#{kills := Kills}, {call, _, kill, [Name]}) ->
     maps:get(Name, Kills) < limit(Name);
+precondition(#{halts := Halts}, {call, _, halt, []}) ->
+    Halts < 2;
 precondition(_State, _Call) ->
     true.
 
@@ -90,6 +101,9 @@ next_state(#{wants := Wants} = State, _Result, {call, _, want, [C]}) ->
     State#{wants := Wants#{C => maps:get(C, Wants, 0) + 1}};
 next_state(State, _Result, {call, _, tear, [On]}) ->
     State#{tear := On};
+next_state(#{halts := Halts} = State, _Result, {call, _, halt, []}) ->
+    %% A fresh tree, so its supervisors' intensity counts start over.
+    State#{halts := Halts + 1, kills := kills()};
 next_state(#{kills := Kills} = State, _Result, {call, _, kill, [Name]}) ->
     State#{kills := Kills#{Name := maps:get(Name, Kills) + 1}};
 next_state(State, _Result, _Call) ->
@@ -105,7 +119,12 @@ postcondition(#{wants := Wants}, {call, _, Name, _}, _Result) ->
             kill -> true;
             _ -> chryso_orchestrator:replay() =:= match
         end,
-    case [Law || {Law, false} <- [{at_most_once, Once}, {replay, Replay}]] of
+    Fresh =
+        case Name of
+            halt -> chryso_orchestrator:wanted() =:= #{};
+            _ -> true
+        end,
+    case [Law || {Law, false} <- [{at_most_once, Once}, {replay, Replay}, {fresh, Fresh}]] of
         [] ->
             true;
         Broken ->
@@ -136,6 +155,17 @@ kill(Name) ->
     exit(Old, kill),
     wait_new(Name, Old, 200).
 
+%% A BEAM restart: the VM's processes and persistent terms are gone, Root
+%% counts a BEAM restart, and the application starts again from Root's page.
+halt() ->
+    Sup = whereis(chryso_orchestrator_sup),
+    stop_tree(Sup),
+    _ = persistent_term:erase({chryso_orchestrator, wants}),
+    resume = chryso_fake_root:halt(),
+    {ok, New} = chryso_orchestrator_sup:start_link(chryso_fake_root, ?CONFIG),
+    unlink(New),
+    ok.
+
 scan() ->
     ok = chryso_root_port:sync(1000),
     chryso_orchestrator:scan().
@@ -153,12 +183,9 @@ start() ->
     unlink(Sup),
     Sup.
 
-stop(Sup) ->
-    Ref = monitor(process, Sup),
-    exit(Sup, shutdown),
-    receive
-        {'DOWN', Ref, process, Sup, _} -> ok
-    end,
+stop(_Sup) ->
+    %% The tree a halt started may have replaced the first one.
+    stop_tree(whereis(chryso_orchestrator_sup)),
     ok = chryso_fake_root:stop(),
     _ = persistent_term:erase({chryso_orchestrator, wants}),
     ok.
@@ -183,3 +210,12 @@ wait_new(Name, Old, N) ->
             timer:sleep(5),
             wait_new(Name, Old, N - 1)
     end.
+
+stop_tree(Sup) when is_pid(Sup) ->
+    Ref = monitor(process, Sup),
+    exit(Sup, shutdown),
+    receive
+        {'DOWN', Ref, process, Sup, _} -> ok
+    end;
+stop_tree(undefined) ->
+    ok.
