@@ -4,7 +4,7 @@ The orchestrator's API. Every call has a finite timeout and exits the caller
 when the controller does not answer in time.
 """.
 
--export([status/0, want/1, want/2, decisions/0, replay/0, scan/0]).
+-export([status/0, want/1, want/2, wanted/0, decisions/0, replay/0, scan/0]).
 
 -define(TIMEOUT, 5000).
 
@@ -27,6 +27,11 @@ want(Child) ->
     {ok, non_neg_integer()} | {error, no_observation | not_watched}.
 want(Child, T) ->
     chryso_lifecycle_ctl:want(Child, T, ?TIMEOUT).
+
+-doc "Per driver, the newest Root tick wanted. Applying one again with `want/2` is a no-op.".
+-spec wanted() -> chryso_plan:wants().
+wanted() ->
+    chryso_lifecycle_ctl:wanted(?TIMEOUT).
 
 -doc "The decision log, oldest first, and how many entries the bound dropped.".
 -spec decisions() -> {[chryso_decisions:entry()], non_neg_integer()}.

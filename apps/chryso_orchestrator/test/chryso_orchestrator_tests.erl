@@ -30,6 +30,7 @@ orchestrator_test_() ->
         fun lost_reply_restarts_once/1,
         fun port_crash_forgets_nothing/1,
         fun gone_is_never_commanded/1,
+        fun busy_channel_restarts_once/1,
         fun crash_looping_port_stops_the_tree/1
     ]}.
 
@@ -145,6 +146,27 @@ gone_is_never_commanded(_) ->
     [
         ?_assertEqual({gone, gave_up}, Eth),
         ?_assertEqual([], chryso_fake_root:accepted()),
+        ?_assertEqual(match, chryso_orchestrator:replay())
+    ].
+
+%% Another opener holds the channel: the port's open gets ebusy, Root never
+%% sees the command, the deadline fires and the unchanged page allows the
+%% resend. The port holds no handle between commands.
+busy_channel_restarts_once(_) ->
+    ok = chryso_orchestrator:scan(),
+    Idle = chryso_fake_root:held(),
+    ok = chryso_fake_root:busy_next(),
+    {ok, _} = chryso_orchestrator:want(1),
+    ok = chryso_root_port:sync(1000),
+    Refused = chryso_fake_root:accepted(),
+    timer:sleep(2 * ?DEADLINE),
+    ok = until(fun() -> length(chryso_fake_root:accepted()) =:= 1 end),
+    ok = rounds(3),
+    [
+        ?_assertEqual(false, Idle),
+        ?_assertEqual([], Refused),
+        ?_assertMatch([{1, _}], chryso_fake_root:accepted()),
+        ?_assertEqual(false, chryso_fake_root:held()),
         ?_assertEqual(match, chryso_orchestrator:replay())
     ].
 

@@ -27,7 +27,7 @@ checks against the pure step.
 
 -include_lib("kernel/include/logger.hrl").
 
--export([start_link/1, status/1, want/3, decisions/1, replay/1, scan/1]).
+-export([start_link/1, status/1, want/3, wanted/1, decisions/1, replay/1, scan/1]).
 -export([callback_mode/0, init/1, running/3]).
 -export_type([config/0]).
 
@@ -72,6 +72,11 @@ newest page known. Returns the tick used.
     {ok, non_neg_integer()} | {error, no_observation | not_watched}.
 want(Child, T, Timeout) ->
     gen_statem:call(?NAME, {want, Child, T}, Timeout).
+
+-doc "Per driver, the newest Root tick wanted.".
+-spec wanted(Timeout :: timeout()) -> chryso_plan:wants().
+wanted(Timeout) ->
+    gen_statem:call(?NAME, wanted, Timeout).
 
 -doc "The decision log, oldest first, and how many entries it dropped.".
 -spec decisions(Timeout :: timeout()) -> {[chryso_decisions:entry()], non_neg_integer()}.
@@ -137,6 +142,8 @@ running({call, From}, status, #{ctl := Ctl}) ->
 running({call, From}, {want, Child, T}, Data) ->
     {Reply, Data1, Actions} = add_want(Child, T, Data),
     {keep_state, Data1, [{reply, From, Reply} | Actions]};
+running({call, From}, wanted, #{ctl := Ctl}) ->
+    {keep_state_and_data, [{reply, From, chryso_lifecycle:wants(Ctl)}]};
 running({call, From}, decisions, #{ring := Ring}) ->
     Reply = {chryso_decisions:entries(Ring), chryso_decisions:dropped(Ring)},
     {keep_state_and_data, [{reply, From, Reply}]};

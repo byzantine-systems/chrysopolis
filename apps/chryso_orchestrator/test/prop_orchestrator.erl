@@ -16,13 +16,14 @@ After the run, with fair rounds, every want of a driver Root still runs holds.
 |---|---|
 | the controller sends every command twice | replay |
 | wants not kept across a controller restart | converges |
+| the port makes up `refused` when another opener holds the channel | converges |
 """.
 -behaviour(proper_statem).
 -include_lib("proper/include/proper.hrl").
 
 -export([prop_orchestrator/0]).
 -export([initial_state/0, command/1, precondition/2, postcondition/3, next_state/3]).
--export([want/1, fault/1, tear/1, drop/0, kill/1, scan/0, expire/0]).
+-export([want/1, fault/1, tear/1, drop/0, busy/0, kill/1, scan/0, expire/0]).
 -compile([nowarn_missing_spec, nowarn_missing_doc]).
 
 -define(DRIVERS, [0, 1, 2, 3]).
@@ -71,6 +72,7 @@ command(#{tear := Tear}) ->
         {2, {call, ?MODULE, fault, [elements(?DRIVERS)]}},
         {1, {call, ?MODULE, tear, [not Tear]}},
         {1, {call, ?MODULE, drop, []}},
+        {1, {call, ?MODULE, busy, []}},
         {1, {call, ?MODULE, kill, [elements([chryso_root_port, chryso_lifecycle_ctl])]}},
         {4, {call, ?MODULE, scan, []}},
         {2, {call, ?MODULE, expire, []}}
@@ -119,6 +121,9 @@ tear(On) ->
 drop() ->
     chryso_fake_root:drop_next().
 
+busy() ->
+    chryso_fake_root:busy_next().
+
 %% Kill one process and wait for its replacement.
 kill(Name) ->
     Old = whereis(Name),
@@ -157,7 +162,7 @@ stop(Sup) ->
 converged() ->
     ok = chryso_fake_root:tear(false),
     lists:foreach(fun(_) -> _ = expire() end, lists:seq(1, 12)),
-    Wants = persistent_term:get({chryso_orchestrator, wants}, #{}),
+    Wants = chryso_orchestrator:wanted(),
     States = chryso_fake_root:states(),
     Last = chryso_fake_root:last(),
     [{C, T} || C := T <- Wants, maps:get(C, States) =:= live, maps:get(C, Last, 0) < T].

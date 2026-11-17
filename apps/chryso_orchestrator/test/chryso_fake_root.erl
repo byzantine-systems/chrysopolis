@@ -4,8 +4,11 @@ Test device: the shipped `chryso_root` model behind the `chryso_root_device`
 callbacks, its view published as real status bytes. Ticks are microseconds
 (`cntfrq` 1 MHz), so a want stamped `now + 1` never shares a tick with the
 restart that satisfies it. Root's bucket refills one token per 1000 ticks, so
-it never limits these tests. Controls fault a driver, tear every read while on, drop the next
-reply after Root acted, and report every restart Root accepted from a command.
+it never limits these tests. Controls fault a driver, tear every read while on,
+drop the next reply after Root acted, refuse the next open with `ebusy`, and
+report every restart Root accepted from a command. The command channel has one
+opener, as `/dev/chrysoctl` does: an open while a handle is held is `ebusy`,
+and the handle closes when its opener dies, as a raw file does.
 """.
 -behaviour(chryso_root_device).
 -behaviour(gen_server).
@@ -13,7 +16,8 @@ reply after Root acted, and report every restart Root accepted from a command.
 -include("orchestrator_abi.hrl").
 
 -export([read_status/0, open_ctl/0, call/2, close/1]).
--export([start/0, stop/0, fault/1, tear/1, drop_next/0, accepted/0, budgets/0, last/0, states/0]).
+-export([start/0, stop/0, fault/1, tear/1, drop_next/0, busy_next/0, held/0]).
+-export([accepted/0, budgets/0, last/0, states/0]).
 -export([handle_info/2]).
 -export([init/1, handle_call/3, handle_cast/2]).
 -compile([nowarn_missing_spec, nowarn_missing_doc]).
@@ -34,6 +38,9 @@ stop() ->
 fault(C) -> gen_server:call(?NAME, {fault, C}).
 tear(On) -> gen_server:call(?NAME, {tear, On}).
 drop_next() -> gen_server:call(?NAME, drop_next).
+busy_next() -> gen_server:call(?NAME, busy_next).
+%% Whether a command handle is open now.
+held() -> gen_server:call(?NAME, held).
 accepted() -> gen_server:call(?NAME, accepted).
 %% Each driver's last restart tick, from a fault or a command.
 last() -> gen_server:call(?NAME, last).
@@ -42,9 +49,9 @@ states() -> gen_server:call(?NAME, states).
 %% --- chryso_root_device ---------------------------------------------------------
 
 read_status() -> gen_server:call(?NAME, read).
-open_ctl() -> {ok, make_ref()}.
+open_ctl() -> gen_server:call(?NAME, open).
 call(_Handle, Command) -> gen_server:call(?NAME, {command, Command}).
-close(_Handle) -> ok.
+close(Handle) -> gen_server:call(?NAME, {close, Handle}).
 
 %% --- gen_server -----------------------------------------------------------------
 
@@ -56,6 +63,8 @@ init([]) ->
         last => #{},
         tear => false,
         drop => false,
+        busy => false,
+        held => none,
         accepted => []
     }}.
 
@@ -92,6 +101,22 @@ handle_call({command, Bin}, _From, S) ->
                     })}
         end,
     {reply, Reply, S1};
+handle_call(open, _From, #{busy := true} = S) ->
+    {reply, {error, ebusy}, S#{busy := false}};
+handle_call(open, {Opener, _}, #{held := none} = S) ->
+    H = monitor(process, Opener),
+    {reply, {ok, H}, S#{held := H}};
+handle_call(open, _From, S) ->
+    {reply, {error, ebusy}, S};
+handle_call({close, H}, _From, #{held := H} = S) ->
+    demonitor(H, [flush]),
+    {reply, ok, S#{held := none}};
+handle_call({close, _Stale}, _From, S) ->
+    {reply, ok, S};
+handle_call(busy_next, _From, S) ->
+    {reply, ok, S#{busy := true}};
+handle_call(held, _From, #{held := H} = S) ->
+    {reply, H =/= none, S};
 handle_call({tear, On}, _From, S) ->
     {reply, ok, S#{tear := On}};
 handle_call(drop_next, _From, S) ->
@@ -107,6 +132,8 @@ handle_call(states, _From, #{root := Root} = S) ->
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
+handle_info({'DOWN', H, process, _, _}, #{held := H} = S) ->
+    {noreply, S#{held := none}};
 handle_info(_Msg, S) ->
     {noreply, S}.
 
