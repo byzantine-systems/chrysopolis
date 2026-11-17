@@ -706,6 +706,13 @@
               mmd -i $part ::/lib/chryso_core ::/lib/chryso_core/ebin
               mcopy -i $part ${config.packages.core-modules}/ebin/*.beam ::/lib/chryso_core/ebin/
 
+              # apps/chryso_orchestrator and the codec it decodes Root with.
+              # Nothing starts the application yet.
+              mmd -i $part ::/lib/chryso_abi ::/lib/chryso_abi/ebin
+              mcopy -i $part ${config.packages.abi-modules}/ebin/*.beam ::/lib/chryso_abi/ebin/
+              mmd -i $part ::/lib/chryso_orchestrator ::/lib/chryso_orchestrator/ebin
+              mcopy -i $part ${config.packages.orchestrator-modules}/ebin/* ::/lib/chryso_orchestrator/ebin/
+
               # A large inert read target for blk-fault-smoke. Small BEAM files
               # can cross the virtio block path before the coordinated fault
               # worker gets scheduled, leaving no driver request to reconcile.

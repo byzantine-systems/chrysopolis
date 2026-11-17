@@ -49,7 +49,7 @@ PINNED_INPUTS = (
 )
 # Disk paths only the testbed reads: the probes, the pure model they audit
 # with, and the block-fault read target. Nothing in the shipped boot loads them.
-TEST_PAYLOADS = ("lib/chryso_test/", "lib/chryso_core/", "fault-inflight.bin")
+TEST_PAYLOADS = ("lib/chryso_test/", "fault-inflight.bin")
 SECTOR = 512
 STORE_PATH_RE = re.compile(r"/nix/store/[a-z0-9]{32}-[^/\s]+")
 

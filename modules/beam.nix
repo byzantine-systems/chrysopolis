@@ -261,6 +261,56 @@
           '';
         };
 
+        # The generated codec as guest bytecode, for apps/chryso_orchestrator.
+        # The header comes along for the orchestrator's build.
+        abi-modules = pkgs.stdenvNoCC.mkDerivation {
+          name = "chryso-abi-modules";
+          src = "${config.packages.orchestrator-abi}/erlang";
+          nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+          dontConfigure = true;
+          buildPhase = ''
+            runHook preBuild
+            mkdir ebin
+            erlc -o ebin +deterministic +warnings_as_errors -I include src/*.erl
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            cp -r ebin include $out/
+            runHook postInstall
+          '';
+        };
+
+        # apps/chryso_orchestrator as guest bytecode plus its .app (the
+        # .app.src lists its modules, so it is copied as is). Built against
+        # the core and codec beams it calls; no rebar3.
+        orchestrator-modules = pkgs.stdenvNoCC.mkDerivation {
+          name = "chryso-orchestrator-modules";
+          src = pkgs.lib.fileset.toSource {
+            root = ../apps/chryso_orchestrator;
+            fileset = ../apps/chryso_orchestrator/src;
+          };
+          nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+          dontConfigure = true;
+          buildPhase = ''
+            runHook preBuild
+            mkdir ebin
+            erlc -o ebin +deterministic +warnings_as_errors +warn_missing_spec +warn_missing_doc \
+              -I ${config.packages.abi-modules}/include \
+              -pa ebin -pa ${config.packages.core-modules}/ebin -pa ${config.packages.abi-modules}/ebin \
+              src/*.erl
+            cp src/chryso_orchestrator.app.src ebin/chryso_orchestrator.app
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            cp -r ebin $out/
+            runHook postInstall
+          '';
+        };
+
         # Host tests for the pure runtime units (tests/host). Native build with
         # the same Zig, and therefore the same clang, as the cross build; no
         # Microkit, sDDF or LionsOS input, so it runs on every platform in

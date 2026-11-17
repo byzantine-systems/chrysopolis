@@ -40,6 +40,16 @@
       "the console frame codec keeps its laws: round trip, chunk invariance, soundness under a shuffle with other writers, prefix stability and completeness"
     ]
   },
+  "orchestrator-erlang": {
+    "kind": "host-test",
+    "protects": [
+      "apps/chryso_orchestrator compiles with warnings, specs and docs as errors and passes Dialyzer and xref",
+      "a status page decodes to the rows it was encoded from, and a torn, short or foreign page is unknown",
+      "the decision log replays through the pure lifecycle step at any bound, and a doctored entry is named",
+      "against the shipped Root model: at most one accepted restart per want, a replaying log after every step, and convergence after port and controller crashes, torn reads and lost replies",
+      "a torn first read commands nothing, a lost reply restarts once, and a gone driver is never commanded"
+    ]
+  },
   "c23-diagnostic": {
     "kind": "compile",
     "protects": [

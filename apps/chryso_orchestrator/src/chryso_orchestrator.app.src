@@ -1,0 +1,26 @@
+%% The driver orchestrator: observes Root, reports driver conditions and issues
+%% fenced restarts. The modules list is explicit so the file is also the .app
+%% the Nix build installs.
+{application, chryso_orchestrator, [
+    {description, "Chrysopolis driver orchestrator"},
+    {vsn, "0.1.0"},
+    {registered, [
+        chryso_orchestrator_sup, chryso_controller_sup, chryso_root_port, chryso_lifecycle_ctl
+    ]},
+    {applications, [kernel, stdlib]},
+    {mod, {chryso_orchestrator_app, []}},
+    {modules, [
+        chryso_controller_sup,
+        chryso_decisions,
+        chryso_lifecycle_ctl,
+        chryso_orchestrator,
+        chryso_orchestrator_app,
+        chryso_orchestrator_sup,
+        chryso_root_device,
+        chryso_root_files,
+        chryso_root_page,
+        chryso_root_port
+    ]},
+    {env, []},
+    {licenses, ["Apache-2.0"]}
+]}.

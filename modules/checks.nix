@@ -358,6 +358,61 @@
           '';
         };
 
+        # apps/chryso_orchestrator on the host: warnings, specs and docs as
+        # errors, Dialyzer and xref, then EUnit and the PropEr suites against
+        # a fake device that wraps chryso_root. Supervisor reports from the
+        # suites' deliberate kills are filtered out.
+        orchestrator-erlang = pkgs.stdenvNoCC.mkDerivation {
+          name = "chrysopolis-orchestrator-erlang";
+          src = pkgs.lib.fileset.toSource {
+            root = ../apps;
+            fileset = pkgs.lib.fileset.unions [
+              ../apps/chryso_core/src
+              ../apps/chryso_core/test/lifecycle_world.erl
+              ../apps/chryso_core/test/prop_observe.erl
+              ../apps/chryso_orchestrator/src
+              ../apps/chryso_orchestrator/test
+            ];
+          };
+          nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+          dontConfigure = true;
+          dontInstall = true;
+          buildPhase = ''
+            runHook preBuild
+            export HOME=$TMPDIR
+            export ERL_LIBS=${chrysoCoreDeps.proper}/lib/erlang/lib
+            abi=${config.packages.abi-modules}
+            mkdir ebin
+            # The codec again with debug_info, for Dialyzer. The disk's copy has none.
+            erlc -o ebin +debug_info -I $abi/include ${config.packages.orchestrator-abi}/erlang/src/*.erl
+            erlc -o ebin +debug_info chryso_core/src/*.erl
+            erlc -o ebin +debug_info +warnings_as_errors +warn_missing_spec +warn_missing_doc \
+              -I $abi/include -pa ebin chryso_orchestrator/src/*.erl
+            erlc -o ebin +debug_info -pa ebin chryso_core/test/lifecycle_world.erl chryso_core/test/prop_observe.erl
+            erlc -o ebin +debug_info +warnings_as_errors -I $abi/include -pa ebin chryso_orchestrator/test/*.erl
+            dialyzer --build_plt --apps erts kernel stdlib --output_plt orch.plt >/dev/null || [ $? -eq 2 ]
+            dialyzer --plt orch.plt -Wunmatched_returns -Werror_handling \
+              ebin/chryso_lifecycle.beam ebin/chryso_observe.beam ebin/chryso_condition.beam \
+              ebin/chryso_plan.beam ebin/chryso_abi_codec.beam \
+              $(for m in chryso_orchestrator/src/*.erl; do echo ebin/$(basename $m .erl).beam; done)
+            erl -noshell -pa ebin -eval '
+              ok = logger:add_primary_filter(no_sasl, {fun logger_filters:domain/2, {stop, sub, [otp, sasl]}}),
+              xref:start(s), xref:set_default(s, [{warnings, false}]),
+              ok = xref:set_library_path(s, code:get_path()),
+              {ok, _} = xref:add_directory(s, "ebin"),
+              Bad = [{A, R} || A <- [undefined_function_calls, locals_not_used, deprecated_function_calls],
+                               {ok, R} <- [xref:analyze(s, A)], R =/= []],
+              case Bad of [] -> ok; _ -> io:format("xref: ~p~n", [Bad]), halt(1) end,
+              ok = eunit:test([chryso_orchestrator_tests], [verbose]),
+              Mods = [prop_root_page, prop_decisions, prop_orchestrator],
+              Failed = [{M, R} || M <- Mods, R <- [proper:module(M, [{numtests, 200}])], R =/= []],
+              io:format("~nproperty failures: ~p~n", [Failed]),
+              halt(case Failed of [] -> 0; _ -> 1 end).'
+            touch $out
+            runHook postBuild
+          '';
+        };
+
         # The Zig parser rejects malformed, overlapping and out-of-range ABI
         # values while producing both SDF variants. This check then verifies
         # that the rendered topology and config-blob set reflect those values.
