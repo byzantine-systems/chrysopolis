@@ -17,12 +17,16 @@ attrs=(
   .#test-image
   .#default
   .#disk
+  .#disk-nc-gone
+  .#disk-nc-twice
   .#restart-image
   .#budget-decay-image
   .#cothread-probe-image
   .#lifecycle-failure-image
   .#spec-commit-image
   .#command-image
+  .#orch-image
+  .#orch-image-nc
   .#fallback-image
   .#fallback-nomap-image
 )

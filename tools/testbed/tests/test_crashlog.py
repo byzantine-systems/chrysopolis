@@ -9,6 +9,9 @@ Planted defects caught:
 | persisted keeps all or none of an epoch | test_crash_subsets_reach_between_the_boundaries |
 | persisted samples outside its epoch | test_a_crash_persists_some_of_one_epoch_and_nothing_else |
 | persisted seeds from hash() | test_a_crash_subset_replays_in_another_process |
+| sparse_copy drops a trailing zero run | test_a_sparse_copy_equals_its_source |
+| avoiding compares only a write's first sector | test_avoiding_drops_exactly_the_writes_to_... |
+| overlay applies the newest write first | test_an_overlay_reads_what_a_replay_writes |
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import struct
 import subprocess
 import sys
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal, NamedTuple
 
 import pytest
 from hypothesis import HealthCheck, given, settings
@@ -29,29 +32,38 @@ from chryso_testbed.crashlog import (
     FLUSH,
     MAGIC,
     Log,
+    avoiding,
     crashed_at,
+    overlay,
     parse,
     persisted,
     replay,
+    sparse_copy,
     stable,
     state,
 )
+from chryso_testbed.disk import FileDisk
 
 SECTOR: Final = 512
 DISK_SECTORS: Final = 64
 
-type Op = tuple[str, int, bytes]  # kind, sector, data (whole sectors)
 
+class Op(NamedTuple):
+    """One logged request: its kind, first sector and data (whole sectors)."""
+
+    kind: Literal["write", "flush", "discard"]
+    sector: int
+    data: bytes
+
+
+FLUSH_OP: Final = Op("flush", 0, b"")
 writes = st.builds(
-    lambda sector, n, byte: ("write", sector, bytes([byte]) * (n * SECTOR)),
+    lambda sector, n, byte: Op("write", sector, bytes([byte]) * (n * SECTOR)),
     st.integers(0, 6),  # a narrow range, so writes overlap and order shows
     st.integers(1, 4),
     st.integers(0, 255),
 )
-ops = st.lists(
-    st.one_of(writes, st.just(("flush", 0, b"")), st.just(("discard", 3, b""))), max_size=24
-)
-FLUSH_OP: Final[Op] = ("flush", 0, b"")
+ops = st.lists(st.one_of(writes, st.just(FLUSH_OP), st.just(Op("discard", 3, b""))), max_size=24)
 
 
 @st.composite
@@ -60,7 +72,7 @@ def busy(draw: st.DrawFn) -> tuple[list[Op], int]:
     for, and that epoch's index."""
     before, after = draw(ops), draw(ops)
     middle = draw(st.lists(writes, min_size=2, max_size=8))
-    epoch = sum(k == "flush" for k, _, _ in before) + 1
+    epoch = sum(op.kind == "flush" for op in before) + 1
     return [*before, FLUSH_OP, *middle, FLUSH_OP, *after], epoch
 
 
@@ -68,10 +80,10 @@ def encode(log_ops: list[Op], *, counted: int | None = None) -> bytes:
     """A log as blklogwrites lays it out. `counted` is the superblock's stale
     nr_entries, which a reader must not trust."""
     body = b""
-    for kind, sector, data in log_ops:
-        flags = {"write": 0, "flush": FLUSH, "discard": DISCARD}[kind]
-        nr = len(data) // SECTOR if kind == "write" else (1 if kind == "discard" else 0)
-        body += struct.pack("<QQQQ", sector, nr, flags, 0).ljust(SECTOR, b"\0") + data
+    for op in log_ops:
+        flags = {"write": 0, "flush": FLUSH, "discard": DISCARD}[op.kind]
+        nr = len(op.data) // SECTOR if op.kind == "write" else (1 if op.kind == "discard" else 0)
+        body += struct.pack("<QQQQ", op.sector, nr, flags, 0).ljust(SECTOR, b"\0") + op.data
     entries = len(log_ops) if counted is None else counted
     return struct.pack("<QQQI", MAGIC, 1, entries, SECTOR).ljust(SECTOR, b"\0") + body
 
@@ -82,9 +94,9 @@ def test_parse_reads_every_entry_whatever_the_superblock_counts(
 ) -> None:
     log = parse(encode(log_ops, counted=counted))
     assert [(e.sector, e.data) for e in log.entries if e.write] == [
-        (s, d) for k, s, d in log_ops if k == "write"
+        (op.sector, op.data) for op in log_ops if op.kind == "write"
     ]
-    assert len(log.flushes) == sum(k == "flush" for k, _, _ in log_ops)
+    assert len(log.flushes) == sum(op.kind == "flush" for op in log_ops)
 
 
 @given(log_ops=ops.filter(bool), cut=st.integers(1, SECTOR * 4))
@@ -150,6 +162,44 @@ def test_crash_subsets_reach_between_the_boundaries(case: tuple[list[Op], int]) 
     n = len(log.epochs[epoch])
     sizes = {len(persisted(log, epoch, seed)) for seed in range(1, 200)}
     assert sizes & set(range(1, n)), sizes
+
+
+@given(case=busy(), lost=st.frozensets(st.integers(0, 10), max_size=4))
+def test_avoiding_drops_exactly_the_writes_to_the_lost_sectors(
+    case: tuple[list[Op], int], lost: frozenset[int]
+) -> None:
+    """The kept writes are the epoch's writes that cover no lost sector, and
+    with nothing lost the whole epoch is kept."""
+    log_ops, epoch = case
+    log = parse(encode(log_ops))
+
+    def covers(i: int) -> bool:
+        e = log.entries[i]
+        return any(e.sector <= s < e.sector + e.nr_sectors for s in lost)
+
+    kept = avoiding(log, epoch, lost)
+    assert kept <= set(log.epochs[epoch])
+    assert not any(map(covers, kept))
+    assert all(covers(i) for i in set(log.epochs[epoch]) - kept)
+    assert avoiding(log, epoch, frozenset()) == set(log.epochs[epoch])
+
+
+@given(case=busy(), lost=st.frozensets(st.integers(0, 10), min_size=1, max_size=4))
+def test_a_crash_avoiding_sectors_leaves_them_as_the_epoch_found_them(
+    case: tuple[list[Op], int], lost: frozenset[int]
+) -> None:
+    """Observed on the replayed disk: the lost sectors read as they did
+    before the epoch. No write fills a sector with this base's bytes."""
+    log_ops, epoch = case
+    log = parse(encode(log_ops))
+    base = bytes(range(256)) * (SECTOR // 256) * DISK_SECTORS
+    before = reference(log, state(log, epoch), base)
+    after = reference(log, state(log, epoch, avoiding(log, epoch, lost)), base)
+
+    def sector(disk: bytes, s: int) -> bytes:
+        return disk[s * SECTOR : (s + 1) * SECTOR]
+
+    assert all(sector(after, s) == sector(before, s) for s in lost)
 
 
 REPLAY = """
@@ -219,3 +269,36 @@ def test_replay_applies_exactly_the_kept_writes(
     (tmp_path / "base.img").write_bytes(disk)
     out = replay(log, tmp_path / "base.img", tmp_path / "crash.img", keep)
     assert out.read_bytes() == reference(log, keep, disk)
+
+
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(log_ops=ops, base=st.binary(min_size=SECTOR, max_size=SECTOR), data=st.data())
+def test_an_overlay_reads_what_a_replay_writes(
+    tmp_path: Path, log_ops: list[Op], base: bytes, data: st.DataObject
+) -> None:
+    """The in-memory crash state equals the replayed file, byte for byte."""
+    log = parse(encode(log_ops))
+    epoch = data.draw(st.integers(0, len(log.epochs) - 1))
+    keep = state(log, epoch, data.draw(st.sets(st.sampled_from(log.epochs[epoch] or (0,)))))
+    disk = base * DISK_SECTORS
+    (tmp_path / "base.img").write_bytes(disk)
+    out = replay(log, tmp_path / "base.img", tmp_path / "crash.img", keep)
+    assert (
+        overlay(log, FileDisk(tmp_path / "base.img"), keep).read(0, len(disk)) == out.read_bytes()
+    )
+
+
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(
+    runs=st.lists(st.tuples(st.booleans(), st.integers(1, 40)), max_size=12),
+    chunk_size=st.sampled_from([1, 7, 16, 64]),
+)
+def test_a_sparse_copy_equals_its_source(
+    tmp_path: Path, runs: list[tuple[bool, int]], chunk_size: int
+) -> None:
+    """Zero runs of any length, across chunk boundaries and at the end, copy
+    back byte for byte at the same size."""
+    data = b"".join(bytes(n) if zero else bytes([n]) * n for zero, n in runs)
+    (tmp_path / "src.img").write_bytes(data)
+    sparse_copy(tmp_path / "src.img", tmp_path / "dst.img", chunk_size)
+    assert (tmp_path / "dst.img").read_bytes() == data

@@ -10,7 +10,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from chryso_testbed import frames
-from chryso_testbed.faults import Driver, Fault, Restart, Step
+from chryso_testbed.faults import Absorb, Driver, Fault, Restart, Step, Want
 from chryso_testbed.outcomes import GaveUp, Outcome, Restarted
 
 
@@ -69,13 +69,19 @@ def disagreements(
     """Where Root's console decisions and its ring disagree, for the drivers
     in `children`. Empty when they tell the same story.
 
-    `decisions` are the run's fault and restart requests with what the
-    console said, in order. Requests Root ignored (gone) leave no event."""
+    `decisions` are the run's fault, restart and want requests with what the
+    console said, in order. Requests Root ignored (gone) leave no event, and
+    neither does a want the orchestrator never sent (`UNASKED`). An absorb
+    publishes as the fault it is, and no command. A want Root
+    answered publishes a `restart_child` control, then its restart or give-up
+    (`src/pd/root/main.c`, the command path)."""
     problems = []
     for driver, child in children.items():
         mine = [e for e in events if e.child == child]
         said = [
-            (s, o) for s, o in decisions if isinstance(s, Fault | Restart) and s.driver == driver
+            (s, o)
+            for s, o in decisions
+            if isinstance(s, Fault | Restart | Want | Absorb) and s.driver == driver
         ]
         restarts = [o.count for _, o in said if isinstance(o, Restarted)]
         published = [e.a for e in mine if e.kind == Kind.RESTART]
@@ -85,7 +91,9 @@ def disagreements(
         giveups = [e for e in mine if e.kind == Kind.GIVEUP]
         if gave_up != len(giveups) or any(e.detail != "budget_exhausted" for e in giveups):
             problems.append(f"{driver}: console gave up {gave_up} times, ring {giveups}")
-        injected = sum(isinstance(s, Fault) and isinstance(o, Restarted | GaveUp) for s, o in said)
+        injected = sum(
+            isinstance(s, Fault | Absorb) and isinstance(o, Restarted | GaveUp) for s, o in said
+        )
         controls = [e for e in mine if e.kind == Kind.CONTROL and e.detail == "fault_inject"]
         faults = [e for e in mine if e.kind == Kind.FAULT]
         if injected != len(controls) or injected != len(faults):
@@ -95,4 +103,16 @@ def disagreements(
             )
         elif any(c.index > f.index for c, f in zip(controls, faults, strict=True)):
             problems.append(f"{driver}: a fault event precedes its injection")
+        sent = sum(isinstance(s, Want) and isinstance(o, Restarted | GaveUp) for s, o in said)
+        commands = [e for e in mine if e.kind == Kind.CONTROL and e.detail == "restart_child"]
+        if sent != len(commands):
+            problems.append(
+                f"{driver}: {sent} commands answered, ring {len(commands)} restart_child"
+            )
+        for command in commands:
+            after = [e for e in mine if e.index > command.index][:1]
+            if not after or after[0].kind not in {Kind.RESTART, Kind.GIVEUP}:
+                problems.append(
+                    f"{driver}: restart_child at {command.index} has no outcome after it"
+                )
     return problems

@@ -107,8 +107,11 @@
               mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
               ln -s ${abiToolDeps} "$ZIG_GLOBAL_CACHE_DIR"/p
               cd tools/abi
-              zig build test --summary all
-              zig build --prefix $out -Doptimize=ReleaseSafe
+              # Other derivations run gen-abi, possibly on another machine
+              # through the store cache, so it is built for the baseline CPU,
+              # never the builder's native one.
+              zig build test --summary all -Dcpu=baseline
+              zig build --prefix $out -Doptimize=ReleaseSafe -Dcpu=baseline
               runHook postBuild
             '';
             dontInstall = true;
@@ -326,10 +329,11 @@
             export CHRYSO_ROOT_TRACES=${config.packages.root-traces}
             mkdir ebin
             erlc -o ebin +debug_info +warnings_as_errors +warn_missing_spec +warn_missing_doc src/*.erl
-            erlc -o ebin +debug_info +warnings_as_errors -pa ebin test/prop_*.erl
+            erlc -o ebin +debug_info +warnings_as_errors -pa ebin test/lifecycle_world.erl test/prop_*.erl
             # Status 2 means warnings inside OTP's own apps; the PLT is still built.
             dialyzer --build_plt --apps erts kernel stdlib --output_plt core.plt >/dev/null || [ $? -eq 2 ]
-            dialyzer --plt core.plt -Wunmatched_returns -Werror_handling ebin/chryso_root*.beam ebin/chryso_frame.beam
+            dialyzer --plt core.plt -Wunmatched_returns -Werror_handling ebin/chryso_root*.beam ebin/chryso_frame.beam \
+              ebin/chryso_observe.beam ebin/chryso_condition.beam ebin/chryso_plan.beam ebin/chryso_lifecycle.beam
             erl -noshell -pa ebin -eval '
               xref:start(s), xref:set_default(s, [{warnings, false}]),
               ok = xref:set_library_path(s, code:get_path()),
@@ -338,7 +342,8 @@
                                {ok, R} <- [xref:analyze(s, A)], R =/= []],
               case Bad of [] -> ok; _ -> io:format("xref: ~p~n", [Bad]), halt(1) end,
               Mods = [prop_root_policy, prop_root_spec, prop_root_bucket,
-                      prop_root_command, prop_root, prop_root_traces, prop_frame],
+                      prop_root_command, prop_root, prop_root_traces, prop_frame,
+                      prop_observe, prop_condition, prop_plan, prop_lifecycle],
               Failed = [{M, R} || M <- Mods, R <- [proper:module(M, [{numtests, 300}])], R =/= []],
               io:format("~nproperty failures: ~p~n", [Failed]),
               halt(case Failed of [] -> 0; _ -> 1 end).'
@@ -351,6 +356,61 @@
               -dir test -suite chryso_core_cluster_SUITE -logdir ct_logs > ct.out 2>&1 || true
             grep -q "TEST COMPLETE, 1 ok, 0 failed" ct.out || { cat ct.out; exit 1; }
             epmd -kill >/dev/null 2>&1 || true
+            touch $out
+            runHook postBuild
+          '';
+        };
+
+        # apps/chryso_orchestrator on the host: warnings, specs and docs as
+        # errors, Dialyzer and xref, then EUnit and the PropEr suites against
+        # a fake device that wraps chryso_root. Supervisor reports from the
+        # suites' deliberate kills are filtered out.
+        orchestrator-erlang = pkgs.stdenvNoCC.mkDerivation {
+          name = "chrysopolis-orchestrator-erlang";
+          src = pkgs.lib.fileset.toSource {
+            root = ../apps;
+            fileset = pkgs.lib.fileset.unions [
+              ../apps/chryso_core/src
+              ../apps/chryso_core/test/lifecycle_world.erl
+              ../apps/chryso_core/test/prop_observe.erl
+              ../apps/chryso_orchestrator/src
+              ../apps/chryso_orchestrator/test
+            ];
+          };
+          nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+          dontConfigure = true;
+          dontInstall = true;
+          buildPhase = ''
+            runHook preBuild
+            export HOME=$TMPDIR
+            export ERL_LIBS=${chrysoCoreDeps.proper}/lib/erlang/lib
+            abi=${config.packages.abi-modules}
+            mkdir ebin
+            # The codec again with debug_info, for Dialyzer. The disk's copy has none.
+            erlc -o ebin +debug_info -I $abi/include ${config.packages.orchestrator-abi}/erlang/src/*.erl
+            erlc -o ebin +debug_info chryso_core/src/*.erl
+            erlc -o ebin +debug_info +warnings_as_errors +warn_missing_spec +warn_missing_doc \
+              -I $abi/include -pa ebin chryso_orchestrator/src/*.erl
+            erlc -o ebin +debug_info -pa ebin chryso_core/test/lifecycle_world.erl chryso_core/test/prop_observe.erl
+            erlc -o ebin +debug_info +warnings_as_errors -I $abi/include -pa ebin chryso_orchestrator/test/*.erl
+            dialyzer --build_plt --apps erts kernel stdlib --output_plt orch.plt >/dev/null || [ $? -eq 2 ]
+            dialyzer --plt orch.plt -Wunmatched_returns -Werror_handling \
+              ebin/chryso_lifecycle.beam ebin/chryso_observe.beam ebin/chryso_condition.beam \
+              ebin/chryso_plan.beam ebin/chryso_abi_codec.beam \
+              $(for m in chryso_orchestrator/src/*.erl; do echo ebin/$(basename $m .erl).beam; done)
+            erl -noshell -pa ebin -eval '
+              ok = logger:add_primary_filter(no_sasl, {fun logger_filters:domain/2, {stop, sub, [otp, sasl]}}),
+              xref:start(s), xref:set_default(s, [{warnings, false}]),
+              ok = xref:set_library_path(s, code:get_path()),
+              {ok, _} = xref:add_directory(s, "ebin"),
+              Bad = [{A, R} || A <- [undefined_function_calls, locals_not_used, deprecated_function_calls],
+                               {ok, R} <- [xref:analyze(s, A)], R =/= []],
+              case Bad of [] -> ok; _ -> io:format("xref: ~p~n", [Bad]), halt(1) end,
+              ok = eunit:test([chryso_orchestrator_tests], [verbose]),
+              Mods = [prop_root_page, prop_decisions, prop_orchestrator, prop_config],
+              Failed = [{M, R} || M <- Mods, R <- [proper:module(M, [{numtests, 200}])], R =/= []],
+              io:format("~nproperty failures: ~p~n", [Failed]),
+              halt(case Failed of [] -> 0; _ -> 1 end).'
             touch $out
             runHook postBuild
           '';
@@ -575,8 +635,8 @@
         # and the notification caps between Root and its peers, read from
         # report.txt and cross-checked against the generated SDF and
         # system-abi.json. Check every assembled image: production SDF users
-        # include the bring-up, ERTS, cothread-probe and config-failure
-        # images; both restart images add the crasher and debug channels;
+        # include the bring-up, ERTS, cothread-probe, config-failure and
+        # orch images; both restart images add the crasher and debug channels;
         # the fallback image swaps the crasher for the fallback peer, and the
         # no-map image drops the crasher and both control pages.
         restart-topology = pkgs.runCommand "chrysopolis-restart-topology" { } ''
@@ -586,6 +646,8 @@
           ${checkTopology "production" config.packages.lifecycle-failure-image config.packages.sdf}
           ${checkTopology "production" config.packages.spec-commit-image config.packages.sdf}
           ${checkTopology "production" config.packages.command-image config.packages.sdf}
+          ${checkTopology "production" config.packages.orch-image config.packages.sdf}
+          ${checkTopology "production" config.packages.orch-image-nc config.packages.sdf}
           ${checkTopology "restart" config.packages.restart-image config.packages.sdf-restart}
           ${checkTopology "restart" config.packages.budget-decay-image config.packages.sdf-restart}
           ${checkTopology "fallback" config.packages.fallback-image config.packages.sdf-fallback}

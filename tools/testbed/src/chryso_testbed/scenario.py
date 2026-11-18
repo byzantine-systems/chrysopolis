@@ -74,6 +74,8 @@ class Settings:
     out: Path
     jobs: int
     test_modules: tuple[str, ...] = ()
+    # Variant disks by name, such as a negative control's mutated build.
+    disks: dict[str, Path] = field(default_factory=dict)
     fallback_bound_us: int = 0
 
 

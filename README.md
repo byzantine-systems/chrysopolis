@@ -126,6 +126,13 @@ Crash and restart:
 - **`serial-fault-smoke`**, **`timer-fault-smoke`**, **`blk-fault-smoke`**, **`net-fault-smoke`**: Each real driver is forced to take a genuine seL4 fault, Root catches and restarts it, and its subsystem must recover. The block case includes a client request in flight.
 - **`blk-giveup-smoke`**: Genuine block-driver faults spend the entire restart budget, Root stops the driver for good, and the system must degrade rather than wedge.
 
+Root's control plane and the orchestrator:
+
+- **`orch-status-smoke`**, **`orch-command-smoke`**, **`orch-spec-smoke`**: The BEAM reads Root's status page, sends it fenced, rate-limited commands, and commits a restart policy that survives a BEAM restart, all through `/dev/chrysostat` and `/dev/chrysoctl`.
+- **`orch-driver-smoke`**: The OTP orchestrator (`apps/chryso_orchestrator`) wants, looks at and restarts drivers while they fault and run out of budget. Every outcome is judged by the testbed's fault model, the orchestrator's decision log must replay, and Root's event ring must record exactly the commands it sent.
+- **`orch-restart-smoke`**: An image patched for it boots the orchestrator release (`orch.boot`) with no shell command. BEAM halts never make Root repeat a command, and near the BEAM's restart budget beam_server boots the plain shell instead (safe mode).
+- **`orch-fallback-smoke`**: Root's fault handling keeps its latency bound under a command flood, and keeps restarting drivers after it gives up on the BEAM.
+
 Pure and generated-artifact gates include:
 
 - **`runtime-host-tests`** runs every pure runtime suite with Debug/UBSan and ReleaseFast.

@@ -24,7 +24,7 @@ resolve it.
 """.
 
 -export([mark/0, check/1]).
--export([stop_vm/0, halt_vm/1]).
+-export([stop_vm/0, halt_vm/1, boot_info/1]).
 
 -define(NAME, chryso_restart_mark).
 -define(PTERM, chryso_restart_pterm).
@@ -84,3 +84,22 @@ code, so the code shows up in root's fault log as mr1.
 -spec halt_vm(integer()) -> no_return().
 halt_vm(Code) ->
     erlang:halt(Code).
+
+-doc """
+Which boot this incarnation took, as one framed `boot` record: the `-boot`
+and `-config` arguments beam_server passed (`none` when absent), and whether
+the orchestrator application is running. The boot selector's choice, seen
+from inside the VM rather than through a console line that can splice.
+""".
+-spec boot_info(atom()) -> ok.
+boot_info(Tag) ->
+    Running = lists:keymember(chryso_orchestrator, 1, application:which_applications()),
+    Record = {boot, [{boot, argument(boot)}, {config, argument(config)}, {orchestrator, Running}]},
+    chryso_test:emit_run("BEAM_BOOT." ++ chryso_test:tag(Tag), [Record], 0).
+
+-spec argument(atom()) -> string() | none.
+argument(Flag) ->
+    case init:get_argument(Flag) of
+        {ok, [[Value | _] | _]} -> Value;
+        _ -> none
+    end.

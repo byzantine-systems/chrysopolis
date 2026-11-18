@@ -104,6 +104,13 @@ class FileLifecycle(_Chart[FileRecord]):
         | unknown.to(unknown)
         | torn.to(unknown)
     )
+    deleted = (
+        absent.to(absent)
+        | held.to(absent)
+        | unknown.to(absent)
+        | corrupt.to(absent)
+        | torn.to(absent)
+    )
     # On a damaged volume a file the model holds absent can still be found.
     corrupted = (
         held.to(corrupt)
@@ -155,9 +162,18 @@ class FaultLifecycle(_Chart[FaultRecord]):
         armed.to(maybe_spent, cond="one_shot") | maybe_spent.to(maybe_spent) | adrift.to(adrift)
     )
     moved = armed.to(adrift) | maybe_spent.to(adrift) | adrift.to(adrift)
+    # A rename keeps the file's clusters, so a fault on them follows it.
+    followed = (
+        armed.to(armed, on="follow")
+        | maybe_spent.to(maybe_spent, on="follow")
+        | adrift.to(adrift, on="follow")
+    )
 
     def aim(self, op: Literal["read", "write"], region: Region, file: int, once: bool) -> None:
         self.model.op, self.model.region, self.model.file, self.model.once = op, region, file, once
+
+    def follow(self, file: int) -> None:
+        self.model.file = file
 
     def one_shot(self) -> bool:
         return self.model.once

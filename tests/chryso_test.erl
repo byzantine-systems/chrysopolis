@@ -17,11 +17,12 @@ Two properties of the serial console shape every API here.
 2. ESHELL BINDINGS PERSIST FOR THE WHOLE SESSION. Function-local variables
    do not, so calls never collide with an earlier binding.
 
-Everything in tests/ may call kernel, stdlib and the pure modules of
-apps/chryso_core, and nothing else. The FAT disk carries only those, the
-probes and the Gleam app, and ERTS boots -mode embedded, so an unresolvable
-remote call is a plain undef with no autoload to rescue it. The loader below
-loads chryso_core's modules with the probes.
+Everything in tests/ may call kernel, stdlib, the pure modules of
+apps/chryso_core, and, from chryso_orch only, apps/chryso_orchestrator and
+the ABI codec. The FAT disk carries only those, the probes and the Gleam app,
+and ERTS boots -mode embedded, so an unresolvable remote call is a plain undef
+with no autoload to rescue it. The loader below loads chryso_core's modules
+with the probes, and chryso_orch:ensure/0 loads the orchestrator's.
 """.
 
 -include_lib("kernel/include/logger.hrl").
@@ -80,11 +81,19 @@ loaded(Mods) ->
             ?LOG_ERROR("TEST_MODULES|missing ~p", [Missing])
     end.
 
--spec load(module()) -> file | binary | error.
+-spec load(module()) -> file | binary | loaded | error.
 load(M) ->
-    case code:load_file(M) of
-        {module, M} -> file;
-        {error, _} -> load_binary(M)
+    %% A boot script may have loaded M already (orch.boot loads chryso_core
+    %% in embedded mode). Loading it again would make the running code old,
+    %% and a later load would fail not_purged, so a loaded module is kept.
+    case code:is_loaded(M) of
+        {file, _} ->
+            loaded;
+        false ->
+            case code:load_file(M) of
+                {module, M} -> file;
+                {error, _} -> load_binary(M)
+            end
     end.
 
 %% Path-free fallback: read the beam and hand ERTS the bytes. Note the plain

@@ -67,6 +67,9 @@
     {
       _module.args.chryso = {
         inherit microkitVersion microkitBoard microkitConfig;
+        # The OTP release directory (/releases/<n>) on the disk. One value for
+        # beam_server's boot table and mkDisk, from the OTP ERTS is built from.
+        otpRelease = pkgs.lib.versions.major pkgs.beamPackages.erlang.version;
         inherit microkitSdk llvm;
         boardDir = "${microkitSdk}/board/${microkitBoard}/${microkitConfig}";
 

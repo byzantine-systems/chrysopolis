@@ -13,6 +13,10 @@ const std = @import("std");
 // those include paths, so a pure unit that grows such an include stops
 // compiling in this harness.
 //
+// The exception is a pure header on the LionsOS fork, such as the FAT server's
+// rename_intent.h. Its suite gets that one directory, from -Dlionsos-src, and
+// is left out when the option is absent.
+//
 // Every suite runs twice: Debug with UBSan in trap mode, and ReleaseFast so
 // optimizer-sensitive undefined behaviour gets a second chance to show up.
 
@@ -46,6 +50,8 @@ const Suite = struct {
     traces: bool = false,
     // Pure unit sources from the owning directory. Header-only units need no entry.
     units: []const []const u8,
+    // unit_dir is relative to -Dlionsos-src instead of this package.
+    lionsos: bool = false,
 };
 
 const suites = [_]Suite{
@@ -56,6 +62,7 @@ const suites = [_]Suite{
     .{ .name = "wake_pipe", .source = "beam/compat/fd/suite_wake_pipe.c", .unit_dir = "../../src/pd/beam/compat/fd", .sources = &.{"prop.c"}, .units = &.{"runtime_wake_pipe.c"} },
     .{ .name = "epoll", .source = "beam/compat/poll/suite_epoll.c", .unit_dir = "../../src/pd/beam/compat/poll", .units = &.{"runtime_epoll_table.c"} },
     .{ .name = "status", .source = "beam/config/suite_status.c", .unit_dir = "../../src/pd/beam/config", .extra_include_dirs = &.{ "../../src/pd/beam/compat/syscall", "../../src/pd/beam/compat/time" }, .units = &.{"runtime_status.c"} },
+    .{ .name = "boot_select", .source = "beam/payload/suite_boot_select.c", .unit_dir = "../../src/pd/beam/payload", .extra_flags = &abi_flags, .sources = &.{"prop.c"}, .units = &.{"runtime_boot_select.c"} },
     .{ .name = "pd_restart", .source = "beam/restart/suite_pd_restart.c", .unit_dir = "../../src/pd/beam/restart", .units = &.{"runtime_pd_restart_parse.c"} },
     .{ .name = "trace_ring", .source = "beam/config/suite_trace_ring.c", .unit_dir = "../../src/pd/beam/config", .units = &.{"runtime_trace_ring.c"} },
     .{ .name = "pthread", .source = "beam/compat/pthread/suite_pthread.c", .unit_dir = "../../src/pd/beam/compat/pthread", .units = &.{"runtime_tls_row.c"} },
@@ -76,6 +83,7 @@ const suites = [_]Suite{
     .{ .name = "tcp_state", .source = "beam/io/network/suite_tcp_state.c", .unit_dir = "../../src/pd/beam/io/network", .units = &.{} },
     .{ .name = "abi_layout", .source = "lib/abi/suite_abi_layout.c", .unit_dir = "lib/abi", .generated_abi = true, .extra_flags = &abi_flags, .units = &.{} },
     .{ .name = "abi_vectors", .source = "lib/abi/suite_abi_vectors.c", .unit_dir = "lib/abi", .generated_abi = true, .extra_flags = &abi_flags, .sources = &.{"lib/abi/abi_shim.c"}, .vectors = true, .units = &.{} },
+    .{ .name = "rename_intent", .source = "fs/suite_rename_intent.c", .unit_dir = "components/fs/fat", .lionsos = true, .extra_flags = &abi_flags, .sources = &.{"prop.c"}, .units = &.{} },
 };
 
 // Generated code must also be clean under the conversion warnings.
@@ -106,9 +114,15 @@ pub fn build(b: *std.Build) void {
     const abi = b.dependency("abi", .{ .target = target });
     const generated_abi = abi.namedLazyPath("orchestrator-abi");
     const golden_vectors = abi.namedLazyPath("orchestrator-abi-vectors");
+    const lionsos_src = b.option([]const u8, "lionsos-src", "LionsOS tree, for suites over its pure headers");
     for (variants) |variant| {
         for (suites) |suite| {
-            const owner_dir = b.path(suite.unit_dir);
+            const owner_dir: std.Build.LazyPath = if (!suite.lionsos)
+                b.path(suite.unit_dir)
+            else if (lionsos_src) |root|
+                .{ .cwd_relative = b.pathJoin(&.{ root, suite.unit_dir }) }
+            else
+                continue;
             const exe = b.addExecutable(.{
                 .name = b.fmt("suite_{s}_{s}", .{ suite.name, variant.suffix }),
                 .linkage = if (linux) .static else null,

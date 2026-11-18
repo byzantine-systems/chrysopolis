@@ -9,10 +9,10 @@ does no I/O, so it stays cheap and keeps working even once the block device
 has been stopped for good. `file:read_file/1` is the part that actually
 touches the disk.
 
-Results are reported via `catch` and `element(1, ...)` so that success and
-failure are both printable. After give-up the read must fail, and a probe
-that could only print success would be unable to tell a failure apart from
-a hang, which is precisely the wedge the give-up path exists to prevent.
+Results are classified with `try`, so success and failure are both
+printable. After give-up the read must fail, and a probe that could only
+print success would be unable to tell a failure apart from a hang, which is
+precisely the wedge the give-up path exists to prevent.
 
 These modules are loaded into memory before any test damages the disk (see
 `load_test_modules` in tools/testbed), which is what lets them keep
@@ -28,7 +28,12 @@ reporting after the device they probe is gone.
     read_outcome/2,
     read_back/1,
     put/3,
-    get/2
+    overwrite/3,
+    get/2,
+    remove/2,
+    rename/3,
+    pad/2,
+    pad/3
 ]).
 
 -doc """
@@ -49,8 +54,7 @@ have to return something neither wants.
 """.
 -spec read_status(atom(), module()) -> ok.
 read_status(Tag, Module) ->
-    R = (catch file:read_file(code:which(Module))),
-    chryso_test:emit("BLKGONE_" ++ chryso_test:tag(Tag), element(1, R)).
+    chryso_test:emit("BLKGONE_" ++ chryso_test:tag(Tag), read_class(code:which(Module))).
 
 -doc """
 blk-restart-smoke, scenario 2: start a read and return immediately, so the
@@ -60,10 +64,7 @@ silent reader here is the wedge the restart protocol exists to prevent.
 """.
 -spec read_inflight(module()) -> pid().
 read_inflight(Module) ->
-    spawn(fun() ->
-        R = (catch file:read_file(code:which(Module))),
-        chryso_test:emit("FS_INFLIGHT", element(1, R))
-    end).
+    spawn(fun() -> chryso_test:emit("FS_INFLIGHT", read_class(code:which(Module))) end).
 
 -doc """
 blk-fault-smoke: remove the serial-shell delay between starting the client
@@ -91,9 +92,21 @@ read_during_fault() ->
     end),
     spawn(fun() ->
         Fault ! fault,
-        R = (catch file:read_file("/fault-inflight.bin")),
-        chryso_test:emit("FS_INFLIGHT", element(1, R))
+        chryso_test:emit("FS_INFLIGHT", read_class("/fault-inflight.bin"))
     end).
+
+-doc """
+The class of reading `Path`: `ok`, `error` for an error return, or `'EXIT'`
+when the read raises. Scenarios match on the class alone.
+""".
+-spec read_class(file:name_all()) -> ok | error | 'EXIT'.
+read_class(Path) ->
+    try file:read_file(Path) of
+        {ok, _} -> ok;
+        {error, _} -> error
+    catch
+        _:_ -> 'EXIT'
+    end.
 
 -define(PROBE_FILE, "/eio-probe.bin").
 
@@ -156,17 +169,67 @@ any of the three steps.
 -spec put(atom(), 0..255, byte()) -> ok.
 put(Tag, File, Seed) ->
     Outcome =
-        case catch file:open(fuzz_path(File), [write, raw, binary]) of
-            {ok, Fd} ->
-                Written = file:write(Fd, binary:copy(<<Seed>>, ?FUZZ_SIZE)),
-                Synced = file:sync(Fd),
-                {Written, Synced, file:close(Fd)};
-            {error, _} = Error ->
-                Error;
-            {'EXIT', _} ->
-                {error, exit}
+        try file:open(fuzz_path(File), [write, raw, binary]) of
+            {ok, Fd} -> write_sync_close(Fd, Seed);
+            {error, _} = Error -> Error
+        catch
+            _:_ -> {error, exit}
         end,
     chryso_test:emit("FS_PUT_" ++ chryso_test:tag(Tag), Outcome).
+
+-doc """
+The system fuzz: write 8 KiB of the byte `Seed` over file `File` in place,
+from offset 0 and without truncating, then sync and close. Whole FatFs
+sectors, so the server never reads before writing. Reports
+`FS_OW_<TAG>|{Write, Sync, Close}`, `{error, enoent}` when the file is
+missing, or `{error, Reason}`. Opening for write would create a missing
+file, hence the check first. The probe is its file's only client, so
+nothing races it.
+""".
+-spec overwrite(atom(), 0..255, byte()) -> ok.
+overwrite(Tag, File, Seed) ->
+    Path = fuzz_path(File),
+    Outcome =
+        try file:read_file_info(Path) of
+            {ok, _} ->
+                case file:open(Path, [read, write, raw, binary]) of
+                    {ok, Fd} -> write_sync_close(Fd, Seed, 0);
+                    {error, _} = Error -> Error
+                end;
+            {error, _} = Error ->
+                Error
+        catch
+            _:_ -> {error, exit}
+        end,
+    chryso_test:emit("FS_OW_" ++ chryso_test:tag(Tag), Outcome).
+
+-doc """
+The system fuzz: delete file `File` and report `FS_RM_<TAG>|ok` or
+`{error, Reason}`.
+""".
+-spec remove(atom(), 0..255) -> ok.
+remove(Tag, File) ->
+    Outcome =
+        try
+            file:delete(fuzz_path(File))
+        catch
+            _:_ -> {error, exit}
+        end,
+    chryso_test:emit("FS_RM_" ++ chryso_test:tag(Tag), Outcome).
+
+-doc """
+The system fuzz: rename file `From` to `To` and report `FS_MV_<TAG>|ok` or
+`{error, Reason}`. The FAT server refuses a `To` that exists (`eexist`).
+""".
+-spec rename(atom(), 0..255, 0..255) -> ok.
+rename(Tag, From, To) ->
+    Outcome =
+        try
+            file:rename(fuzz_path(From), fuzz_path(To))
+        catch
+            _:_ -> {error, exit}
+        end,
+    chryso_test:emit("FS_MV_" ++ chryso_test:tag(Tag), Outcome).
 
 -doc """
 The system fuzz: read file `File` back and report `{ok, Seed}` when it is
@@ -176,20 +239,58 @@ whole and every byte is `Seed`, `differs` when it is not, or
 -spec get(atom(), 0..255) -> ok.
 get(Tag, File) ->
     Outcome =
-        case catch file:read_file(fuzz_path(File)) of
-            {ok, <<Seed, _/binary>> = Bin} when byte_size(Bin) =:= ?FUZZ_SIZE ->
-                case binary:copy(<<Seed>>, ?FUZZ_SIZE) of
-                    Bin -> {ok, Seed};
-                    _ -> differs
-                end;
-            {ok, _} ->
-                differs;
-            {error, _} = Error ->
-                Error;
-            {'EXIT', _} ->
-                {error, exit}
+        try file:read_file(fuzz_path(File)) of
+            {ok, Bin} -> whole(Bin);
+            {error, _} = Error -> Error
+        catch
+            _:_ -> {error, exit}
         end,
     chryso_test:emit("FS_GET_" ++ chryso_test:tag(Tag), Outcome).
+
+-spec whole(binary()) -> {ok, byte()} | differs.
+whole(<<Seed, _/binary>> = Bin) when byte_size(Bin) =:= ?FUZZ_SIZE ->
+    case binary:copy(<<Seed>>, ?FUZZ_SIZE) of
+        Bin -> {ok, Seed};
+        _ -> differs
+    end;
+whole(_) ->
+    differs.
+
+-spec write_sync_close(file:io_device(), byte()) -> {term(), term(), term()}.
+write_sync_close(Fd, Seed) ->
+    Written = file:write(Fd, binary:copy(<<Seed>>, ?FUZZ_SIZE)),
+    {Written, file:sync(Fd), file:close(Fd)}.
+
+-spec write_sync_close(file:io_device(), byte(), non_neg_integer()) -> {term(), term(), term()}.
+write_sync_close(Fd, Seed, At) ->
+    Written = file:pwrite(Fd, At, binary:copy(<<Seed>>, ?FUZZ_SIZE)),
+    {Written, file:sync(Fd), file:close(Fd)}.
+
+-doc """
+rename-crash-smoke: create `N` empty files after a fuzz file, so the rest of
+its directory sector is taken and a rename's new entry lands in another
+sector. Reports `FS_PAD_<TAG>|ok` or the first `{error, Reason}`.
+""".
+-spec pad(atom(), non_neg_integer()) -> ok.
+pad(Tag, N) ->
+    pad(Tag, 0, N).
+
+-doc """
+dirgrow-crash-smoke: as `pad/2`, naming the files `pad<From>.bin` onwards, so
+a second pad on the same volume makes new entries.
+""".
+-spec pad(atom(), non_neg_integer(), non_neg_integer()) -> ok.
+pad(Tag, From, N) ->
+    chryso_test:emit("FS_PAD_" ++ chryso_test:tag(Tag), pad_from(From, From + N)).
+
+-spec pad_from(non_neg_integer(), non_neg_integer()) -> ok | {error, term()}.
+pad_from(N, N) ->
+    ok;
+pad_from(I, N) ->
+    case file:write_file("/pad" ++ integer_to_list(I) ++ ".bin", <<>>) of
+        ok -> pad_from(I + 1, N);
+        {error, _} = Error -> Error
+    end.
 
 -spec fuzz_path(0..255) -> string().
 fuzz_path(File) ->

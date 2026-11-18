@@ -359,7 +359,7 @@ pub fn main() !void {
     //
     // Both ends are pinned: root's id 10 is ROOT_GONE_CH_BLK in
     // src/pd/root/main.c, blk_virt's is BLK_VIRT_DRIVER_GONE_CH in
-    // nix/patches/sddf-blk-virt-restart-reconcile.patch. blk_virt gets a HIGH id
+    // blk/components/virt.c on the byzantine-systems/sddf chryso branch. blk_virt gets a HIGH id
     // for the same reason beam_server's debug ids are high: sdfgen hands the blk
     // helper ids from 0 upwards (blk_virt already holds 0 and 1), and blk_virt
     // learns those from a serialised config blob while this channel has none, so

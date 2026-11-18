@@ -1,10 +1,46 @@
 """Fault programs and the model that judges them.
 
 A run is a blkdebug plan plus a `Program` of workload and fault steps.
-`Model` is a product of components (Root, storage, network) built on the
-charts in `lifecycles.py`: `expect` gives the outcomes a step may have,
-`after` folds in the one observed. `trim` keeps serial and timer under
-budget so the console and clock survive.
+`Model` is a product of components (Root, storage, network, orchestrator)
+built on the charts in `lifecycles.py`: `expect` gives the outcomes a step
+may have, `after` folds in the one observed. `trim` keeps serial and timer
+under budget so the console and clock survive.
+
+The orchestrator's steps (`Want`, `Rewant`, `Look`) obey these laws, each
+stated over `expect` and `key()` and tested in `tests/test_faults.py`:
+
+1. A `Want` is a settled `Restart` routed through the orchestrator, total
+   under one renaming: `debug-restart` becomes `ctl-restart`, and `GONE`
+   (Root ignored the request) becomes `UNASKED` (the orchestrator never
+   sent it). Root's state after is the same either way.
+2. A want that already holds, or can never hold, asks nothing: `Rewant`,
+   and a `Want` of a gone driver, allow only `UNASKED` and leave Root as it
+   was.
+3. `Look` is an observation: with no driver recovering, it changes nothing.
+4. `Look` is level-triggered: a function of Root's chart for the driver
+   only, never of history (`condition`, the table `chryso_condition` holds).
+5. With no status page, nothing is known and nothing is commanded.
+6. Derived from 1 to 3: a `Want` commutes with what a `Restart` commutes
+   with, and `Look` and `Rewant` commute with every step.
+7. A reset forgets every want, as it forgets Root's budgets.
+8. A flood is invisible to the restart algebra: `Want(flood=True)` allows
+   what `Want` allows and leaves an equal model. Root's token bucket is not
+   modelled because a rate-limited command has no effect, and the flood has
+   stopped before the want is judged.
+9. A fault inside a want is the only restart: `Absorb` is a settled `Fault`
+   whose want then holds, so Root spends one restart and is asked nothing.
+10. A BEAM halt resets the orchestrator only: `Halt` forgets every want,
+    spends one BEAM restart and leaves Root's driver charts and the storage
+    unchanged, so it commutes with storage and network steps. The new
+    incarnation boots `boot_profile`, beam_server's selector restated:
+    `start` unless the image asks for `orch`, Root's page is readable and
+    more than `safe_below` restarts remain. It moves only from `orch` to
+    `start` as restarts are spent.
+
+Non-laws: a fault restart after a want's stamp also satisfies it (the probe
+reads Root before it stamps and each `Want` waits, so a program never lands
+there). `Look` reports the page it read, not proof the driver
+re-initialised.
 """
 
 from __future__ import annotations
@@ -17,6 +53,7 @@ from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from chryso_testbed.allowed import Allowed
 from chryso_testbed.blkdebug import Expected
 from chryso_testbed.fatlayout import Region
 from chryso_testbed.lifecycles import (
@@ -30,7 +67,16 @@ from chryso_testbed.lifecycles import (
     VolumeLifecycle,
     WindowLifecycle,
 )
-from chryso_testbed.outcomes import GaveUp, Outcome, Restarted, Seed, Status
+from chryso_testbed.outcomes import (
+    Booted,
+    BootProfile,
+    Condition,
+    GaveUp,
+    Outcome,
+    Restarted,
+    Seed,
+    Status,
+)
 
 type Driver = Literal["serial", "timer", "blk", "eth"]
 DRIVERS: Final[tuple[Driver, ...]] = ("serial", "timer", "blk", "eth")
@@ -82,6 +128,31 @@ class Put(_Step):
     seed: int = Field(ge=0, le=255)
 
 
+class Overwrite(_Step):
+    """Write 8 KiB of one byte over a file in place, without truncating it,
+    then sync and close it. Whole sectors, so nothing is read first."""
+
+    kind: Literal["overwrite"]
+    file: int = Field(ge=0, lt=FILES)
+    seed: int = Field(ge=0, le=255)
+
+
+class Remove(_Step):
+    """Delete a file."""
+
+    kind: Literal["remove"]
+    file: int = Field(ge=0, lt=FILES)
+
+
+class Rename(_Step):
+    """Rename file `src` to `dst`. FatFs refuses a `dst` that exists, and
+    renaming a file onto its own name succeeds and changes nothing."""
+
+    kind: Literal["rename"]
+    src: int = Field(ge=0, lt=FILES)
+    dst: int = Field(ge=0, lt=FILES)
+
+
 class Get(_Step):
     """Read a file back."""
 
@@ -119,6 +190,49 @@ class Corrupt(_Step):
     file: int = Field(ge=0, lt=FILES)
 
 
+class Want(_Step):
+    """Ask the orchestrator for one restart of the driver after the page it
+    reads now, and wait until the want holds or Root gives the driver up.
+    With `flood`, another process floods Root with SYNC commands until Root
+    rate-limits it, and the flood stops before the want is settled."""
+
+    kind: Literal["want"]
+    driver: Driver
+    flood: bool = False
+
+
+class Rewant(_Step):
+    """Apply again the newest want made for the driver since boot. With none
+    it applies nothing, so a shrunk program is always legal."""
+
+    kind: Literal["rewant"]
+    driver: Driver
+
+
+class Absorb(_Step):
+    """A fault that lands after a want's stamp and before its command: the
+    probe holds the command device, makes the want, faults the driver, waits
+    for Root's decision on the page, then releases. The want then holds by the
+    fault's restart, so the orchestrator never asks."""
+
+    kind: Literal["absorb"]
+    driver: Literal["blk", "eth"]
+
+
+class Look(_Step):
+    """Read Root, then the orchestrator's condition for the driver."""
+
+    kind: Literal["look"]
+    driver: Driver
+
+
+class Halt(_Step):
+    """Halt the BEAM (`erlang:halt/0`): Root restarts beam_server, and the new
+    incarnation reports which boot script it took."""
+
+    kind: Literal["halt"]
+
+
 class Reset(_Step):
     """Reset the whole system, as a power cycle that keeps the disk."""
 
@@ -135,7 +249,26 @@ class CrashPut(_Step):
 
 
 type Step = Annotated[
-    Fault | Restart | Unplug | Pause | Put | Get | Ping | Arm | Disarm | Corrupt | Reset | CrashPut,
+    Fault
+    | Restart
+    | Unplug
+    | Pause
+    | Put
+    | Overwrite
+    | Get
+    | Remove
+    | Rename
+    | Ping
+    | Arm
+    | Disarm
+    | Corrupt
+    | Want
+    | Rewant
+    | Absorb
+    | Look
+    | Halt
+    | Reset
+    | CrashPut,
     Field(discriminator="kind"),
 ]
 # Generation draws at most 16 steps. Lineage cuts may insert a driver's whole
@@ -146,13 +279,14 @@ PROGRAM: Final = TypeAdapter[Program](Program)
 
 
 def trim(program: Program, budget: int) -> Program:
-    """Drop serial and timer requests past their budget, so neither gives up."""
+    """Drop serial and timer requests past their budget, so neither gives up.
+    A want spends a restart as a request does, so it counts too."""
 
     def kept(steps: Iterable[Step]) -> Iterator[Step]:
         spent = Counter[Driver]()
         for step in steps:
             match step:
-                case Fault(driver=d) | Restart(driver=d) if d in KEPT:
+                case Fault(driver=d) | Restart(driver=d) | Want(driver=d) if d in KEPT:
                     spent[d] += 1
                     if spent[d] > budget:
                         continue
@@ -161,25 +295,12 @@ def trim(program: Program, budget: int) -> Program:
     return tuple(kept(program))
 
 
-@dataclass(frozen=True, slots=True)
-class Expect:
-    """The outcomes a step may have. `anything` admits every outcome."""
-
-    outcomes: frozenset[Outcome] = frozenset()
-    anything: bool = False
-
-    def __contains__(self, outcome: object) -> bool:
-        return self.anything or outcome in self.outcomes
-
-    def __or__(self, other: Expect) -> Expect:
-        return Expect(self.outcomes | other.outcomes, self.anything or other.anything)
+def expect(*outcomes: Outcome) -> Allowed[Outcome]:
+    """The outcomes a step may have, typed as outcomes whatever their kinds."""
+    return Allowed.of(*outcomes)
 
 
-def expect(*outcomes: Outcome) -> Expect:
-    return Expect(frozenset(outcomes))
-
-
-ANYTHING: Final = Expect(anything=True)
+ANYTHING: Final[Allowed[Outcome]] = Allowed.everything()
 CLEAN_DISK: Final = Expected(write_fails=False, reads=frozenset({"ok"}))
 OK, EIO, ERROR = Status.OK, Status.EIO, Status.ERROR
 
@@ -215,7 +336,7 @@ class RootModel:
     def gone(self) -> frozenset[Driver]:
         return frozenset(d for d, chart in self.drivers.items() if chart.at == "gone")
 
-    def expect(self, step: Fault | Restart) -> Expect:
+    def expect(self, step: Fault | Restart) -> Allowed[Outcome]:
         chart = self.chart(step.driver)
         if chart.at == "gone":
             return expect(Status.GONE)
@@ -252,7 +373,101 @@ class RootModel:
         return tuple(sorted((d, c.at, c.model.spent) for d, c in self.drivers.items()))
 
 
-type StorageStep = Put | Get | Arm | Disarm | Corrupt
+type RowState = Literal["unset", "live", "stopped", "gone", "quarantined"]
+
+
+def condition(state: RowState, lifetime: int, budget: int) -> Condition:
+    """The orchestrator's condition for one Root row, as `chryso_condition`
+    classifies it on the guest (`settle_ms` 0, `floor` 0, every want held).
+    That scope is why it never answers `restarting` or `recovering`: each
+    `Want` settles before the next step, and a zero settle window has no
+    recovery to report."""
+    match state:
+        case "gone":
+            return Condition("gone", "gave_up")
+        case "live" if budget - lifetime <= 0:
+            return Condition("degraded", "low_budget")
+        case "live":
+            return Condition("ready", "settled")
+        case "stopped" | "quarantined" | "unset":
+            return Condition("degraded", state)
+
+
+def _as_ctl(outcome: Outcome) -> Outcome:
+    """Root's answer to a debug restart, as the orchestrator's want ends: the
+    same decision under Root's word `ctl-restart`, and no command at all where
+    Root would ignore one."""
+    match outcome:
+        case Restarted(count=n):
+            return Restarted("ctl-restart", n)
+        case Status.GONE:
+            return Status.UNASKED
+        case _:
+            return outcome
+
+
+def _as_debug(outcome: Outcome) -> Outcome:
+    """The inverse of `_as_ctl`."""
+    match outcome:
+        case Restarted(count=n):
+            return Restarted("debug-restart", n)
+        case Status.UNASKED:
+            return Status.GONE
+        case _:
+            return outcome
+
+
+@dataclass(frozen=True, slots=True)
+class BootConfig:
+    """The image's patched boot request (runtime_boot_select.h): a profile
+    and the BEAM restarts left at or below which it boots `start`."""
+
+    profile: BootProfile = "orch"
+    safe_below: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class OrchModel:
+    """What the orchestrator holds that Root's page cannot show: the drivers
+    wanted since boot, and the BEAM restarts Root has spent. `observable`,
+    `boot` and `beam_budget` are fixed by the image: no status page, no boot
+    request (None boots `start`), and Root's BEAM budget."""
+
+    wanted: frozenset[Driver] = frozenset()
+    observable: bool = True
+    boot: BootConfig | None = None
+    beam_budget: int = 64
+    beam_spent: int = 0
+
+    def rebooted(self) -> OrchModel:
+        """A reset starts Root's BEAM count over, and the BEAM forgets wants."""
+        return replace(self, wanted=frozenset(), beam_spent=0)
+
+    def halted(self) -> OrchModel:
+        """A halt: Root counts one more BEAM restart, and the wants are gone."""
+        return replace(self, wanted=frozenset(), beam_spent=self.beam_spent + 1)
+
+    def key(self) -> tuple[object, ...]:
+        return (
+            tuple(sorted(self.wanted)),
+            self.observable,
+            self.boot,
+            self.beam_budget,
+            self.beam_spent,
+        )
+
+
+def boot_profile(orch: OrchModel) -> BootProfile:
+    """Law 10: the profile an incarnation boots, from the image's request and
+    the restarts Root has spent, as runtime_boot_select.c decides it (the boot
+    file is always on the disk here)."""
+    if orch.boot is None or orch.boot.profile == "start" or not orch.observable:
+        return "start"
+    remaining = max(orch.beam_budget - orch.beam_spent, 0)
+    return "orch" if remaining > orch.boot.safe_below else "start"
+
+
+type StorageStep = Put | Overwrite | Get | Remove | Rename | Arm | Disarm | Corrupt
 
 
 def _fault() -> FaultLifecycle:
@@ -296,13 +511,22 @@ class StorageModel:
     def suspect(self) -> bool:
         return self.window.at == "dirty"
 
-    def expect(self, step: StorageStep, *, up: bool) -> Expect:
+    def expect(self, step: StorageStep, *, up: bool) -> Allowed[Outcome]:
         """`up` is whether Root still runs the block driver."""
         base = self._unfaulted(step, up=up)
-        if isinstance(step, Put | Get) and self.damaged and up:
+        if self.suspect and isinstance(step, Put | Overwrite | Get | Remove | Rename):
+            # FatFs retries a dirty window before every later load, so even a
+            # lookup that would find nothing may fail first.
+            base |= expect(EIO)
+        if isinstance(step, Put | Overwrite | Get | Remove | Rename) and self.damaged and up:
             return ANYTHING
-        if (armed := self.armed) is None or not isinstance(step, Put | Get):
+        if (armed := self.armed) is None or not isinstance(
+            step, Put | Overwrite | Get | Remove | Rename
+        ):
             return base
+        if isinstance(step, Remove | Rename):
+            # Neither reads data, but both read FAT and directory sectors.
+            return base if armed.region == "data" else base | expect(EIO)
         same_data = armed.region == "data" and armed.file == step.file
         match step, armed.op:
             # The strict cases: a read error on a file's data is reported,
@@ -315,14 +539,14 @@ class StorageModel:
                 return base
             case Get(), "read" if armed.region == "data":
                 return base
-            case Put(), "read" if armed.region == "data":
+            case Put() | Overwrite(), "read" if armed.region == "data":
                 return base
             # FAT and directory sectors are shared and cached, so a fault
             # there may or may not surface.
             case _:
                 return base | expect(EIO)
 
-    def _present(self, f: int) -> Expect:
+    def _present(self, f: int) -> Allowed[Outcome]:
         """What locating file `f` on disk may find."""
         if self.damaged:
             return ANYTHING
@@ -334,15 +558,55 @@ class StorageModel:
             case _:
                 return expect(Status.PRESENT)
 
-    def _unfaulted(self, step: StorageStep, *, up: bool) -> Expect:
+    def _presence(self, f: int) -> frozenset[bool]:
+        """Whether file `f` may be on the volume."""
+        chart = self.file(f)
+        match chart.at:
+            case "absent":
+                return frozenset({False})
+            case "unknown":
+                return frozenset({False, True})
+            case "torn":
+                return frozenset({True, Status.ENOENT in chart.model.before})
+            case _:
+                return frozenset({True})
+
+    def _writes(self) -> Allowed[Outcome]:
+        """What a write the volume accepts reports under the boot plan. A
+        permanent rule fails every write, one-shot rules only some."""
+        if not self.disk.write_fails:
+            return expect(OK)
+        return expect(EIO) if self.disk.reads == {"error"} else expect(OK, EIO)
+
+    def _unfaulted(self, step: StorageStep, *, up: bool) -> Allowed[Outcome]:
         match step:
-            case Put() | Get() if not up:
+            case Put() | Overwrite() | Get() | Remove() | Rename() if not up:
                 return expect(EIO, ERROR)
-            case Put() if not self.disk.write_fails:
-                return expect(OK)
             case Put():
-                # A permanent rule fails every write, one-shot rules only some.
-                return expect(EIO) if self.disk.reads == {"error"} else expect(OK, EIO)
+                return self._writes()
+            case Overwrite(file=f) | Remove(file=f):
+                present = self._presence(f)
+                allowed = self._writes() if True in present else expect()
+                if False in present:
+                    allowed |= expect(Status.ENOENT)
+                return allowed
+            case Rename(src=s, dst=d) if s == d:
+                present = self._presence(s)
+                allowed = expect(OK) if True in present else expect()
+                if False in present:
+                    allowed |= expect(Status.ENOENT)
+                return allowed
+            case Rename(src=s, dst=d):
+                allowed = expect()
+                for src in self._presence(s):
+                    for dst in self._presence(d):
+                        if not src:
+                            allowed |= expect(Status.ENOENT)
+                        elif dst:
+                            allowed |= expect(Status.EEXIST)
+                        else:
+                            allowed |= self._writes()
+                return allowed
             case Get(file=f):
                 chart = self.file(f)
                 match chart.at:
@@ -358,7 +622,7 @@ class StorageModel:
                         held = expect(Status.DIFFERS)
                     case _:
                         held = expect(Seed(chart.model.seed or 0))
-                return (held | expect(EIO)) if self.suspect else held
+                return held
             case Arm(file=f) | Corrupt(file=f):
                 return self._present(f)
             case Disarm():
@@ -379,12 +643,27 @@ class StorageModel:
             case Put(file=f, seed=s), Status.OK:
                 return model._file(f, "written", seed=s)._moved(f)
             case Put(file=f), _:
-                armed = model.armed
-                dirty = "error" in model.disk.reads or (armed is not None and armed.op == "write")
-                failed = model._file(f, "write_failed")._moved(f)
-                return (
-                    replace(failed, window=failed.window.evolved("left_dirty")) if dirty else failed
-                )
+                return model._file(f, "write_failed")._moved(f)._dirtied()
+            # In place: the data keeps its clusters, so a fault keeps its target.
+            case Overwrite(file=f, seed=s), Status.OK:
+                return model._file(f, "written", seed=s)
+            case Overwrite() | Remove(), Status.ENOENT:
+                return model
+            case Overwrite(file=f), _:
+                return model._file(f, "write_failed")._dirtied()
+            # The freed clusters no longer belong to the file.
+            case Remove(file=f), Status.OK:
+                return model._file(f, "deleted")._moved(f)
+            case Remove(file=f), _:
+                return model._file(f, "write_failed")._dirtied()
+            case Rename(src=s, dst=d), Status.OK if s != d:
+                return model._renamed(s, d)
+            case Rename(src=s, dst=d), Status.OK:
+                return model
+            case Rename(), Status.ENOENT | Status.EEXIST:
+                return model
+            case Rename(src=s, dst=d), _:
+                return model._file(s, "write_failed")._file(d, "write_failed")._dirtied()
             case _:
                 return model
 
@@ -407,6 +686,25 @@ class StorageModel:
         """After a reset: the disk keeps its files and any damage, while the
         armed fault (disarmed first) and FatFs's window are gone."""
         return replace(self, fault=_fault(), window=_window())
+
+    def _dirtied(self) -> StorageModel:
+        """After a failed write FatFs keeps its dirty sector when the disk or
+        an armed fault fails writes."""
+        armed = self.armed
+        if "error" in self.disk.reads or (armed is not None and armed.op == "write"):
+            return replace(self, window=self.window.evolved("left_dirty"))
+        return self
+
+    def _renamed(self, src: int, dst: int) -> StorageModel:
+        """`dst` takes `src`'s file and its clusters, and `src` is gone. A fault
+        on the clusters follows the file, one on its old entry is adrift."""
+        files = {**self.files, dst: self.file(src), src: _fresh_file()}
+        model = replace(self, files=files)
+        if (armed := self.armed) is None or armed.file != src:
+            return model
+        if armed.region == "entry":
+            return replace(model, fault=model.fault.evolved("moved"))
+        return replace(model, fault=model.fault.evolved("followed", file=dst))
 
     def _moved(self, f: int) -> StorageModel:
         """A rewrite of `f` truncates it, so FatFs may give it new clusters:
@@ -458,7 +756,7 @@ class NetModel:
     """The network as the guest sees it. A cut link or a pause is restored
     before the step ends, so nothing outlives a step today."""
 
-    def expect(self, step: NetStep, *, up: bool) -> Expect:
+    def expect(self, step: NetStep, *, up: bool) -> Allowed[Outcome]:
         """`up` is whether Root still runs the NIC driver."""
         match step:
             case Ping():
@@ -473,15 +771,17 @@ class NetModel:
         return ()
 
 
-type Component = Literal["root", "storage", "net", "system"]
+type Component = Literal["root", "storage", "net", "orch", "system"]
 
 
 def owner(step: Step) -> Component:
     """The component whose state a step reads and changes."""
     match step:
-        case Fault() | Restart():
+        case Fault() | Restart() | Want() | Absorb():
             return "root"
-        case Put() | Get() | Arm() | Disarm() | Corrupt():
+        case Rewant() | Look() | Halt():
+            return "orch"
+        case Put() | Overwrite() | Get() | Remove() | Rename() | Arm() | Disarm() | Corrupt():
             return "storage"
         case Ping() | Unplug() | Pause():
             return "net"
@@ -498,24 +798,51 @@ class Model:
     root: RootModel
     storage: StorageModel = field(default_factory=StorageModel)
     net: NetModel = field(default_factory=NetModel)
+    orch: OrchModel = field(default_factory=OrchModel)
 
     @classmethod
-    def start(cls, budget: int, disk: Expected = CLEAN_DISK) -> Model:
-        return cls(RootModel(budget), StorageModel(disk))
+    def start(
+        cls,
+        budget: int,
+        disk: Expected = CLEAN_DISK,
+        *,
+        observable: bool = True,
+        boot: BootConfig | None = None,
+    ) -> Model:
+        orch = OrchModel(observable=observable, boot=boot)
+        return cls(RootModel(budget), StorageModel(disk), orch=orch)
 
     def rebooted(self) -> Model:
         """Root, every driver and the BEAM start over on the same disk."""
-        return replace(self, root=RootModel(self.root.budget), storage=self.storage.rebooted())
+        return replace(
+            self,
+            root=RootModel(self.root.budget),
+            storage=self.storage.rebooted(),
+            orch=self.orch.rebooted(),
+        )
 
     def key(self) -> tuple[object, ...]:
-        """Equal keys mean equal lifecycles and data: the model's identity."""
-        return (self.root.key(), self.storage.key(), self.net.key())
+        """Equal keys mean equal lifecycles and data: the model's identity.
+        The laws compare models by key rather than by observation. Every field
+        `expect` reads is in the key, so equal keys give equal outcomes for
+        every step: a stronger equality, sound for the laws. State that
+        nothing observes must stay out of the key, or the laws would reject
+        models no step can tell apart."""
+        return (self.root.key(), self.storage.key(), self.net.key(), self.orch.key())
 
-    def expect(self, step: Step) -> Expect:
+    def look(self, driver: Driver) -> Condition:
+        """Law 4: the condition is a function of Root's chart only."""
+        if not self.orch.observable:
+            return Condition("unknown", "no_observation")
+        chart = self.root.chart(driver)
+        state: RowState = "gone" if chart.at == "gone" else "live"
+        return condition(state, chart.model.spent, chart.model.budget)
+
+    def expect(self, step: Step) -> Allowed[Outcome]:
         match step:
             case Fault() | Restart():
                 return self.root.expect(step)
-            case Put() | Get():
+            case Put() | Overwrite() | Get() | Remove() | Rename():
                 allowed = self.storage.expect(step, up=self.root.up("blk"))
                 # A driver still reconciling may refuse the request.
                 return (allowed | expect(EIO, ERROR)) if self.root.recovering("blk") else allowed
@@ -530,6 +857,22 @@ class Model:
                 )
             case Unplug() | Pause():
                 return self.net.expect(step, up=self.root.up("eth"))
+            case Want(driver=d):
+                if not self.orch.observable:
+                    return expect(ERROR)
+                restart = Restart(kind="restart", driver=d)
+                return Allowed.of(*map(_as_ctl, self.root.expect(restart).values))
+            case Rewant():
+                return expect(Status.UNASKED)
+            case Absorb(driver=d):
+                return self.root.expect(Fault(kind="fault", driver=d))
+            case Look(driver=d):
+                return expect(self.look(d))
+            case Halt():
+                halted = self.orch.halted()
+                if halted.beam_spent > halted.beam_budget:
+                    return ANYTHING  # Root gives the BEAM up, and nothing boots
+                return expect(Booted(boot_profile(halted)))
             case Reset() | CrashPut():
                 # A damaged volume may not mount, and then nothing boots.
                 return ANYTHING if self.storage.damaged else expect(OK)
@@ -549,8 +892,26 @@ class Model:
         match step:
             case Fault() | Restart():
                 model = replace(self, root=self.root.after(step, outcome))
-            case Put() | Get() | Arm() | Disarm() | Corrupt():
+            case Put() | Overwrite() | Get() | Remove() | Rename() | Arm() | Disarm() | Corrupt():
                 model = replace(self, storage=self.storage.after(step, outcome))
             case Ping() | Unplug() | Pause():
                 model = replace(self, net=self.net.after(step, outcome))
+            case Want(driver=d) if self.orch.observable:
+                restart = Restart(kind="restart", driver=d)
+                model = replace(
+                    self,
+                    root=self.root.after(restart, _as_debug(outcome)),
+                    orch=replace(self.orch, wanted=self.orch.wanted | {d}),
+                )
+            case Absorb(driver=d):
+                fault = Fault(kind="fault", driver=d)
+                model = replace(
+                    self,
+                    root=self.root.after(fault, outcome),
+                    orch=replace(self.orch, wanted=self.orch.wanted | {d}),
+                )
+            case Halt():
+                model = replace(self, orch=self.orch.halted())
+            case Want() | Rewant() | Look():
+                model = self
         return replace(model, root=model.root.settled(recovering)) if recovering else model

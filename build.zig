@@ -174,7 +174,10 @@ fn addFatServer(
     lionsos_src: []const u8,
     board_dir: []const u8,
 ) void {
-    const fat_cflags = &[_][]const u8{ "-ffreestanding", "-O2", "-g", "-Wall" };
+    // FatFs sectors of one sDDF transfer block, so the FAT server never writes
+    // part of a block it would first have to read (a read error there would fail
+    // the write). packages.disk is formatted to match.
+    const fat_cflags = &[_][]const u8{ "-ffreestanding", "-O2", "-g", "-Wall", "-DFAT_SECTOR_SIZE=4096" };
     const fat_config_inc = b.fmt("{s}/components/fs/fat/config", .{lionsos_src});
 
     // A second libmicrokitco built against the fat component's opts header
@@ -400,6 +403,17 @@ fn addTcpObject(
     obj.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/libhostedqueue", .{libmicrokitco_src}) });
     obj.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/network/ipstacks/lwip/src/include", .{sddf}) });
     return obj;
+}
+
+// The OTP release the disk carries, so the boot table and mkDisk name one
+// directory. Required with ERTS. Without it no boot path is ever used.
+fn releaseConfigHeader(b: *std.Build, opts: options.Options) *std.Build.Step.ConfigHeader {
+    const release = opts.otp_release orelse if (opts.with_erts) @panic("set -Dotp-release with -Dwith-erts") else "none";
+    return b.addConfigHeader(.{
+        .style = .blank,
+        .include_path = "runtime_release.h",
+        .include_guard_override = "CHRYSOPOLIS_RUNTIME_RELEASE_H",
+    }, .{ .CHRYSO_OTP_RELEASE = release });
 }
 
 pub fn build(b: *std.Build) void {
@@ -636,6 +650,7 @@ pub fn build(b: *std.Build) void {
             "io/filesystem/runtime_fs.c",
             "io/network/runtime_network.c",
             "payload/runtime_payload.c",
+            "payload/runtime_boot_select.c",
             "compat/syscall/runtime_syscalls.c",
             "io/console/runtime_console.c",
             "compat/fd/runtime_fd.c",
@@ -698,6 +713,7 @@ pub fn build(b: *std.Build) void {
     glue.root_module.addIncludePath(b.path("src/pd/beam")); // owner-qualified diagnostic probes
     for (beam_include_dirs) |dir| glue.root_module.addIncludePath(b.path(dir));
     glue.root_module.addConfigHeader(generated_abi);
+    glue.root_module.addConfigHeader(releaseConfigHeader(b, opts));
     abi_probes.addGenerated(b, glue.root_module);
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{board_dir}) });
     glue.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{lions_libc}) });

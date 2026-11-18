@@ -7,13 +7,14 @@ state is every earlier epoch in full plus any subset of one epoch.
 from __future__ import annotations
 
 import random
-import shutil
 import struct
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Final
+
+from chryso_testbed.disk import Disk, Overlay
 
 MAGIC: Final = 0x6A736677736872
 VERSION: Final = 1
@@ -110,6 +111,22 @@ def persisted(log: Log, epoch: int, seed: int) -> frozenset[int]:
     return frozenset(rng.sample(writes, rng.randint(0, len(writes))))
 
 
+def avoiding(log: Log, epoch: int, sectors: frozenset[int]) -> frozenset[int]:
+    """Every write of `epoch` that touches none of `sectors`, in the log's
+    sector unit: the crash that loses exactly the writes to those sectors.
+    A seeded subset finds that state only by luck, and it is the one a
+    directory linked before it is zeroed shows its leftovers in."""
+    if epoch >= len(log.epochs):
+        return frozenset()
+    return frozenset(
+        i
+        for i in log.epochs[epoch]
+        if sectors.isdisjoint(
+            range(log.entries[i].sector, log.entries[i].sector + log.entries[i].nr_sectors)
+        )
+    )
+
+
 def crashed_at(log: Log, epoch: int, subset: Iterable[int] = ()) -> int:
     """Where the crash fell: the end of the last kept write, or the stable point."""
     if epoch >= len(log.epochs):
@@ -125,9 +142,32 @@ def stable(log: Log, epoch: int) -> int:
     return log.flushes[epoch - 1].end if epoch else log.sectorsize
 
 
+CHUNK: Final = 1 << 20
+
+
+def sparse_copy(base: Path, out: Path, chunk_size: int = CHUNK) -> None:
+    """Copy `base` to `out`, leaving holes where a chunk of `base` is zero: the
+    disk image is mostly empty, and a crash check copies it per crash point."""
+    zero = bytes(chunk_size)
+    with base.open("rb") as src, out.open("wb") as dst:
+        while chunk := src.read(chunk_size):
+            if chunk == zero[: len(chunk)]:
+                dst.seek(len(chunk), 1)
+            else:
+                dst.write(chunk)
+        dst.truncate()
+
+
+def overlay(log: Log, base: Disk, keep: frozenset[int]) -> Overlay:
+    """`base` with the kept writes applied in log order, in memory: what
+    `replay` writes to a file, without copying the image."""
+    writes = ((log.entries[i].sector * log.sectorsize, log.entries[i].data) for i in sorted(keep))
+    return Overlay.of(base, log.sectorsize, writes)
+
+
 def replay(log: Log, base: Path, out: Path, keep: frozenset[int]) -> Path:
     """`base` with the kept writes applied in log order, written to `out`."""
-    shutil.copyfile(base, out)
+    sparse_copy(base, out)
     with out.open("r+b") as disk:
         for i in sorted(keep):
             entry = log.entries[i]

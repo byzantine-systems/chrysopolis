@@ -140,6 +140,7 @@
               -Dlibc-dir="$PWD/libalias" \
               -Dlionsos-src=${config.packages.lionsos-src} \
               -Dwith-erts=true \
+              -Dotp-release=${chryso.otpRelease} \
               -Dwith-blk=true \
               -Dwith-fs=true \
               -Dwith-net=true \
@@ -239,6 +240,9 @@
         # apps/chryso_core's pure modules as guest bytecode, for the in-situ
         # audit in tests/chryso_ctl.erl. Built with the same Erlang as the
         # probes and the disk's OTP libraries; no deps, no rebar3.
+        # The two library packages below each install ebin/<app>.app from
+        # their .app.src, with `modules` set to the sorted beams in ebin, so
+        # an embedded-mode loader can load a declared dependency by name.
         core-modules = pkgs.stdenvNoCC.mkDerivation {
           name = "chryso-core-modules";
           src = pkgs.lib.fileset.toSource {
@@ -251,6 +255,74 @@
             runHook preBuild
             mkdir ebin
             erlc -o ebin +deterministic +warnings_as_errors src/*.erl
+            erl -noshell -eval '
+              [Src, Ebin] = init:get_plain_arguments(),
+              {ok, [{application, Name, Props}]} = file:consult(Src),
+              Mods = lists:sort([list_to_atom(filename:basename(F, ".beam"))
+                                 || F <- filelib:wildcard(filename:join(Ebin, "*.beam"))]),
+              App = {application, Name, [{modules, Mods} | proplists:delete(modules, Props)]},
+              ok = file:write_file(filename:join(Ebin, atom_to_list(Name) ++ ".app"),
+                                   io_lib:format("~tp.~n", [App])),
+              halt().' -extra src/chryso_core.app.src ebin
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            cp -r ebin $out/
+            runHook postInstall
+          '';
+        };
+
+        # The generated codec as guest bytecode, for apps/chryso_orchestrator.
+        # The header comes along for the orchestrator's build.
+        abi-modules = pkgs.stdenvNoCC.mkDerivation {
+          name = "chryso-abi-modules";
+          src = "${config.packages.orchestrator-abi}/erlang";
+          nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+          dontConfigure = true;
+          buildPhase = ''
+            runHook preBuild
+            mkdir ebin
+            erlc -o ebin +deterministic +warnings_as_errors -I include src/*.erl
+            erl -noshell -eval '
+              [Src, Ebin] = init:get_plain_arguments(),
+              {ok, [{application, Name, Props}]} = file:consult(Src),
+              Mods = lists:sort([list_to_atom(filename:basename(F, ".beam"))
+                                 || F <- filelib:wildcard(filename:join(Ebin, "*.beam"))]),
+              App = {application, Name, [{modules, Mods} | proplists:delete(modules, Props)]},
+              ok = file:write_file(filename:join(Ebin, atom_to_list(Name) ++ ".app"),
+                                   io_lib:format("~tp.~n", [App])),
+              halt().' -extra ${../apps/chryso_abi/src/chryso_abi.app.src} ebin
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            cp -r ebin include $out/
+            runHook postInstall
+          '';
+        };
+
+        # apps/chryso_orchestrator as guest bytecode plus its .app (the
+        # .app.src lists its modules, so it is copied as is). Built against
+        # the core and codec beams it calls; no rebar3.
+        orchestrator-modules = pkgs.stdenvNoCC.mkDerivation {
+          name = "chryso-orchestrator-modules";
+          src = pkgs.lib.fileset.toSource {
+            root = ../apps/chryso_orchestrator;
+            fileset = ../apps/chryso_orchestrator/src;
+          };
+          nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+          dontConfigure = true;
+          buildPhase = ''
+            runHook preBuild
+            mkdir ebin
+            erlc -o ebin +deterministic +warnings_as_errors +warn_missing_spec +warn_missing_doc \
+              -I ${config.packages.abi-modules}/include \
+              -pa ebin -pa ${config.packages.core-modules}/ebin -pa ${config.packages.abi-modules}/ebin \
+              src/*.erl
+            cp src/chryso_orchestrator.app.src ebin/chryso_orchestrator.app
             runHook postBuild
           '';
           installPhase = ''
@@ -316,7 +388,8 @@
             runHook preBuild
             export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
             cd tests/host
-            zig build test --summary all
+            # The pinned LionsOS tree, for the suites over its pure FAT headers
+            zig build test --summary all -Dlionsos-src=${config.packages.lionsos-src}
             touch $out
             runHook postBuild
           '';

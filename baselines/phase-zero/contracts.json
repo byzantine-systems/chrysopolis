@@ -40,6 +40,16 @@
       "the console frame codec keeps its laws: round trip, chunk invariance, soundness under a shuffle with other writers, prefix stability and completeness"
     ]
   },
+  "orchestrator-erlang": {
+    "kind": "host-test",
+    "protects": [
+      "apps/chryso_orchestrator compiles with warnings, specs and docs as errors and passes Dialyzer and xref",
+      "a status page decodes to the rows it was encoded from, and a torn, short or foreign page is unknown",
+      "the decision log replays through the pure lifecycle step at any bound, and a doctored entry is named",
+      "against the shipped Root model: at most one accepted restart per want, a replaying log after every step, and convergence after port and controller crashes, torn reads and lost replies",
+      "a torn first read commands nothing, a lost reply restarts once, and a gone driver is never commanded"
+    ]
+  },
   "c23-diagnostic": {
     "kind": "compile",
     "protects": [
@@ -126,7 +136,9 @@
       "the testbed package passes ruff and strict mypy",
       "the Python frame reader reproduces every Erlang golden vector, whole and at every split point",
       "a planted CRC change or driver fragment in a frame is refused as damaged",
-      "the fast frame reader equals the bytewise reference on generated logs"
+      "the fast frame reader equals the bytewise reference on generated logs",
+      "the fault model's orchestrator steps keep their laws: a want is a restart through the orchestrator, a rewant and a look change nothing, a look reads Root alone, nothing is commanded without a status page, and a reset forgets every want",
+      "the fault model's condition table agrees with chryso_condition on every row of the Erlang condition vectors"
     ]
   },
   "testbed-boot": {
@@ -283,7 +295,13 @@
       "with the BEAM gone Root still faults and restarts the timer for the fallback peer",
       "with no status or spec page the compiled driver budget decides exactly",
       "probe results from /dev/chrysostat and /dev/chrysoctl arrive as framed runs and a damaged run fails at once",
-      "orch-fallback-smoke runs alone, after the other orch scenarios"
+      "orch-fallback-smoke runs alone, after the other orch scenarios",
+      "the driver orchestrator's every outcome is one the fault model allows while drivers fault, restart, exhaust their budget and get rate limited",
+      "the orchestrator's decision log replays through the pure step after every part, and Root's ring records exactly the commands it sent",
+      "Root counts no command for a driver it gave up on, and a want that held asked Root exactly once",
+      "the orchestrator release boots with no shell command on an image patched for it, and an unpatched or unknown-version boot config boots start.boot",
+      "a BEAM halt in the middle of a want reaches Root with no command, and a halt after a want never repeats it",
+      "near the BEAM's restart budget the boot selector boots start.boot, and Root still serves raw commands with the old fence stale"
     ],
     "required_markers": [
       "ROOT_STATUS|boot|incarnation=1",
@@ -306,7 +324,10 @@
       "PEER|fallback|timer|count=2",
       "PEER|done",
       "CTL_STAT|FB_NOMAP|error=enodev",
-      "@@CHRYSO|LAT.FB_FLOOD"
+      "@@CHRYSO|LAT.FB_FLOOD",
+      "@@CHRYSO|ORCH_REPLAY.P4|n=0|k=replay|verdict=match",
+      "BEAM|boot|profile=orch|reason=chosen|remaining=64",
+      "BEAM|boot|profile=start|reason=budget-low|remaining=62"
     ],
     "forbidden_markers": [
       "unexpected PD fault"

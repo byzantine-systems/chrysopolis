@@ -20,14 +20,15 @@
 
     mk-shell-bin.url = "github:rrbutani/nix-mk-shell-bin";
 
-    # LionsOS, consumed as a flake input. Its flake exposes only a dev
+    # LionsOS, from the byzantine-systems fork: upstream main plus the
+    # Chrysopolis commits on its chryso branch. Its flake exposes only a dev
     # shell (no packages output, no liblionos.a), so the file layer vendors
     # the fs protocol definitions from the input's source tree.
     #
     # git+https URLs instead of the github: fetcher because this network
     # blocks api.github.com. Plain git over https to github.com works.
     lionsos = {
-      url = "git+https://github.com/au-ts/lionsos?ref=refs/tags/0.4.0";
+      url = "git+https://github.com/byzantine-systems/lionsos?ref=chryso";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.zig-overlay.follows = "zig-overlay";
       inputs.sdfgen.follows = "sdfgen";
@@ -56,17 +57,16 @@
       inputs.zig-overlay.follows = "zig-overlay";
     };
 
-    # sDDF (seL4 Device Driver Framework), consumed as a flake. The lionsos
-    # flake input ships an EMPTY dep/sddf submodule (Nix does not recurse
-    # submodules), so the reference-stack libc + drivers have no sDDF to build
-    # against. We pin sDDF to the exact gitlink the locked lionsos rev
-    # references and let lionsos-src populate dep/sddf from inputs.sddf. At
-    # lionsos 0.4.0 that gitlink (650ace5d) IS sddf tag 0.7.0, so the rev
-    # coupling this comment describes holds exactly at the two tags. The
-    # sddf flake exposes only devShells. We use its source tree and mirror its
-    # llvm/clang toolchain choice (llvmPackages_18) for the driver builds.
+    # sDDF (seL4 Device Driver Framework), from the byzantine-systems fork:
+    # the revision LionsOS main pins (70d665d) plus the Chrysopolis driver
+    # commits on its chryso branch. The lionsos input ships an EMPTY dep/sddf
+    # submodule (Nix does not recurse submodules), so lionsos-src populates it
+    # from this input. The fork's lionsos chryso points its dep/sddf gitlink
+    # at this branch's head, so the two revisions in flake.lock must agree.
+    # The sddf flake exposes only devShells. We use its source tree and mirror
+    # its llvm/clang toolchain choice (llvmPackages_18) for the driver builds.
     sddf = {
-      url = "git+https://github.com/au-ts/sddf?ref=refs/tags/0.7.0&rev=650ace5dba984f5d9c7dd1a005648ff7b40655f7";
+      url = "git+https://github.com/byzantine-systems/sddf?ref=chryso";
       inputs.nixpkgs.follows = "nixpkgs";
       # No zig-overlay follows: sddf 0.7.0 dropped that input, and overriding a
       # non-existent input is a warning now and an error in future nix.

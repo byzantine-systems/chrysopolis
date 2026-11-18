@@ -7,7 +7,7 @@ pub const runtime_contract_headers = [_][]const u8{
     "compat/pthread/runtime_tls_row.h", "compat/pthread/runtime_token_counter.h", "compat/pthread/runtime_wait.h",           "compat/syscall/runtime_futex_cmd.h",   "compat/syscall/runtime_syscall_handlers.h", "compat/syscall/runtime_syscalls.h",
     "compat/time/runtime_deadline.h",   "io/console/runtime_console.h",           "io/filesystem/runtime_fs.h",              "io/network/runtime_network.h",         "io/network/runtime_tcp_logic.h",            "io/network/runtime_tcp_state.h",
     "io/timer/runtime_timer.h",         "io/timer/runtime_timer_slot.h",          "restart/beam_restart_layout.h",           "restart/beam_snapshot_codec.h",        "restart/runtime_pd_restart.h",              "restart/runtime_pd_restart_parse.h",
-    "restart/runtime_restart.h",        "security/rng.h",                         "security/rng_select.h",                   "control/runtime_ctl_device.h",         "control/runtime_control_dev.h",
+    "restart/runtime_restart.h",        "security/rng.h",                         "security/rng_select.h",                   "control/runtime_ctl_device.h",         "control/runtime_control_dev.h",             "payload/runtime_boot_select.h",
 };
 
 pub fn addContractProbes(b: *std.Build, mod: *std.Build.Module, source: std.Build.LazyPath, flags: []const []const u8) void {

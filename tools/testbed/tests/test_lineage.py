@@ -105,7 +105,7 @@ def test_the_model_predicts_every_cut_can_break_its_success(
         for earlier in edited[:target]:
             model = advance(model, earlier)
         allowed = model.expect(step)
-        assert allowed.anything or allowed.outcomes & FAILURES, (hit, allowed)
+        assert allowed.anything or allowed.values & FAILURES, (hit, allowed)
 
 
 @given(run=runs())

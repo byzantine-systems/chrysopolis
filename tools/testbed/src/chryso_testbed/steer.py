@@ -17,6 +17,7 @@ from chryso_testbed.faults import (
     DRIVERS,
     FILES,
     KEPT,
+    Absorb,
     Arm,
     Corrupt,
     CrashPut,
@@ -24,24 +25,31 @@ from chryso_testbed.faults import (
     Driver,
     Fault,
     Get,
+    Look,
     Model,
+    Overwrite,
     Pause,
     Ping,
     Program,
     Put,
+    Remove,
+    Rename,
     Reset,
     Restart,
+    Rewant,
     Step,
     Unplug,
+    Want,
     trim,
 )
-from chryso_testbed.outcomes import GaveUp, Outcome, Restarted, Seed, Status
+from chryso_testbed.outcomes import Booted, Condition, GaveUp, Outcome, Restarted, Seed, Status
 
 MAX_STEPS: Final = 16
-# When several outcomes are allowed, look ahead as if things went well.
+# When several outcomes are allowed, look ahead as if things went well. Every
+# Status is listed, or a step allowed only an unlisted one has no nominal.
 PREFERENCE: Final[tuple[Status, ...]] = (
-    Status.OK, Status.PRESENT, Status.DIFFERS, Status.ENOENT, Status.GONE,
-    Status.UNREACHABLE, Status.EIO, Status.ERROR, Status.ABSENT,
+    Status.OK, Status.PRESENT, Status.DIFFERS, Status.ENOENT, Status.EEXIST, Status.GONE,
+    Status.UNASKED, Status.UNREACHABLE, Status.EIO, Status.ERROR, Status.ABSENT,
 )  # fmt: skip
 
 
@@ -50,11 +58,11 @@ def nominal(model: Model, step: Step) -> Outcome:
     allowed = model.expect(step)
     if allowed.anything:
         return Status.PRESENT if isinstance(step, Arm | Corrupt) else Status.OK
-    for outcome in allowed.outcomes:
-        if isinstance(outcome, Restarted | GaveUp | Seed):
+    for outcome in allowed.values:
+        if isinstance(outcome, Restarted | GaveUp | Seed | Condition | Booted):
             return outcome
     for status in PREFERENCE:
-        if status in allowed.outcomes:
+        if status in allowed.values:
             return status
     raise AssertionError(f"{step!r} allows nothing")
 
@@ -93,6 +101,22 @@ def _get(model: Model) -> st.SearchStrategy[Step]:
     return st.builds(Get, kind=st.just("get"), file=_file(model))
 
 
+def _overwrite(model: Model) -> st.SearchStrategy[Step]:
+    return st.builds(
+        Overwrite, kind=st.just("overwrite"), file=_file(model), seed=st.integers(0, 255)
+    )
+
+
+def _remove(model: Model) -> st.SearchStrategy[Step]:
+    return st.builds(Remove, kind=st.just("remove"), file=_file(model))
+
+
+def _rename(model: Model) -> st.SearchStrategy[Step]:
+    return st.builds(
+        Rename, kind=st.just("rename"), src=_file(model), dst=st.integers(0, FILES - 1)
+    )
+
+
 def _arm(model: Model, op: Literal["read", "write"] | None = None) -> st.SearchStrategy[Step]:
     ops = st.just(op) if op is not None else st.sampled_from(["read", "write"])
     return st.builds(
@@ -122,11 +146,13 @@ def _request(model: Model, drivers: list[Driver]) -> st.SearchStrategy[Step]:
 def enabled(model: Model) -> st.SearchStrategy[Step]:
     """A step that can matter from `model`. Workload first, so shrinking
     tends toward plain reads and writes."""
-    choices = [writes(model), _get(model), _arm(model), _corrupt(model)]
+    choices = [writes(model), _get(model), _overwrite(model), _remove(model), _rename(model)]
+    choices += [_arm(model), _corrupt(model)]
     if model.storage.armed is not None:
         choices.append(st.just(Disarm(kind="disarm")))
     if drivers := requestable(model):
         choices.append(_request(model, drivers))
+    choices += _orchestration(model)
     choices += [
         st.just(Ping(kind="ping")),
         st.builds(Unplug, kind=st.just("unplug"), ms=st.integers(0, 1500)),
@@ -135,6 +161,74 @@ def enabled(model: Model) -> st.SearchStrategy[Step]:
     if not model.storage.damaged:  # a damaged volume may not mount again
         choices += [st.just(Reset(kind="reset")), _crash_put(model)]
     return st.one_of(choices)
+
+
+RECOVERABLE: Final[tuple[Literal["blk", "eth"], ...]] = ("blk", "eth")
+
+
+def _look(model: Model) -> st.SearchStrategy[Step]:
+    return st.builds(Look, kind=st.just("look"), driver=st.sampled_from(DRIVERS))
+
+
+def _want(model: Model) -> st.SearchStrategy[Step]:
+    """A want of a driver a request can go to, flooded one time in four, or
+    now and then of a gone recoverable driver, which asks nothing."""
+    gone = [d for d in RECOVERABLE if not model.root.up(d)]
+    drivers = requestable(model) + gone
+    return st.builds(
+        Want,
+        kind=st.just("want"),
+        driver=st.sampled_from(drivers or list(RECOVERABLE)),
+        flood=st.sampled_from([False, False, False, True]),
+    )
+
+
+def _want_gone(model: Model) -> st.SearchStrategy[Step]:
+    """A want of a recoverable driver Root gave up on, which asks nothing."""
+    gone = [d for d in RECOVERABLE if not model.root.up(d)] or list(RECOVERABLE)
+    return st.builds(Want, kind=st.just("want"), driver=st.sampled_from(gone), flood=st.just(False))
+
+
+def _absorb(model: Model) -> st.SearchStrategy[Step]:
+    up = [d for d in RECOVERABLE if model.root.up(d)]
+    return st.builds(
+        Absorb, kind=st.just("absorb"), driver=st.sampled_from(up or list(RECOVERABLE))
+    )
+
+
+def _rewant(model: Model) -> st.SearchStrategy[Step]:
+    wanted = sorted(model.orch.wanted) or list(DRIVERS)
+    return st.builds(Rewant, kind=st.just("rewant"), driver=st.sampled_from(wanted))
+
+
+def _orchestration(model: Model) -> list[st.SearchStrategy[Step]]:
+    """The orchestrator's steps that can matter from `model`."""
+    choices = [_look(model)]
+    if requestable(model) or not all(model.root.up(d) for d in RECOVERABLE):
+        choices.append(_want(model))
+    if any(model.root.up(d) for d in RECOVERABLE):
+        choices.append(_absorb(model))
+    if model.orch.wanted:
+        choices.append(_rewant(model))
+    return choices
+
+
+def _in_window_look(model: Model) -> st.SearchStrategy[Step]:
+    """A look or want at a driver still recovering, so it lands in the window."""
+    recovering = [d for d in DRIVERS if model.root.recovering(d)]
+    if not recovering:
+        return _look(model)
+    return st.one_of(
+        st.builds(Look, kind=st.just("look"), driver=st.sampled_from(recovering)),
+        st.builds(
+            Want, kind=st.just("want"), driver=st.sampled_from(recovering), flood=st.just(False)
+        ),
+    )
+
+
+def _reset_or_look(model: Model) -> st.SearchStrategy[Step]:
+    """A reset, unless the volume is damaged and might not mount again."""
+    return _look(model) if model.storage.damaged else st.just(Reset(kind="reset"))
 
 
 def _crash_put(model: Model) -> st.SearchStrategy[Step]:
@@ -194,6 +288,23 @@ def reach(goal: Goal, toward: Toward, bound: int) -> Scenario:
                 step = draw(enabled(model) if mixed else toward(model))
                 steps.append(step)
                 model = advance(model, step)
+        return steps, model
+
+    return run
+
+
+def until(goal: Goal, toward: Toward) -> Scenario:
+    """Steps from `toward` alone until `goal` holds, at most the budget plus
+    one, which is enough for faults to drive any driver past its budget."""
+
+    def run(draw: st.DrawFn, model: Model) -> tuple[list[Step], Model]:
+        steps: list[Step] = []
+        for _ in range(model.root.budget + 1):
+            if goal(model):
+                break
+            step = draw(toward(model))
+            steps.append(step)
+            model = advance(model, step)
         return steps, model
 
     return run
@@ -266,6 +377,35 @@ def _workload(model: Model) -> st.SearchStrategy[Step]:
     return st.one_of(_get(model), writes(model))
 
 
+def free(model: Model) -> list[int]:
+    """Files a rename can take as its target."""
+    return [f for f in range(FILES) if model.storage.file(f).at == "absent"]
+
+
+def _moved(model: Model) -> st.SearchStrategy[Step]:
+    """A rename of a present file onto a free name, or a write that makes one."""
+    targets = free(model)
+
+    def rename(src: int) -> st.SearchStrategy[Step]:
+        dst = st.sampled_from([f for f in targets if f != src] or [src])
+        return st.builds(Rename, kind=st.just("rename"), src=st.just(src), dst=dst)
+
+    return _aimed(model, rename)
+
+
+def _removed(model: Model) -> st.SearchStrategy[Step]:
+    return _aimed(model, lambda f: st.just(Remove(kind="remove", file=f)))
+
+
+def _overwritten(model: Model) -> st.SearchStrategy[Step]:
+    return _aimed(
+        model,
+        lambda f: st.builds(
+            Overwrite, kind=st.just("overwrite"), file=st.just(f), seed=st.integers(0, 255)
+        ),
+    )
+
+
 def faults_to(drivers: tuple[Driver, ...], *, settle: bool = True) -> Toward:
     def toward(model: Model) -> st.SearchStrategy[Step]:
         live = [d for d in drivers if model.root.up(d)] or list(drivers)
@@ -315,7 +455,38 @@ SCENARIOS: Final[dict[str, Scenario]] = {
         _repeat(then(_workload), 2),
         then(faults_to(("blk",))),
     ),
+    # A latent read error that whole-sector overwrites must step around.
+    "latent-overwrite": chain(
+        reach(has_file, writes, 4),
+        then(_read_fault_on_data),
+        then(_overwritten),
+        _repeat(then(_workload), 2),
+    ),
+    # A latent error carried by a rename, then a remove and a reset.
+    "rename-remove": chain(
+        reach(has_file, writes, 4),
+        then(_read_fault_on_data),
+        then(_moved),
+        _repeat(then(_workload), 2),
+        then(_removed),
+        then(lambda _: st.just(Reset(kind="reset"))),
+        _repeat(then(_workload), 2),
+    ),
     "mixed": anything(12),
+    # The orchestrator's parts, sized to fit MAX_STEPS at the shipped budget
+    # of 8: a want, a look or want inside a recovery window, a fault inside a
+    # want, eth driven past its budget by faults alone and then wanted, and a
+    # reset with the rewant after it.
+    "orchestrate": chain(
+        then(_want),
+        then(faults_to(RECOVERABLE, settle=False)),
+        then(_in_window_look),
+        then(_absorb),
+        until(gone("eth"), faults_to(("eth",))),
+        then(_want_gone),
+        then(_reset_or_look),
+        then(_rewant),
+    ),
 }
 
 

@@ -26,6 +26,8 @@
         "lifecycle-failure-image"
         "spec-commit-image"
         "command-image"
+        "orch-image"
+        "orch-image-nc"
         "fallback-image"
         "fallback-nomap-image"
       ];
@@ -34,6 +36,10 @@
         builtins.toJSON {
           images = lib.genAttrs images (name: "${config.packages.${name}}");
           disk = "${config.packages.disk}";
+          disks = {
+            nc-gone = "${config.packages.disk-nc-gone}";
+            nc-twice = "${config.packages.disk-nc-twice}";
+          };
           abi = "${../interfaces/generated/system-abi.json}";
           qemu = "${pkgs.qemu}/bin/qemu-system-aarch64";
           qemu_img = "${pkgs.qemu}/bin/qemu-img";
@@ -48,15 +54,23 @@
       # One derivation per group. Scenarios run concurrently up to the build's
       # cores. Reports land in the build directory first, so a failed run
       # kept with --keep-failed still has its consoles. Then they move to $out.
+      # fsck.fat checks the crash states the crash smokes replay.
       group =
         name:
-        pkgs.runCommand "chrysopolis-testbed-${name}" { nativeBuildInputs = [ runner ]; } ''
-          jobs=''${NIX_BUILD_CORES:-1}
-          [ "$jobs" -gt 0 ] || jobs=$(nproc)
-          reports="$NIX_BUILD_TOP/reports"
-          chryso-testbed run --manifest ${manifest} --group ${name} --out "$reports" --jobs "$jobs"
-          cp -r "$reports" $out
-        '';
+        pkgs.runCommand "chrysopolis-testbed-${name}"
+          {
+            nativeBuildInputs = [
+              runner
+              pkgs.dosfstools
+            ];
+          }
+          ''
+            jobs=''${NIX_BUILD_CORES:-1}
+            [ "$jobs" -gt 0 ] || jobs=$(nproc)
+            reports="$NIX_BUILD_TOP/reports"
+            chryso-testbed run --manifest ${manifest} --group ${name} --out "$reports" --jobs "$jobs"
+            cp -r "$reports" $out
+          '';
       # Lint, strict types and tests. The Python reader must match every
       # Erlang vector.
       unit = pkgs.stdenvNoCC.mkDerivation {
@@ -93,6 +107,7 @@
         dontConfigure = true;
         dontInstall = true;
         env.CHRYSO_FRAME_VECTORS = "${config.packages.frame-vectors}";
+        env.CHRYSO_CONDITION_VECTORS = "${config.packages.condition-vectors}";
         buildPhase = ''
           runHook preBuild
           export HOME=$TMPDIR PYTHONPATH=$PWD/src
@@ -114,7 +129,10 @@
         program = lib.getExe (
           pkgs.writeShellApplication {
             name = "chryso-testbed";
-            runtimeInputs = [ runner ];
+            runtimeInputs = [
+              runner
+              pkgs.dosfstools
+            ];
             text = ''
               export CHRYSO_TESTBED_MANIFEST=''${CHRYSO_TESTBED_MANIFEST:-${manifest}}
               exec chryso-testbed "$@"
@@ -180,6 +198,38 @@
           python.pkgs.typer
         ];
         pythonImportsCheck = [ "chryso_testbed" ];
+      };
+
+      # Driver conditions from apps/chryso_core's classifier, for the fault
+      # model's table. Generated twice and compared, as the frame vectors.
+      packages.condition-vectors = pkgs.stdenvNoCC.mkDerivation {
+        name = "chrysopolis-condition-vectors";
+        src = pkgs.lib.fileset.toSource {
+          root = ../apps/chryso_core;
+          fileset = pkgs.lib.fileset.unions [
+            ../apps/chryso_core/src/chryso_condition.erl
+            ../apps/chryso_core/src/chryso_observe.erl
+            ../apps/chryso_core/test/chryso_condition_vectors.erl
+          ];
+        };
+        nativeBuildInputs = [ pkgs.beamPackages.erlang ];
+        dontConfigure = true;
+        buildPhase = ''
+          runHook preBuild
+          mkdir ebin first second
+          erlc -o ebin +deterministic +warnings_as_errors \
+            src/chryso_observe.erl src/chryso_condition.erl test/chryso_condition_vectors.erl
+          erl -noshell -pa ebin -eval 'ok = chryso_condition_vectors:write("first"), halt().'
+          (cd second && umask 077 && TZ=Pacific/Kiritimati \
+            erl -noshell -pa ../ebin -eval 'ok = chryso_condition_vectors:write("."), halt().')
+          diff -r first second
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          cp -r first $out
+          runHook postInstall
+        '';
       };
 
       # Console-frame vectors from the Erlang reader. Generated twice and
