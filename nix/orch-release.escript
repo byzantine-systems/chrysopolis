@@ -206,8 +206,11 @@ resolves(Fun) when is_function(Fun) ->
 resolves(_) ->
     false.
 
+%% k prints map keys in term order. Without it a small map's atom keys follow
+%% atom creation order, which varies between runs, and the file is not
+%% reproducible.
 write_term(Path, Term) ->
-    file:write_file(Path, io_lib:format("~tp.~n", [Term])).
+    file:write_file(Path, io_lib:format("~tkp.~n", [Term])).
 
 consult_one(Path) ->
     case file:consult(Path) of

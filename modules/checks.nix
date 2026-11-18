@@ -107,8 +107,11 @@
               mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
               ln -s ${abiToolDeps} "$ZIG_GLOBAL_CACHE_DIR"/p
               cd tools/abi
-              zig build test --summary all
-              zig build --prefix $out -Doptimize=ReleaseSafe
+              # Other derivations run gen-abi, possibly on another machine
+              # through the store cache, so it is built for the baseline CPU,
+              # never the builder's native one.
+              zig build test --summary all -Dcpu=baseline
+              zig build --prefix $out -Doptimize=ReleaseSafe -Dcpu=baseline
               runHook postBuild
             '';
             dontInstall = true;
