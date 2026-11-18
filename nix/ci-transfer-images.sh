@@ -17,6 +17,8 @@ attrs=(
   .#test-image
   .#default
   .#disk
+  .#disk-nc-gone
+  .#disk-nc-twice
   .#restart-image
   .#budget-decay-image
   .#cothread-probe-image
