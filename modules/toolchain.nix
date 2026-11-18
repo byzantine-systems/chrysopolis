@@ -54,6 +54,11 @@
       # symlink there. Copying the real binary over the symlink restores
       # that search path. We reproduce the wrapper so the driver/libc
       # derivations compile bare-metal exactly as upstream does.
+      # The one Zig compiler. Every consumer uses it, the formatter and the
+      # dev shell included, since a newer `zig fmt` rewrites builtins 0.15.2
+      # cannot compile.
+      zig = inputs.zig2nix.packages.${system}."zig-0_15_2";
+
       llvm = pkgs.llvmPackages_18;
       clangComplete = pkgs.symlinkJoin {
         name = "clang-complete";
@@ -70,7 +75,7 @@
         # The OTP release directory (/releases/<n>) on the disk. One value for
         # beam_server's boot table and mkDisk, from the OTP ERTS is built from.
         otpRelease = pkgs.lib.versions.major pkgs.beamPackages.erlang.version;
-        inherit microkitSdk llvm;
+        inherit microkitSdk llvm zig;
         boardDir = "${microkitSdk}/board/${microkitBoard}/${microkitConfig}";
 
         # musl-targeted cross suite: musl headers provide the syscall
@@ -97,9 +102,7 @@
         # the Nix-fetched package cache `zig build` resolves offline.
         # (Raw `inputs` + system: zig-env is a custom output shape that
         # flake-parts' inputs' transposition does not cover.)
-        zigEnv = inputs.zig2nix.zig-env.${system} {
-          zig = inputs.zig2nix.packages.${system}."zig-0_15_2";
-        };
+        zigEnv = inputs.zig2nix.zig-env.${system} { inherit zig; };
       };
     };
 }

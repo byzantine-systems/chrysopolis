@@ -11,7 +11,6 @@
   perSystem =
     {
       pkgs,
-      inputs',
       config,
       chryso,
       ...
@@ -69,7 +68,7 @@
           nativeBuildInputs = chryso.lionsToolchain ++ [
             pkgs.bash
             pkgs.util-linux
-            inputs'.zig2nix.packages."zig-0_15_2"
+            chryso.zig
           ];
           hardeningDisable = [ "all" ];
           # The Microkit tool patches setvar_vaddr (beam_heap_start) and
@@ -380,7 +379,7 @@
               abiGeneratorFiles
             ];
           };
-          nativeBuildInputs = [ inputs'.zig2nix.packages."zig-0_15_2" ];
+          nativeBuildInputs = [ chryso.zig ];
           dontConfigure = true;
           dontInstall = true;
           dontFixup = true;

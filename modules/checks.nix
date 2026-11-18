@@ -6,7 +6,6 @@
   perSystem =
     {
       pkgs,
-      inputs',
       config,
       chryso,
       ...
@@ -100,7 +99,7 @@
           pkgs.stdenvNoCC.mkDerivation {
             name = "chrysopolis-abi-tool";
             src = source;
-            nativeBuildInputs = [ inputs'.zig2nix.packages."zig-0_15_2" ];
+            nativeBuildInputs = [ chryso.zig ];
             buildPhase = ''
               runHook preBuild
               export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
