@@ -5,6 +5,7 @@
   perSystem =
     {
       pkgs,
+      inputs',
       config,
       chryso,
       ...
@@ -21,7 +22,10 @@
         programs.nixfmt.enable = true;
         programs.ruff-check.enable = true;
         programs.ruff-format.enable = true;
-        programs.zig.enable = true;
+        programs.zig = {
+          enable = true;
+          package = chryso.zig;
+        };
       };
 
       devenv.shells.default = {
@@ -56,8 +60,11 @@
           enable = true;
         };
 
+        # The build's compiler and its ZLS, not nixpkgs' default Zig.
         languages.zig = {
           enable = true;
+          package = chryso.zig;
+          lsp.package = inputs'.zig2nix.packages."zls-0_15_2";
         };
 
         scripts.run-sel4.exec = ''
